@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vs-vision-bot"
+version = "2.0.0"
+description = "Vampire Survivors vision bot for Steam/Linux (WASD + xdotool)"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Lucyfur Moonbananas" }]
+dependencies = [
+    "opencv-python>=4.8",
+    "numpy>=1.24",
+    "mss>=9.0.1",
+    "pynput>=1.7.6",
+]
+
+[project.optional-dependencies]
+torch = ["torch"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+vs-vision-bot = "vs_vision_bot.main:main"
+
+[tool.setuptools.packages.find]
+include = ["vs_vision_bot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
