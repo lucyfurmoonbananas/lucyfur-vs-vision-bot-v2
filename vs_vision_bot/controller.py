@@ -6,7 +6,7 @@ import atexit
 import threading
 from collections import deque
 
-from vs_vision_bot.config import ALL_MOVE_KEYS, Config
+from vs_vision_bot.config import ALL_MOVE_KEYS, MOVE_SCHEMES, Config
 from vs_vision_bot.input_backend import InputBackend
 
 
@@ -79,6 +79,18 @@ class MoveController:
         with self._lock:
             self._held.clear()
 
+    def set_move_scheme(self, scheme: str) -> None:
+        """Switch WASD/arrows after lifting both schemes so leftovers cannot fight."""
+        scheme = scheme.lower().strip()
+        if scheme in ("arrow", "arrow_keys"):
+            scheme = "arrows"
+        if scheme not in MOVE_SCHEMES:
+            raise ValueError(f"move scheme must be 'wasd' or 'arrows', got {scheme!r}")
+        if scheme == self.cfg.move_scheme:
+            return
+        self.release_and_clear()
+        self.cfg.move_scheme = scheme
+
     def sync_keys(self, keys: tuple[str, ...]) -> None:
         """Press/release the delta between the current chord and ``keys``."""
         wanted = set(keys)
@@ -86,12 +98,25 @@ class MoveController:
             if self._paused or self._shutdown:
                 wanted = set()
             current = set(self._held)
+        # Refocus before keyup as well as keydown. Idle ticks used to skip
+        # activate, so Model Vision could eat the release and leave a hold.
+        if current != wanted:
+            self._ensure_game_ready()
         for key in sorted(current - wanted):
             self.backend.keyup(key)
         for key in sorted(wanted - current):
             self.backend.keydown(key)
+        rerelease = False
         with self._lock:
-            self._held = wanted
+            if self._paused or self._shutdown:
+                # Pause won the race after we may have pressed keys. Do not
+                # record those holds; lift everything again.
+                self._held.clear()
+                rerelease = True
+            else:
+                self._held = wanted
+        if rerelease:
+            self.backend.release_all_move_keys()
 
     def tick(self) -> None:
         """Apply the next queued chord, or idle if paused/empty."""
@@ -102,8 +127,6 @@ class MoveController:
                 keys = self._queue.popleft()
             else:
                 keys = tuple(self._held)
-        if keys:
-            self._ensure_game_ready()
         self.sync_keys(keys)
 
     def hold_current(self, seconds: float) -> bool:

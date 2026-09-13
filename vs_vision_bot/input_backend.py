@@ -30,6 +30,12 @@ class InputBackend(ABC):
 
     def release_all_move_keys(self) -> None:
         """Always lift WASD and arrows so a scheme switch cannot leave a stuck key."""
+        # XTest keyup follows the focused window. Refocus first; otherwise
+        # leftover Left/Right (or WASD) stay down in the game.
+        try:
+            self.refocus_if_needed()
+        except Exception as exc:  # noqa: BLE001 — still attempt the keyups
+            print(f"[input] refocus before key release failed: {exc}", file=sys.stderr)
         for key in ALL_MOVE_KEYS:
             try:
                 self.keyup(key)
