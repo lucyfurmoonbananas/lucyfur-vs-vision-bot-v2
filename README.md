@@ -83,12 +83,13 @@ and press `q`.
 ## Steam / Linux focus tips
 
 - Launch the bot **after** Vampire Survivors is on the desktop.
-- The bot activates the window titled `Vampire Survivors` **once** before the
-  first move (`xdotool windowactivate --sync`). Override with
-  `VS_WINDOW_NAME` if your title differs.
-- OpenCV Model Vision can steal focus. Movement is still sent with xdotool;
-  if keys stop landing, click the game once or unpause again — the backend
-  re-activates the game window when it is not focused.
+- The bot activates the window titled `Vampire Survivors` before sending keys
+  (`xdotool windowactivate --sync`), and retries if the first activate fails.
+  Override with `VS_WINDOW_NAME` if your title differs.
+- Key events are **global XTest** (`xdotool keydown` / `keyup`, no `--window`).
+  Proton often ignores window-targeted keys. The bot re-activates the game
+  before press and release so Model Vision cannot eat a `keyup`. If keys still
+  miss, click the game once or unpause again.
 - **Level-up and pause cards** block walking. The bot holds still when it sees
   those layouts. Press `p` if you want the whole loop paused while you pick a
   weapon.

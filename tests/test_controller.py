@@ -237,5 +237,25 @@ def test_release_all_move_keys_refocuses():
     assert set(ALL_MOVE_KEYS) <= released
 
 
+def test_failed_activate_is_retried_and_not_marked_ready():
+    class FlakyActivate(RecordingBackend):
+        def activate_game_once(self) -> bool:
+            self.activate_calls += 1
+            return self.activate_calls >= 2
+
+    backend = FlakyActivate()
+    mover = MoveController(backend, Config(dry_run=False, demo=False))
+    mover.set_paused(False)
+    mover.set_intent(("w",))
+    mover.tick()
+    assert mover._activated is False
+    assert backend.activate_calls == 1
+    # Same chord must still retry activate — do not skip because keys match.
+    mover.set_intent(("w",))
+    mover.tick()
+    assert backend.activate_calls == 2
+    assert mover._activated is True
+
+
 def test_assert_release_covers_both_schemes():
     assert_release_covers_both_schemes()

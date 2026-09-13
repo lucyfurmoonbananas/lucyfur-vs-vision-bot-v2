@@ -31,6 +31,7 @@ class MoveController:
         self._hold_interrupt.set()
         self._shutdown = False
         self._activated = False
+        self._sync_gen = 0
         atexit.register(self.release_and_clear)
 
     @property
@@ -52,6 +53,8 @@ class MoveController:
         with self._lock:
             was = self._paused
             self._paused = paused
+            if paused and not was:
+                self._sync_gen += 1
         if paused and not was:
             self._hold_interrupt.set()
             self.release_and_clear()
@@ -95,12 +98,16 @@ class MoveController:
         """Press/release the delta between the current chord and ``keys``."""
         wanted = set(keys)
         with self._lock:
+            gen = self._sync_gen
             if self._paused or self._shutdown:
                 wanted = set()
             current = set(self._held)
+            live = not (self.cfg.dry_run or self.cfg.demo)
+            needs_focus = current != wanted or (live and not self._activated)
         # Refocus before keyup as well as keydown. Idle ticks used to skip
         # activate, so Model Vision could eat the release and leave a hold.
-        if current != wanted:
+        # Also retry activate until it succeeds — do not remember a failed first try.
+        if needs_focus:
             self._ensure_game_ready()
         for key in sorted(current - wanted):
             self.backend.keyup(key)
@@ -108,7 +115,7 @@ class MoveController:
             self.backend.keydown(key)
         rerelease = False
         with self._lock:
-            if self._paused or self._shutdown:
+            if self._paused or self._shutdown or self._sync_gen != gen:
                 # Pause won the race after we may have pressed keys. Do not
                 # record those holds; lift everything again.
                 self._held.clear()
@@ -142,19 +149,21 @@ class MoveController:
             self.release_and_clear()
         return interrupted
 
-    def _ensure_game_ready(self) -> None:
+    def _ensure_game_ready(self) -> bool:
         if self.cfg.dry_run or self.cfg.demo:
-            return
+            return True
         if not self._activated:
-            self.backend.activate_game_once()
-            self._activated = True
-            return
-        self.backend.refocus_if_needed()
+            # Only remember success. A failed first activate must retry;
+            # otherwise the first chord is sent with no windowactivate.
+            self._activated = bool(self.backend.activate_game_once())
+            return self._activated
+        return bool(self.backend.refocus_if_needed())
 
     def shutdown(self) -> None:
         with self._lock:
             self._shutdown = True
             self._paused = True
+            self._sync_gen += 1
         self._hold_interrupt.set()
         self.release_and_clear()
 

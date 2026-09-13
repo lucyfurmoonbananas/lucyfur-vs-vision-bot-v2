@@ -142,6 +142,8 @@ class XdotoolBackend(InputBackend):
         self._key_event("keyup", key)
 
     def _key_event(self, action: str, key: str) -> None:
+        # Global XTest (no --window). Proton often ignores window-targeted
+        # key events; we activate/refocus first so the focused window is the game.
         xname = XDOTOOL_KEY_NAMES.get(key, key)
         result = _run_xdotool([action, xname])
         if result.returncode != 0:

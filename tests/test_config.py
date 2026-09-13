@@ -62,6 +62,17 @@ def test_cli_keys_override_env(monkeypatch):
     assert cfg.move_scheme == "arrows"
 
 
+def test_cli_keys_arrows_parity_with_env(monkeypatch):
+    monkeypatch.delenv("VS_MOVE_KEYS", raising=False)
+    cli = apply_cli(Config.from_env(), build_parser().parse_args(["--keys", "arrows"]))
+    monkeypatch.setenv("VS_MOVE_KEYS", "arrows")
+    env = Config.from_env()
+    assert cli.move_scheme == env.move_scheme == "arrows"
+    for vector, keys in ARROW_VECTORS.items():
+        assert cli.keys_for_vector(vector) == keys
+        assert env.keys_for_vector(vector) == keys
+
+
 def test_cleanup_key_set_covers_wasd_and_arrows():
     assert set(ALL_MOVE_KEYS) == {"w", "a", "s", "d", "up", "down", "left", "right"}
 

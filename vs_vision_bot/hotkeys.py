@@ -29,23 +29,28 @@ class CommandBus:
         self.pause_event.set()
         self._clock = clock
         self._toggle_debounce_s = toggle_debounce_s
-        self._last_toggle_at: float | None = None
+        self._last_claim_at: dict[str, float] = {}
+
+    def _claim(self, action: str) -> bool:
+        """True once per keypress; pynput + waitKey (and stdin) share this gate."""
+        now = self._clock()
+        last = self._last_claim_at.get(action)
+        if last is not None and (now - last) < self._toggle_debounce_s:
+            return False
+        self._last_claim_at[action] = now
+        return True
 
     def request_quit(self) -> None:
         with self._lock:
+            self._claim("quit")
             self.quit = True
             self.paused = True
         self.pause_event.set()
 
     def toggle_pause(self) -> bool:
         with self._lock:
-            now = self._clock()
-            if (
-                self._last_toggle_at is not None
-                and (now - self._last_toggle_at) < self._toggle_debounce_s
-            ):
+            if not self._claim("pause"):
                 return self.paused
-            self._last_toggle_at = now
             self.paused = not self.paused
             paused = self.paused
         if paused:
@@ -58,6 +63,8 @@ class CommandBus:
 
     def request_align(self) -> None:
         with self._lock:
+            if not self._claim("align"):
+                return
             self.align = True
         print("[hotkey] align capture to mouse")
 
