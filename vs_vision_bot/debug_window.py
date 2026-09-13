@@ -87,8 +87,6 @@ class DebugWindow:
         )
 
         cv2.imshow(WINDOW_NAME, vis)
-        if self._created:
-            cv2.moveWindow(WINDOW_NAME, self.origin[0], self.origin[1])
 
     def poll_key(self) -> int:
         return cv2.waitKey(1) & 0xFF

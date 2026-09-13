@@ -4,30 +4,53 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 from typing import Callable
 
 from pynput import keyboard
+
+# pynput + OpenCV waitKey (and stdin 'p') can see the same keystroke.
+_TOGGLE_DEBOUNCE_S = 0.2
 
 
 class CommandBus:
     """Thread-safe flags consumed by the main loop."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.monotonic,
+        toggle_debounce_s: float = _TOGGLE_DEBOUNCE_S,
+    ) -> None:
         self._lock = threading.Lock()
         self.paused = True
         self.quit = False
         self.align = False
         self.pause_event = threading.Event()
         self.pause_event.set()
+        self._clock = clock
+        self._toggle_debounce_s = toggle_debounce_s
+        self._last_claim_at: dict[str, float] = {}
+
+    def _claim(self, action: str) -> bool:
+        """True once per keypress; pynput + waitKey (and stdin) share this gate."""
+        now = self._clock()
+        last = self._last_claim_at.get(action)
+        if last is not None and (now - last) < self._toggle_debounce_s:
+            return False
+        self._last_claim_at[action] = now
+        return True
 
     def request_quit(self) -> None:
         with self._lock:
+            self._claim("quit")
             self.quit = True
             self.paused = True
         self.pause_event.set()
 
     def toggle_pause(self) -> bool:
         with self._lock:
+            if not self._claim("pause"):
+                return self.paused
             self.paused = not self.paused
             paused = self.paused
         if paused:
@@ -40,6 +63,8 @@ class CommandBus:
 
     def request_align(self) -> None:
         with self._lock:
+            if not self._claim("align"):
+                return
             self.align = True
         print("[hotkey] align capture to mouse")
 
@@ -91,6 +116,7 @@ class HotkeyService:
     def handle_waitkey(self, key_code: int) -> None:
         if key_code in (27,):  # ESC
             self.bus.request_quit()
+            self.on_pause_change(True)
             return
         if key_code in (ord("p"), ord("P")):
             paused = self.bus.toggle_pause()
@@ -102,6 +128,7 @@ class HotkeyService:
     def _on_global_press(self, key: keyboard.Key | keyboard.KeyCode) -> None:
         if key == keyboard.Key.esc:
             self.bus.request_quit()
+            self.on_pause_change(True)
             return
         char = getattr(key, "char", None)
         if char in ("p", "P"):
@@ -126,3 +153,4 @@ class HotkeyService:
                 self.bus.request_align()
             elif token in {"quit", "exit", "esc"}:
                 self.bus.request_quit()
+                self.on_pause_change(True)

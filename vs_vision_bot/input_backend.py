@@ -30,6 +30,12 @@ class InputBackend(ABC):
 
     def release_all_move_keys(self) -> None:
         """Always lift WASD and arrows so a scheme switch cannot leave a stuck key."""
+        # XTest keyup follows the focused window. Refocus first; otherwise
+        # leftover Left/Right (or WASD) stay down in the game.
+        try:
+            self.refocus_if_needed()
+        except Exception as exc:  # noqa: BLE001 — still attempt the keyups
+            print(f"[input] refocus before key release failed: {exc}", file=sys.stderr)
         for key in ALL_MOVE_KEYS:
             try:
                 self.keyup(key)
@@ -136,6 +142,8 @@ class XdotoolBackend(InputBackend):
         self._key_event("keyup", key)
 
     def _key_event(self, action: str, key: str) -> None:
+        # Global XTest (no --window). Proton often ignores window-targeted
+        # key events; we activate/refocus first so the focused window is the game.
         xname = XDOTOOL_KEY_NAMES.get(key, key)
         result = _run_xdotool([action, xname])
         if result.returncode != 0:
