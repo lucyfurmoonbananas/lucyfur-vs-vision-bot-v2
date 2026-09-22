@@ -6,7 +6,6 @@ import shutil
 import subprocess
 import sys
 from abc import ABC, abstractmethod
-from typing import Iterable
 
 from vs_vision_bot.config import ALL_MOVE_KEYS, XDOTOOL_KEY_NAMES, Config
 
@@ -229,7 +228,3 @@ def screen_size() -> tuple[int, int]:
     if result.returncode == 0 and len(parts) >= 2:
         return int(parts[0]), int(parts[1])
     return 1920, 1080
-
-
-def iter_key_names(keys: Iterable[str]) -> tuple[str, ...]:
-    return tuple(keys)

@@ -6,7 +6,7 @@ import atexit
 import threading
 from collections import deque
 
-from vs_vision_bot.config import ALL_MOVE_KEYS, MOVE_SCHEMES, Config
+from vs_vision_bot.config import Config
 from vs_vision_bot.input_backend import InputBackend
 
 
@@ -70,10 +70,6 @@ class MoveController:
             self._queue.clear()
             self._queue.append(tuple(keys))
 
-    def clear_queue(self) -> None:
-        with self._lock:
-            self._queue.clear()
-
     def release_and_clear(self) -> None:
         """Clear intents and lift every movement key. Safe to call from any thread."""
         with self._lock:
@@ -81,18 +77,6 @@ class MoveController:
         self.backend.release_all_move_keys()
         with self._lock:
             self._held.clear()
-
-    def set_move_scheme(self, scheme: str) -> None:
-        """Switch WASD/arrows after lifting both schemes so leftovers cannot fight."""
-        scheme = scheme.lower().strip()
-        if scheme in ("arrow", "arrow_keys"):
-            scheme = "arrows"
-        if scheme not in MOVE_SCHEMES:
-            raise ValueError(f"move scheme must be 'wasd' or 'arrows', got {scheme!r}")
-        if scheme == self.cfg.move_scheme:
-            return
-        self.release_and_clear()
-        self.cfg.move_scheme = scheme
 
     def sync_keys(self, keys: tuple[str, ...]) -> None:
         """Press/release the delta between the current chord and ``keys``."""
@@ -173,8 +157,3 @@ class MoveController:
             f"backend={self.backend.name} scheme={self.cfg.move_scheme} "
             f"held={held} queue={self.queue_size}"
         )
-
-
-def assert_release_covers_both_schemes() -> None:
-    """Sanity helper used by tests: cleanup always includes WASD and arrows."""
-    assert set(ALL_MOVE_KEYS) == {"w", "a", "s", "d", "up", "down", "left", "right"}
