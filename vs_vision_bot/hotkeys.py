@@ -25,8 +25,6 @@ class CommandBus:
         self.paused = True
         self.quit = False
         self.align = False
-        self.pause_event = threading.Event()
-        self.pause_event.set()
         self._clock = clock
         self._toggle_debounce_s = toggle_debounce_s
         self._last_claim_at: dict[str, float] = {}
@@ -42,10 +40,8 @@ class CommandBus:
 
     def request_quit(self) -> None:
         with self._lock:
-            self._claim("quit")
             self.quit = True
             self.paused = True
-        self.pause_event.set()
 
     def toggle_pause(self) -> bool:
         with self._lock:
@@ -53,10 +49,6 @@ class CommandBus:
                 return self.paused
             self.paused = not self.paused
             paused = self.paused
-        if paused:
-            self.pause_event.set()
-        else:
-            self.pause_event.clear()
         state = "PAUSED" if paused else "RUNNING"
         print(f"[hotkey] {state}")
         return paused

@@ -3,8 +3,7 @@ A clean Python bot for **Vampire Survivors** on Steam/Linux. It watches a captur
 region, shows a small parked **Model Vision** debug window, pathfinds away from
 detected monsters, and steers the character with **WASD** through **xdotool**.
 
-This is a new tree, not a patch of the old arrow-key fork. pynput is an optional
-fallback only. Arrow keys are an optional fallback only.
+pynput is an optional fallback only. Arrow keys are an optional fallback only.
 
 ## Defaults (do not invert these)
 
@@ -31,13 +30,19 @@ cd lucyfur-vs-vision-bot-v2   # or whatever you named the checkout
 
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[dev]"
 ```
 
-Optional TorchScript detector (only if you have a model file):
+`pyproject.toml` is the only dependency manifest. The `[dev]` extra adds pytest
+on top of the runtime packages (OpenCV, NumPy, mss, pynput).
+
+Optional TorchScript detector (only if you have a model file). The `[torch]`
+extra is defined in `pyproject.toml`:
 
 ```bash
-pip install torch
+pip install -e ".[torch]"
+# runtime, tests, and the model together:
+pip install -e ".[dev,torch]"
 export VS_MODEL_PATH=/path/to/model.pt
 ```
 
@@ -53,6 +58,7 @@ shell that launches the bot, then start Steam / Vampire Survivors on that displa
 export DISPLAY=:6
 source .venv/bin/activate
 ./run.sh
+# or, after the editable install: vs-vision-bot
 # or: python -m vs_vision_bot
 ```
 
@@ -144,18 +150,12 @@ vs_vision_bot/
   debug_window.py    parked Model Vision overlay
   hotkeys.py         global + waitKey + stdin
 run.sh
-requirements.txt
+pyproject.toml
 ```
 
 ## Tests
 
 ```bash
 source .venv/bin/activate
-python -m pytest
+pytest -q
 ```
-
-## Publish note
-
-This Origin tree is the source of truth for the rewrite. Mirror it to GitHub
-under **lucyfurmoonbananas** as `lucyfur-vs-vision-bot-v2` (or similar) when you
-are ready. No GitHub credentials are stored here.

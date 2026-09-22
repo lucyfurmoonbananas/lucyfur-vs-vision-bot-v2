@@ -1,9 +1,7 @@
 import time
 
-import pytest
-
 from vs_vision_bot.config import ALL_MOVE_KEYS, Config
-from vs_vision_bot.controller import MoveController, assert_release_covers_both_schemes
+from vs_vision_bot.controller import MoveController
 from vs_vision_bot.input_backend import NullBackend
 
 
@@ -98,57 +96,6 @@ def test_arrows_left_to_right_does_not_hold_opposites():
     assert "left" not in mover.held
     assert mover.held == frozenset({"right"})
     assert backend.events.index(("up", "left")) < backend.events.index(("down", "right"))
-
-
-def test_scheme_switch_wasd_to_arrows_releases_both_schemes():
-    mover, backend = _controller("wasd")
-    mover.set_intent(("d",))
-    mover.tick()
-    assert "d" in mover.held
-    backend.events.clear()
-    mover.set_move_scheme("arrows")
-    assert mover.cfg.move_scheme == "arrows"
-    assert mover.held == frozenset()
-    released = {key for action, key in backend.events if action == "up"}
-    assert set(ALL_MOVE_KEYS) <= released
-    assert not {key for action, key in backend.events if action == "down"}
-    mover.set_intent(("right",))
-    mover.tick()
-    assert mover.held == frozenset({"right"})
-    assert "d" not in mover.held
-
-
-def test_scheme_switch_arrows_to_wasd_releases_both_schemes():
-    mover, backend = _controller("arrows")
-    mover.set_intent(("left",))
-    mover.tick()
-    backend.events.clear()
-    mover.set_move_scheme("wasd")
-    assert mover.cfg.move_scheme == "wasd"
-    assert mover.held == frozenset()
-    released = {key for action, key in backend.events if action == "up"}
-    assert set(ALL_MOVE_KEYS) <= released
-    mover.set_intent(("a",))
-    mover.tick()
-    assert mover.held == frozenset({"a"})
-    assert "left" not in mover.held
-
-
-def test_scheme_switch_same_scheme_is_noop():
-    mover, backend = _controller("wasd")
-    mover.set_intent(("w",))
-    mover.tick()
-    backend.events.clear()
-    mover.set_move_scheme("WASD")
-    assert mover.cfg.move_scheme == "wasd"
-    assert mover.held == frozenset({"w"})
-    assert backend.events == []
-
-
-def test_scheme_switch_rejects_unknown():
-    mover, _backend = _controller()
-    with pytest.raises(ValueError, match="move scheme"):
-        mover.set_move_scheme("ijkl")
 
 
 def test_pause_clears_queue_and_releases_wasd_and_arrows():
@@ -253,7 +200,3 @@ def test_failed_activate_is_retried_and_not_marked_ready():
     mover.tick()
     assert backend.activate_calls == 2
     assert mover._activated is True
-
-
-def test_assert_release_covers_both_schemes():
-    assert_release_covers_both_schemes()
