@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 MOVE_SCHEMES = ("wasd", "arrows")
@@ -95,8 +95,6 @@ class Config:
     dry_run: bool = False
     demo: bool = False
 
-    extra: dict[str, str] = field(default_factory=dict)
-
     @classmethod
     def from_env(cls) -> Config:
         scheme = _env_str("VS_MOVE_KEYS", "wasd").lower()
@@ -152,15 +150,6 @@ class Config:
     @property
     def vectors(self) -> dict[tuple[int, int], tuple[str, ...]]:
         return ARROW_VECTORS if self.move_scheme == "arrows" else WASD_VECTORS
-
-    @property
-    def capture_region(self) -> dict[str, int]:
-        return {
-            "left": self.capture_x,
-            "top": self.capture_y,
-            "width": self.capture_w,
-            "height": self.capture_h,
-        }
 
     def keys_for_vector(self, vector: tuple[int, int]) -> tuple[str, ...]:
         return self.vectors.get(vector, ())
