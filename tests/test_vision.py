@@ -5,11 +5,11 @@ from vs_vision_bot.vision import detect_level_up_menu, detect_threat_blobs, draw
 
 
 def test_synthetic_arena_finds_monsters_away_from_player():
-    frame = draw_synthetic_arena(960, 540, monsters=[(700, 200), (180, 400)])
+    planted = [(700, 200), (180, 400)]
+    frame = draw_synthetic_arena(960, 540, monsters=planted)
     cfg = Config()
     blobs = detect_threat_blobs(frame, (480, 270), cfg)
-    assert len(blobs) >= 1
-    assert all((b.cx - 480) ** 2 + (b.cy - 270) ** 2 > cfg.player_radius**2 for b in blobs)
+    assert {(blob.cx, blob.cy) for blob in blobs} == set(planted)
 
 
 def test_level_up_cards_are_detected():
