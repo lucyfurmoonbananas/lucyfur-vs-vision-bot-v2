@@ -18,16 +18,6 @@ VECTORS_8 = (
 )
 
 
-def snap_vector(fx: float, fy: float, deadzone: float = 0.18) -> tuple[int, int]:
-    mag = (fx * fx + fy * fy) ** 0.5
-    if mag < deadzone:
-        return (0, 0)
-    nx, ny = fx / mag, fy / mag
-    sx = 0 if abs(nx) < 0.38 else (1 if nx > 0 else -1)
-    sy = 0 if abs(ny) < 0.38 else (1 if ny > 0 else -1)
-    return (sx, sy)
-
-
 def choose_vector(
     result: VisionResult,
     cfg: Config,

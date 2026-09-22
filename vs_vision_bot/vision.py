@@ -17,8 +17,6 @@ class Detection:
     y: int
     w: int
     h: int
-    score: float = 1.0
-    kind: str = "monster"
 
     @property
     def cx(self) -> int:
@@ -96,9 +94,7 @@ class Vision:
             x, y, bw, bh, score = (float(v) for v in row[:5])
             if score < 0.35:
                 continue
-            detections.append(
-                Detection(int(x), int(y), int(bw), int(bh), score=score, kind="monster")
-            )
+            detections.append(Detection(int(x), int(y), int(bw), int(bh)))
         return detections
 
 
@@ -155,7 +151,7 @@ def detect_threat_blobs(
         # Ignore huge UI bars that hug the frame edge.
         if bh > h * 0.28 and bw > w * 0.35:
             continue
-        detections.append(Detection(x, y, bw, bh, score=min(1.0, area / 400.0)))
+        detections.append(Detection(x, y, bw, bh))
 
     detections.sort(key=lambda d: (d.cx - px) ** 2 + (d.cy - py) ** 2)
     return detections[:48]
