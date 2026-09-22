@@ -170,8 +170,6 @@ def test_hold_is_interrupted_by_pause():
     assert "a" in mover.held
 
     started = time.monotonic()
-    # Pause from another "thread" after a short delay by setting it now,
-    # then waiting a long hold — interrupt must return immediately.
     mover.set_paused(True)
     interrupted = mover.hold_current(2.0)
     elapsed = time.monotonic() - started

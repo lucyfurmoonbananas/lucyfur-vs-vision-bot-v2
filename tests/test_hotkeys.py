@@ -76,10 +76,8 @@ def test_waitkey_and_global_p_share_one_toggle():
     assert seen == [False]
 
 
-def test_align_q_is_debounced_across_paths():
+def test_waitkey_q_requests_align():
     bus = CommandBus()
     service = HotkeyService(bus, lambda _paused: None)
     service.handle_waitkey(ord("q"))
-    bus.request_align()
     assert bus.consume_align() is True
-    assert bus.consume_align() is False

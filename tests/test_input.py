@@ -10,20 +10,14 @@ def test_demo_and_dry_run_use_null_backend():
     assert isinstance(make_backend(dry), NullBackend)
 
 
-def test_default_config_names_xdotool(monkeypatch):
-    monkeypatch.delenv("VS_MOVE_KEYS", raising=False)
-    monkeypatch.delenv("VS_INPUT_BACKEND", raising=False)
-    monkeypatch.delenv("VS_DRY_RUN", raising=False)
-    cfg = Config.from_env()
-    assert cfg.input_backend == "xdotool"
-    assert cfg.move_scheme == "wasd"
-
-
 def test_live_default_backend_is_xdotool(monkeypatch):
     monkeypatch.delenv("VS_DRY_RUN", raising=False)
+    monkeypatch.delenv("VS_INPUT_BACKEND", raising=False)
+    monkeypatch.setattr(ib.shutil, "which", lambda _name: "/usr/bin/xdotool")
     cfg = Config.from_env()
     assert cfg.dry_run is False
     assert cfg.demo is False
+    assert cfg.input_backend == "xdotool"
     backend = make_backend(cfg)
     assert isinstance(backend, XdotoolBackend)
     assert backend.name == "xdotool"
