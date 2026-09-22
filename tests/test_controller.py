@@ -47,6 +47,7 @@ def test_controller_starts_paused_and_ignores_intent():
         ("wasd", ("w", "a"), "d"),
         ("arrows", ("up", "left"), "right"),
     ],
+    ids=["wasd", "arrows"],
 )
 def test_tick_presses_and_releases_chord(scheme, chord, next_key):
     mover, backend = _controller(scheme)
@@ -72,6 +73,7 @@ def test_tick_presses_and_releases_chord(scheme, chord, next_key):
         ("wasd", "a", "d"),
         ("arrows", "left", "right"),
     ],
+    ids=["wasd", "arrows"],
 )
 def test_left_to_right_does_not_hold_opposites(scheme, from_key, to_key):
     mover, backend = _controller(scheme)
