@@ -1,5 +1,7 @@
 import time
 
+import pytest
+
 from vs_vision_bot.config import ALL_MOVE_KEYS, Config
 from vs_vision_bot.controller import MoveController
 from vs_vision_bot.input_backend import NullBackend
@@ -39,63 +41,48 @@ def test_controller_starts_paused_and_ignores_intent():
     assert all(action != "down" for action, _ in backend.events)
 
 
-def test_wasd_tick_presses_and_releases_chord():
-    mover, backend = _controller("wasd")
-    mover.set_intent(("w", "a"))
+@pytest.mark.parametrize(
+    ("scheme", "chord", "next_key"),
+    [
+        ("wasd", ("w", "a"), "d"),
+        ("arrows", ("up", "left"), "right"),
+    ],
+)
+def test_tick_presses_and_releases_chord(scheme, chord, next_key):
+    mover, backend = _controller(scheme)
+    mover.set_intent(chord)
     mover.tick()
-    assert mover.held == frozenset({"w", "a"})
-    assert ("down", "w") in backend.events
-    assert ("down", "a") in backend.events
+    assert mover.held == frozenset(chord)
+    for key in chord:
+        assert ("down", key) in backend.events
 
     backend.events.clear()
-    mover.set_intent(("d",))
+    mover.set_intent((next_key,))
     mover.tick()
-    assert ("up", "a") in backend.events
-    assert ("up", "w") in backend.events
-    assert ("down", "d") in backend.events
-    assert backend.events.index(("up", "a")) < backend.events.index(("down", "d"))
-    assert mover.held == frozenset({"d"})
+    assert ("down", next_key) in backend.events
+    for key in chord:
+        assert ("up", key) in backend.events
+        assert backend.events.index(("up", key)) < backend.events.index(("down", next_key))
+    assert mover.held == frozenset({next_key})
 
 
-def test_arrows_tick_presses_and_releases_chord():
-    mover, backend = _controller("arrows")
-    mover.set_intent(("up", "left"))
-    mover.tick()
-    assert mover.held == frozenset({"up", "left"})
-    assert ("down", "up") in backend.events
-    assert ("down", "left") in backend.events
-
-    backend.events.clear()
-    mover.set_intent(("right",))
-    mover.tick()
-    assert ("up", "left") in backend.events
-    assert ("up", "up") in backend.events
-    assert ("down", "right") in backend.events
-    assert mover.held == frozenset({"right"})
-
-
-def test_wasd_left_to_right_does_not_hold_opposites():
-    mover, backend = _controller("wasd")
-    mover.set_intent(("a",))
+@pytest.mark.parametrize(
+    ("scheme", "from_key", "to_key"),
+    [
+        ("wasd", "a", "d"),
+        ("arrows", "left", "right"),
+    ],
+)
+def test_left_to_right_does_not_hold_opposites(scheme, from_key, to_key):
+    mover, backend = _controller(scheme)
+    mover.set_intent((from_key,))
     mover.tick()
     backend.events.clear()
-    mover.set_intent(("d",))
+    mover.set_intent((to_key,))
     mover.tick()
-    assert "a" not in mover.held
-    assert mover.held == frozenset({"d"})
-    assert backend.events.index(("up", "a")) < backend.events.index(("down", "d"))
-
-
-def test_arrows_left_to_right_does_not_hold_opposites():
-    mover, backend = _controller("arrows")
-    mover.set_intent(("left",))
-    mover.tick()
-    backend.events.clear()
-    mover.set_intent(("right",))
-    mover.tick()
-    assert "left" not in mover.held
-    assert mover.held == frozenset({"right"})
-    assert backend.events.index(("up", "left")) < backend.events.index(("down", "right"))
+    assert from_key not in mover.held
+    assert mover.held == frozenset({to_key})
+    assert backend.events.index(("up", from_key)) < backend.events.index(("down", to_key))
 
 
 def test_pause_clears_queue_and_releases_wasd_and_arrows():
