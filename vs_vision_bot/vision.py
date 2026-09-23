@@ -51,6 +51,7 @@ class Vision:
                 menu = detect_level_up_menu(frame)
                 return VisionResult(player=player, monsters=monsters, menu=menu, note="torch")
             except Exception as exc:  # noqa: BLE001
+                self._model = None
                 print(f"[vision] model failed, falling back to heuristic: {exc}", file=sys.stderr)
         monsters = detect_threat_blobs(frame, player, self.cfg)
         menu = detect_level_up_menu(frame)
@@ -77,7 +78,7 @@ class Vision:
     def _infer_model(self, frame: np.ndarray) -> list[Detection]:
         import torch
 
-        # Expected: model(uint8 BGR CHW or BHWC float) -> (N, 6) [x,y,w,h,score,cls]
+        # float RGB NCHW scaled 0–1. Rows are [x, y, w, h, score, ...].
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         tensor = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float() / 255.0
         with torch.no_grad():
