@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from vs_vision_bot.config import Config
 from vs_vision_bot.vision import VisionResult
 
@@ -20,7 +22,6 @@ VECTORS_8 = (
 
 def choose_vector(
     result: VisionResult,
-    cfg: Config,
     last: tuple[int, int] = (0, 0),
 ) -> tuple[int, int]:
     """
@@ -32,18 +33,17 @@ def choose_vector(
         return (0, 0)
 
     px, py = result.player
-    radius = float(max(cfg.threat_radius, 8))
 
     best = (0, 0)
     best_score = float("-inf")
     for vec in VECTORS_8:
-        score = _score_vector(px, py, vec, result, radius, last)
+        score = _score_vector(px, py, vec, result, last)
         if score > best_score:
             best_score = score
             best = vec
 
     # If every direction is roughly as bad as standing still, idle.
-    idle = _score_vector(px, py, (0, 0), result, radius, last)
+    idle = _score_vector(px, py, (0, 0), result, last)
     if best != (0, 0) and best_score < idle + 0.05:
         return (0, 0)
     return best
@@ -54,28 +54,19 @@ def _score_vector(
     py: int,
     vec: tuple[int, int],
     result: VisionResult,
-    radius: float,
     last: tuple[int, int],
 ) -> float:
     look = 36.0
-    sx = px + vec[0] * look
-    sy = py + vec[1] * look
-    threat = 0.0
+    norm = math.hypot(vec[0], vec[1]) or 1.0
+    sx = px + vec[0] / norm * look
+    sy = py + vec[1] / norm * look
     nearest = 1e9
     for det in result.monsters:
         dx = sx - det.cx
         dy = sy - det.cy
-        dist = (dx * dx + dy * dy) ** 0.5
-        nearest = min(nearest, dist)
-        # Extra penalty if the step walks toward the blob.
-        toward = (det.cx - px) * vec[0] + (det.cy - py) * vec[1]
-        weight = 1.0 + 0.55 * max(0.0, toward / (abs(toward) + 40.0))
-        threat += weight / (dist * dist + radius)
-    clearance = nearest
-    # Prefer moving over standing when something is inside the threat radius.
-    move_bonus = 0.15 if vec != (0, 0) and nearest < radius else 0.0
+        nearest = min(nearest, (dx * dx + dy * dy) ** 0.5)
     inertia = 0.08 if vec == last and vec != (0, 0) else 0.0
-    return clearance * 0.02 - threat + move_bonus + inertia
+    return nearest * 0.02 + inertia
 
 
 def keys_for_result(
@@ -83,5 +74,5 @@ def keys_for_result(
     cfg: Config,
     last: tuple[int, int] = (0, 0),
 ) -> tuple[tuple[int, int], tuple[str, ...]]:
-    vector = choose_vector(result, cfg, last=last)
+    vector = choose_vector(result, last=last)
     return vector, cfg.keys_for_vector(vector)

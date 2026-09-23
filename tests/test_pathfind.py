@@ -4,24 +4,22 @@ from vs_vision_bot.vision import Detection, VisionResult
 
 
 def test_flees_left_when_monster_is_on_the_right():
-    cfg = Config()
     result = VisionResult(
         player=(200, 200),
         monsters=[Detection(x=280, y=190, w=20, h=20)],
     )
-    assert choose_vector(result, cfg) == (-1, -1)
+    assert choose_vector(result) == (-1, 0)
 
 
 def test_idle_without_monsters_or_on_menu():
-    cfg = Config()
     empty = VisionResult(player=(200, 200), monsters=[])
-    assert choose_vector(empty, cfg) == (0, 0)
+    assert choose_vector(empty) == (0, 0)
     menu = VisionResult(
         player=(200, 200),
         monsters=[Detection(10, 10, 20, 20)],
         menu=True,
     )
-    assert choose_vector(menu, cfg) == (0, 0)
+    assert choose_vector(menu) == (0, 0)
 
 
 def test_keys_for_result_follows_wasd_and_arrows_schemes():
