@@ -1,0 +1,153 @@
+<#
+.SYNOPSIS
+    Part of the PSTaskFramework.
+.DESCRIPTION
+    Describes the PSTaskFramework module.
+
+    Q: Why is the PSTaskFramework implemented as a PowerShell module?
+    A: It ensures that tasks defined in the user's build script have access to all variables
+       and functions in the build script.
+
+       When a script block (SB) is invoked, PowerShell uses the SB's Module property to determine
+       its execution context (session state and scope):
+       - If the Module property is the current module (or is unset), then the script block will
+         be executed in the current context (in a new child scope when using the call operator).
+       - Otherwise the script block will be executed using the session state of the module it was
+         defined in. The exact scope within the session depends on the call stack: PowerShell
+         will search the call stack for the nearest (most recent) stack frame belonging to the
+         SB's module and will execute the SB in a child scope of that frame. If a matching frame
+         is not found, the nearest global-scope frame is used.
+       This has a few critically important implications:
+       1. SBs _defined_ in other modules will be executed in the context (and nearest scope!)
+          of the module/script they were defined in. For external tasks, that will be the scope
+          where the `Invoke-TaskFramework` function is called (usually script scope), thus they
+          will have access to all variables and functions defined in their script, including
+          `$TaskContext` returned by `Initialize-TaskFramework`.
+       2. SBs _defined_ in this module do have access to this module's session state. Thus tasks
+          defined in this module will have access to all stack variables going back to the
+          `Invoke-TaskFramework` invocation, including `$TaskContext`.
+       3. SBs without a module session (e.g. created via `[scriptblock]::Create("...")`) will be
+          executed as if they were defined in this module (see above).
+
+.NOTES
+    SPDX-License-Identifier: Unlicense
+    Source: http://github.com/mrfootoyou/pstaskframework
+#>
+@{
+
+    # Version number of this module.
+    ModuleVersion        = '1.0.0'
+
+    # Supported PSEditions
+    CompatiblePSEditions = @('core')
+
+    # ID used to uniquely identify this module
+    GUID                 = 'edf95624-06d1-4139-afc9-740afebc8e06'
+
+    # Author of this module
+    Author               = 'John Belcher'
+
+    # Company or vendor of this module
+    CompanyName          = 'John Belcher'
+
+    # Copyright statement for this module
+    Copyright            = '(c) 2026 John Belcher'
+
+    # Description of the functionality provided by this module
+    Description          = 'A lightweight PowerShell task framework for defining and invoking tasks with dependencies.'
+
+    # Minimum version of the PowerShell engine required by this module
+    PowerShellVersion    = '7.4'
+
+    # Script module or binary module file associated with this manifest.
+    # RootModule           = 'PSTaskFramework.psm1'
+
+    # Modules to import as nested modules of the module specified in RootModule
+    NestedModules        = @(
+        'Get-VariableFromOuterSession.ps1'
+        'Sync-CallerPreference.ps1'
+        'Initialize-TaskFramework.ps1'
+        'Get-TaskFrameworkContext.ps1'
+        'Get-TaskFrameworkTasks.ps1'
+        'Task.ps1'
+        'Add-TaskFrameworkDefaultTasks.ps1'
+        'Get-TaskFrameworkHelp.ps1'
+        'Invoke-Task.ps1'
+        'Invoke-TaskAsAdministrator.ps1'
+        'Invoke-TaskFramework.ps1'
+    )
+
+    # Modules that must be imported into the global environment prior to importing this module
+    RequiredModules      = @(
+        '.\BuildHelpers\BuildHelpers.psd1'
+        '.\Secrets\Secrets.psd1'
+        '.\PSArgs\PSArgs.psd1'
+    )
+
+    # Assemblies that must be loaded prior to importing this module
+    # RequiredAssemblies = @()
+
+    # Script files (.ps1) that are run in the caller's environment prior to importing this module.
+    # ScriptsToProcess = @()
+
+    # Type files (.ps1xml) to be loaded when importing this module
+    # TypesToProcess = @()
+
+    # Format files (.ps1xml) to be loaded when importing this module
+    # FormatsToProcess = @()
+
+    # Functions to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no functions to export.
+    FunctionsToExport    = @(
+        'Initialize-TaskFramework'
+        'Get-TaskFrameworkContext'
+        'Task'
+        'Get-TaskFrameworkTasks'
+        'Invoke-TaskFramework'
+        'Get-TaskFrameworkHelp'
+        'Add-TaskFrameworkDefaultTasks'
+        'Invoke-TaskAsAdministrator'
+    )
+
+    # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
+    CmdletsToExport      = @()
+
+    # Aliases to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no aliases to export.
+    AliasesToExport      = @()
+
+    # Variables to export from this module
+    VariablesToExport    = @()
+
+    # Private data to pass to the module specified in RootModule. This may also contain a PSData hashtable with additional module metadata used by PowerShell.
+    PrivateData          = @{
+
+        PSData = @{
+
+            # Tags applied to this module. These help with module discovery in online galleries.
+            Tags         = @('task', 'build', 'framework', 'automation', 'powershell', 'PSEdition_Core', 'Windows', 'Linux', 'MacOS')
+
+            # A URL to the license for this module.
+            LicenseUri   = 'https://unlicense.org/'
+
+            # A URL to the main website for this project.
+            ProjectUri   = 'http://github.com/mrfootoyou/pstaskframework'
+
+            # A URL to an icon representing this module.
+            # IconUri = ''
+
+            # ReleaseNotes of this module
+            ReleaseNotes = 'https://github.com/mrfootoyou/pstaskframework/releases/tag/1.0.0'
+
+            # Prerelease string of this module
+            Prerelease   = ''
+        } # End of PSData hashtable
+
+    } # End of PrivateData hashtable
+
+    # HelpInfo URI of this module
+    # HelpInfoURI = ''
+
+    # Default prefix for commands exported from this module. Override the default prefix using Import-Module -Prefix.
+    # DefaultCommandPrefix = ''
+
+}
+
