@@ -1,4 +1,4 @@
-"""Parked Model Vision window — small, off the playfield, named for xdotool."""
+"""Parked Model Vision window — small, off the playfield."""
 
 from __future__ import annotations
 
@@ -51,15 +51,37 @@ class DebugWindow:
         mover: MoveController,
         vector: tuple[int, int],
     ) -> None:
-        vis = frame.copy()
-        px, py = result.player
+        # Draw on the window-sized frame. imshow would otherwise shrink
+        # full-capture strokes and HUD text down to a few pixels.
+        src_h, src_w = frame.shape[:2]
+        debug_w, debug_h = self.cfg.debug_w, self.cfg.debug_h
+        vis = cv2.resize(frame, (debug_w, debug_h))
+        sx = debug_w / src_w
+        sy = debug_h / src_h
+
+        def sx_i(value: float) -> int:
+            return int(round(value * sx))
+
+        def sy_i(value: float) -> int:
+            return int(round(value * sy))
+
+        px, py = sx_i(result.player[0]), sy_i(result.player[1])
         cv2.circle(vis, (px, py), 8, (80, 255, 80), 2)
         for det in result.monsters:
             color = (40, 40, 255)
-            cv2.rectangle(vis, (det.x, det.y), (det.x + det.w, det.y + det.h), color, 1)
-            cv2.circle(vis, (det.cx, det.cy), 3, color, -1)
+            cv2.rectangle(
+                vis,
+                (sx_i(det.x), sy_i(det.y)),
+                (sx_i(det.x + det.w), sy_i(det.y + det.h)),
+                color,
+                1,
+            )
+            cv2.circle(vis, (sx_i(det.cx), sy_i(det.cy)), 3, color, -1)
         if vector != (0, 0):
-            end = (px + vector[0] * 48, py + vector[1] * 48)
+            end = (
+                sx_i(result.player[0] + vector[0] * 48),
+                sy_i(result.player[1] + vector[1] * 48),
+            )
             cv2.arrowedLine(vis, (px, py), end, (0, 220, 255), 2, tipLength=0.35)
 
         banner = "PAUSED — press p to run" if paused else "RUNNING — p pause  ESC quit"
