@@ -160,9 +160,7 @@ def main(argv: list[str] | None = None) -> int:
             if bus.paused:
                 time.sleep(cfg.frame_s)
             else:
-                interrupted = mover.hold_current(min(cfg.hold_s, cfg.frame_s))
-                if interrupted:
-                    continue
+                mover.hold_current(min(cfg.hold_s, cfg.frame_s))
         return 0
     finally:
         mover.shutdown()
