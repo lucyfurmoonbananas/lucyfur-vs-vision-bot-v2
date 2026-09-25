@@ -15,7 +15,7 @@ from vs_vision_bot.debug_window import DebugWindow
 from vs_vision_bot.hotkeys import CommandBus, HotkeyService
 from vs_vision_bot.input_backend import make_backend
 from vs_vision_bot.menus import MenuPilot, detect_level_up, tesseract_available
-from vs_vision_bot.pathfind import keys_for_result
+from vs_vision_bot.pathfind import Navigator
 from vs_vision_bot.vision import Vision, draw_synthetic_arena
 
 
@@ -106,6 +106,9 @@ def main(argv: list[str] | None = None) -> int:
         mover.set_paused(paused)
         if not paused:
             pilot.reset_run()
+            if pilot_new_run[0]:
+                nav.reset()
+                pilot_new_run[0] = False
 
     def release_before_menu_key() -> bool:
         # Lift WASD/arrows (this also re-focuses the game window) before a menu tap.
@@ -115,7 +118,16 @@ def main(argv: list[str] | None = None) -> int:
     def click_in_capture(x: int, y: int) -> None:
         backend.click(capture.region.x + x, capture.region.y + y)
 
-    pilot = MenuPilot(tap=backend.tap, refocus=release_before_menu_key, click=click_in_capture)
+    pilot = MenuPilot(
+        tap=backend.tap,
+        refocus=release_before_menu_key,
+        click=click_in_capture,
+        results_dir=os.environ.get("VS_RESULTS_DIR", "/workspace/vsbot-check/results"),
+    )
+    nav = Navigator()
+    # The movement game clock restarts only after a finished run (QUIT + DONE),
+    # not on every manual pause.
+    pilot_new_run = [False]
     auto_menus = not cfg.demo and os.environ.get("VS_AUTO_MENUS", "1").strip() not in ("0", "false", "no")
     if auto_menus and not tesseract_available():
         print("[menus] tesseract not found: level-ups pick by position only, chest screens not handled")
@@ -157,8 +169,6 @@ def main(argv: list[str] | None = None) -> int:
                 parked = True
 
             result = vision.analyze(frame)
-            vector, keys = keys_for_result(result, cfg, last=last_vector)
-            last_vector = vector
 
             menu_kind = None
             if auto_menus and not bus.paused:
@@ -170,7 +180,15 @@ def main(argv: list[str] | None = None) -> int:
                     result.menu = True
                     result.note = pilot.status
             in_menu = menu_kind is not None
+            if bus.paused or result.menu:
+                vector, keys = (0, 0), ()
+            else:
+                decision = nav.step(result, hp=pilot.hp)
+                vector, keys = decision.vector, cfg.keys_for_vector(decision.vector)
+                result.note = f"{decision.mode} d={decision.danger_here:.1f} hp={pilot.hp}"
+            last_vector = vector
             if pilot.finished and not bus.paused:
+                pilot_new_run[0] = True
                 # Final GAME OVER handled (QUIT + DONE). Stop acting; the game is
                 # closed / reopened outside the bot. Press p to run again.
                 bus.toggle_pause()

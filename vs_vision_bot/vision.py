@@ -11,6 +11,9 @@ import numpy as np
 from vs_vision_bot.config import Config
 
 
+REF_W_DEFAULT, REF_H_DEFAULT = 960, 540
+
+
 @dataclass
 class Detection:
     x: int
@@ -33,6 +36,12 @@ class VisionResult:
     monsters: list[Detection] = field(default_factory=list)
     menu: bool = False
     note: str = ""
+    # Threat grid in reference 960x540 pixels: rows of (x, y, weight).
+    threats: np.ndarray | None = None
+    # Blue XP gem centers in reference pixels.
+    gems: list[tuple[float, float]] = field(default_factory=list)
+    # Frame size the detections were measured in.
+    size: tuple[int, int] = (REF_W_DEFAULT, REF_H_DEFAULT)
 
 
 class Vision:
@@ -44,7 +53,7 @@ class Vision:
 
     def analyze(self, frame: np.ndarray) -> VisionResult:
         h, w = frame.shape[:2]
-        player = (w // 2, h // 2)
+        player = player_position(w, h)
         if self._model is not None:
             try:
                 monsters = self._infer_model(frame)
@@ -53,9 +62,16 @@ class Vision:
             except Exception as exc:  # noqa: BLE001
                 self._model = None
                 print(f"[vision] model failed, falling back to heuristic: {exc}", file=sys.stderr)
-        monsters = detect_threat_blobs(frame, player, self.cfg)
+        mask = enemy_mask(frame)
+        sx, sy = REF_W / w, REF_H / h
+        gems = [(gx * sx, gy * sy) for gx, gy in detect_gems(frame, mask)]
+        monsters = detect_threat_blobs(frame, player, self.cfg, mask=mask)
+        threats = threat_points(mask)
         menu = detect_level_up_menu(frame)
-        return VisionResult(player=player, monsters=monsters, menu=menu, note="heuristic")
+        return VisionResult(
+            player=player, monsters=monsters, menu=menu, note="heuristic",
+            threats=threats, gems=gems, size=(w, h),
+        )
 
     def _load_torch_model(self, path: str):
         try:
@@ -99,63 +115,173 @@ class Vision:
         return detections
 
 
-def detect_threat_blobs(
-    frame: np.ndarray, player: tuple[int, int], cfg: Config
-) -> list[Detection]:
-    """
-    Find saturated / high-contrast sprites that are not the centered player.
+# Reference layout (960x540 capture of the windowed game). Everything below is
+# scaled to the real frame size.
+REF_W, REF_H = 960, 540
+# The game renders a 16:9 playfield with dimmed pillarbox strips on the sides.
+PLAYFIELD_X0, PLAYFIELD_X1 = 48, 912
+# HUD rectangles (x0, y0, x1, y1): XP bar, weapon/passive icons, timer, kill
+# count + gold, right-hand widgets. Their black outlines look like enemies.
+HUD_RECTS = (
+    (0, 0, 960, 18),
+    (48, 18, 196, 70),
+    (400, 16, 565, 54),
+    (715, 16, 912, 46),
+    (858, 16, 912, 96),
+)
+# Player sprite + HP bar (camera keeps the character here).
+PLAYER_RECT = (452, 220, 508, 282)
+PLAYER_POS = (480, 256)
 
-    Vampire Survivors keeps the player near the camera center. Ground tiles are
-    relatively muted; enemies and pickups pop in saturation.
+DARK_MAX = 40        # enemies (bats, ghouls, skeleton outlines) are near-black
+SIDE_DARK_MAX = 12   # the side strips are dimmed to ~1/3 brightness
+MIN_DARK_AREA = 30   # smaller dark specks are bush outlines / gem outlines
+CELL = 12            # threat grid cell size (reference pixels)
+CELL_WEIGHT = 0.25   # max weight of one cell
+
+
+def player_position(w: int, h: int) -> tuple[int, int]:
+    return (int(round(PLAYER_POS[0] * w / REF_W)), int(round(PLAYER_POS[1] * h / REF_H)))
+
+
+def _scaled_rect(rect: tuple[int, int, int, int], w: int, h: int) -> tuple[int, int, int, int]:
+    sx, sy = w / REF_W, h / REF_H
+    x0, y0, x1, y1 = rect
+    return int(x0 * sx), int(y0 * sy), int(round(x1 * sx)), int(round(y1 * sy))
+
+
+def ignore_mask(w: int, h: int) -> np.ndarray:
+    """True where detections must be ignored (HUD + player)."""
+    mask = np.zeros((h, w), dtype=bool)
+    for rect in HUD_RECTS + (PLAYER_RECT,):
+        x0, y0, x1, y1 = _scaled_rect(rect, w, h)
+        mask[y0:y1, x0:x1] = True
+    return mask
+
+
+_MASK_CACHE: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _masks(w: int, h: int) -> tuple[np.ndarray, np.ndarray]:
+    key = (w, h)
+    if key not in _MASK_CACHE:
+        side = np.zeros((h, w), dtype=bool)
+        x0 = int(PLAYFIELD_X0 * w / REF_W)
+        x1 = int(round(PLAYFIELD_X1 * w / REF_W))
+        side[:, :x0] = True
+        side[:, x1:] = True
+        _MASK_CACHE[key] = (ignore_mask(w, h), side)
+    return _MASK_CACHE[key]
+
+
+def enemy_mask(frame: np.ndarray) -> np.ndarray:
+    """
+    Binary mask of enemy pixels.
+
+    Vampire Survivors sprites (bats, ghouls, mudmen outlines, skeletons,
+    mantises) carry near-black pixels, while stage ground (grass, dirt) never
+    goes that dark. Saturation-based detection mostly found gems, braziers and
+    flowers instead, and missed black bats entirely.
     """
     h, w = frame.shape[:2]
-    inset_x = max(8, w // 18)
-    inset_y = max(8, h // 12)
-    roi = frame[inset_y : h - inset_y, inset_x : w - inset_x]
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    sat = hsv[:, :, 1]
-    val = hsv[:, :, 2]
+    ignore, side = _masks(w, h)
+    mx = frame.max(axis=2)
+    dark = mx < DARK_MAX
+    dark[side] = mx[side] < SIDE_DARK_MAX
+    dark[ignore] = False
+    mask = dark.astype(np.uint8) * 255
+    # Drop isolated specks (bush / gem outlines) but keep crowds.
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    min_area = max(4, int(MIN_DARK_AREA * (w * h) / (REF_W * REF_H)))
+    keep = stats[:, cv2.CC_STAT_AREA] >= min_area
+    keep[0] = False
+    return keep[labels]
 
-    # Sprites pop against local tiles; a global sat cut lights up whole stages.
-    blur = cv2.GaussianBlur(roi, (31, 31), 0)
-    contrast = cv2.cvtColor(cv2.absdiff(roi, blur), cv2.COLOR_BGR2GRAY)
-    contrast_mask = cv2.threshold(contrast, 26, 255, cv2.THRESH_BINARY)[1]
 
-    sat_floor = max(95, int(np.median(sat) + 40))
-    sat_mask = cv2.threshold(sat, sat_floor, 255, cv2.THRESH_BINARY)[1]
-    val_floor = max(165, int(np.median(val) + 55))
-    val_mask = cv2.threshold(val, val_floor, 255, cv2.THRESH_BINARY)[1]
+def gem_mask(frame: np.ndarray) -> np.ndarray:
+    """Blue XP gems: saturated cyan-blue cores (grass is never bluer than green)."""
+    b = frame[:, :, 0].astype(np.int16)
+    g = frame[:, :, 1].astype(np.int16)
+    r = frame[:, :, 2].astype(np.int16)
+    m = (b > 170) & (b - r > 110) & (g > 110) & (b > g + 25)
+    h, w = frame.shape[:2]
+    ignore, side = _masks(w, h)
+    m[ignore | side] = False
+    return m
 
-    color_mask = cv2.bitwise_or(sat_mask, val_mask)
-    combined = cv2.bitwise_and(contrast_mask, color_mask)
-    if np.count_nonzero(combined) < 80:
-        combined = contrast_mask
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel, iterations=1)
-    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel, iterations=2)
+def threat_points(mask: np.ndarray, cell: int = CELL) -> np.ndarray:
+    """Collapse an enemy mask into grid cells: rows of (x, y, weight 0..CELL_WEIGHT)."""
+    h, w = mask.shape[:2]
+    c = max(4, int(round(cell * w / REF_W)))
+    gh, gw = h // c, w // c
+    if gh == 0 or gw == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    grid = mask[: gh * c, : gw * c].reshape(gh, c, gw, c).mean(axis=(1, 3))
+    ys, xs = np.nonzero(grid > 0.04)
+    if ys.size == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    # A typical enemy sprite covers ~4 cells: scale so one enemy ~= 1 unit of
+    # danger (the unit pathfind.Tuning is expressed in).
+    weights = np.minimum(grid[ys, xs] / 0.35, 1.0) * CELL_WEIGHT
+    pts = np.stack([(xs + 0.5) * c, (ys + 0.5) * c, weights], axis=1).astype(np.float32)
+    # Report in reference (960x540) pixels so movement tuning is resolution-free.
+    pts[:, 0] *= REF_W / w
+    pts[:, 1] *= REF_H / h
+    return pts
 
-    contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+def _boxes(mask: np.ndarray, min_area: int, limit: int = 64) -> list[Detection]:
+    n, _labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    out = []
+    for i in range(1, n):
+        x, y, bw, bh, area = stats[i]
+        if area < min_area:
+            continue
+        out.append(Detection(int(x), int(y), int(bw), int(bh)))
+    return out[:limit] if len(out) > limit else out
+
+
+def detect_threat_blobs(
+    frame: np.ndarray, player: tuple[int, int], cfg: Config, mask: np.ndarray | None = None
+) -> list[Detection]:
+    """Enemy sprites (dark-pixel components) sorted nearest-first, HUD/player masked."""
+    if mask is None:
+        mask = enemy_mask(frame)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    merged = cv2.dilate(mask.astype(np.uint8), kernel, iterations=1)
+    dets = _boxes(merged, min_area=cfg.min_blob_area, limit=10_000)
     px, py = player
-    detections: list[Detection] = []
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        if area < cfg.min_blob_area or area > cfg.max_blob_area:
-            continue
-        x, y, bw, bh = cv2.boundingRect(contour)
-        x += inset_x
-        y += inset_y
-        cx, cy = x + bw // 2, y + bh // 2
-        dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
-        if dist < cfg.player_radius:
-            continue
-        # Ignore huge UI bars that hug the frame edge.
-        if bh > h * 0.28 and bw > w * 0.35:
-            continue
-        detections.append(Detection(x, y, bw, bh))
+    dets.sort(key=lambda d: (d.cx - px) ** 2 + (d.cy - py) ** 2)
+    return dets[:64]
 
-    detections.sort(key=lambda d: (d.cx - px) ** 2 + (d.cy - py) ** 2)
-    return detections[:48]
+
+def detect_gems(frame: np.ndarray, enemies: np.ndarray | None = None) -> list[tuple[int, int]]:
+    """
+    Centers of blue XP gems, in frame pixels.
+
+    When ``enemies`` (from enemy_mask) is given, a candidate sitting in a lot of
+    dark pixels is the blue-outlined Glowing Bat, not a gem; real gems get their
+    thin dark outline erased from ``enemies`` in place.
+    """
+    m = gem_mask(frame)
+    h, w = frame.shape[:2]
+    n, _l, stats, cents = cv2.connectedComponentsWithStats(m.astype(np.uint8), connectivity=8)
+    rx = max(4, int(round(12 * w / REF_W)))
+    ry = max(4, int(round(14 * h / REF_H)))
+    out = []
+    for i in range(1, n):
+        if not 2 <= stats[i, cv2.CC_STAT_AREA] <= 120:
+            continue
+        cx, cy = int(cents[i][0]), int(cents[i][1])
+        if enemies is not None:
+            y0, y1, x0, x1 = max(0, cy - ry), cy + ry, max(0, cx - rx), cx + rx
+            dark = int(np.count_nonzero(enemies[y0:y1, x0:x1]))
+            if dark > 70 * (w * h) / (REF_W * REF_H):
+                continue
+            enemies[y0:y1, x0:x1] = False
+        out.append((cx, cy))
+    return out
 
 
 def detect_level_up_menu(frame: np.ndarray) -> bool:
@@ -204,13 +330,13 @@ def draw_synthetic_arena(
 ) -> np.ndarray:
     """Offline playfield for --demo so the loop can be exercised without Steam."""
     frame = np.zeros((height, width, 3), dtype=np.uint8)
-    frame[:, :] = (40, 40, 40)
+    frame[:, :] = (34, 72, 44)  # Mad Forest grass (BGR)
     for gy in range(0, height, 48):
-        cv2.line(frame, (0, gy), (width, gy), (50, 50, 50), 1)
+        cv2.line(frame, (0, gy), (width, gy), (40, 84, 52), 1)
     for gx in range(0, width, 48):
-        cv2.line(frame, (gx, 0), (gx, height), (50, 50, 50), 1)
+        cv2.line(frame, (gx, 0), (gx, height), (40, 84, 52), 1)
 
-    px, py = width // 2, height // 2
+    px, py = player_position(width, height)
     cv2.circle(frame, (px, py), 10, (80, 220, 255), -1)
     cv2.circle(frame, (px, py), 14, (20, 80, 200), 2)
 
@@ -223,6 +349,8 @@ def draw_synthetic_arena(
             monsters.append((mx, my))
 
     for mx, my in monsters:
-        cv2.circle(frame, (mx, my), 12, (40, 40, 220), -1)
-        cv2.circle(frame, (mx, my), 16, (20, 20, 160), 2)
+        # Dark bat-like sprite with a red eye, like the real Pipistrello.
+        cv2.circle(frame, (mx, my), 12, (12, 12, 16), -1)
+        cv2.circle(frame, (mx, my), 16, (5, 5, 5), 2)
+        cv2.circle(frame, (mx, my), 2, (30, 30, 200), -1)
     return frame

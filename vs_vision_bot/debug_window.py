@@ -54,6 +54,14 @@ class DebugWindow:
         vis = frame.copy()
         px, py = result.player
         cv2.circle(vis, (px, py), 8, (80, 255, 80), 2)
+        if result.threats is not None and len(result.threats):
+            fh, fw = vis.shape[:2]
+            sx, sy = fw / 960.0, fh / 540.0
+            for tx, ty, tw in result.threats:
+                cx, cy = int(tx * sx), int(ty * sy)
+                cv2.rectangle(vis, (cx - 5, cy - 5), (cx + 5, cy + 5), (0, 0, int(90 + 165 * tw)), 1)
+            for gx, gy in result.gems:
+                cv2.circle(vis, (int(gx * sx), int(gy * sy)), 5, (255, 220, 0), 1)
         for det in result.monsters:
             color = (40, 40, 255)
             cv2.rectangle(vis, (det.x, det.y), (det.x + det.w, det.y + det.h), color, 1)

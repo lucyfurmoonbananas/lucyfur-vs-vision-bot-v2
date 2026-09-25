@@ -312,3 +312,34 @@ def test_real_results_screen_done_button_after_quit():
     x, y = pilot.clicks[-1]
     assert 440 <= x <= 520 and 490 <= y <= 520
     assert pilot.finished
+
+
+def test_results_screenshot_saved_before_done(monkeypatch, tmp_path):
+    monkeypatch.setattr(menus, "tesseract_available", lambda: True)
+    monkeypatch.setattr(
+        menus, "read_screen_words", lambda f: [("Results", 400, 40, 90, 20), ("DONE", 800, 500, 60, 20)]
+    )
+    backend = NullBackend()
+    clock = FakeClock()
+    order: list[str] = []
+    pilot = _pilot(backend, clock, results_dir=str(tmp_path / "results"))
+    real_click = pilot.click
+    pilot.click = lambda x, y: (order.append("click:" + str(len(pilot.saved_results))), real_click(x, y))
+    pilot._quit_pressed = True
+    frame = load("results_screen.png")
+    clock.t += 1.6
+    pilot.step(frame)
+    clock.t += 1.6
+    assert pilot.step(frame) == "results"
+    assert pilot.finished
+    assert len(pilot.saved_results) == 1
+    saved = cv2.imread(pilot.saved_results[0])
+    assert saved is not None and saved.shape == frame.shape
+    assert order == ["click:1"]  # screenshot written before DONE was clicked
+
+
+def test_results_screenshot_disabled_without_dir(monkeypatch):
+    monkeypatch.setattr(menus, "tesseract_available", lambda: True)
+    monkeypatch.setattr(menus, "read_screen_words", lambda f: [("Results", 0, 0, 1, 1), ("DONE", 5, 5, 4, 4)])
+    pilot = _pilot(NullBackend(), FakeClock())
+    assert pilot._save_results(load("results_screen.png")) is None

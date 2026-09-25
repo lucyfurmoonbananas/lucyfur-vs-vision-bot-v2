@@ -15,6 +15,7 @@ down through the card column and confirms with Enter.
 from __future__ import annotations
 
 import difflib
+import os
 import re
 import shutil
 import subprocess
@@ -522,7 +523,10 @@ class MenuPilot:
         click: Callable[[int, int], None] | None = None,
         settle_frames: int = 2,
         log: Callable[[str], None] = print,
+        results_dir: str | None = None,
     ) -> None:
+        self.results_dir = results_dir
+        self.saved_results: list[str] = []
         self.tap = tap
         self.refocus = refocus or (lambda: True)
         self.clock = clock
@@ -647,6 +651,21 @@ class MenuPilot:
             self._sig = None
         self.status = f"LEVEL UP -> {self._names[target] if target < len(self._names) else '?'}"
 
+    def _save_results(self, frame: np.ndarray) -> str | None:
+        """Keep a screenshot of the Results screen (time / level / kills) before DONE."""
+        if not self.results_dir:
+            return None
+        try:
+            os.makedirs(self.results_dir, exist_ok=True)
+            path = os.path.join(self.results_dir, time.strftime("results_%Y%m%d_%H%M%S.png"))
+            if cv2.imwrite(path, frame):
+                self.saved_results.append(path)
+                self.log(f"[results] saved {path}")
+                return path
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"[results] could not save screenshot: {exc}")
+        return None
+
     def _scan(self, frame: np.ndarray) -> None:
         words = read_screen_words(frame)
         text = " ".join(t for t, *_ in words)
@@ -684,6 +703,8 @@ class MenuPilot:
             return None
         kind, where = hit[2], hit[3]
         if now >= self._next_action:
+            if kind == "results":
+                self._save_results(frame)
             if kind in ("revive", "quit", "results"):
                 label = {"revive": "REVIVE", "quit": "QUIT", "results": "DONE"}[kind]
                 if where is not None and self.click is not None:
