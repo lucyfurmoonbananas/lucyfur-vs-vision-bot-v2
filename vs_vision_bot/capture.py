@@ -30,6 +30,23 @@ class CaptureRegion:
         )
 
 
+def clamp_capture_origin(
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    screen_w: int,
+    screen_h: int,
+) -> tuple[int, int]:
+    """Keep a capture_w × capture_h rect inside the display.
+
+    x stays in [0, max(0, screen_w - w)]; y uses the same bound on height.
+    """
+    max_x = max(0, screen_w - w)
+    max_y = max(0, screen_h - h)
+    return max(0, min(x, max_x)), max(0, min(y, max_y))
+
+
 class ScreenCapture:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -56,9 +73,19 @@ class ScreenCapture:
         if pos is None:
             print("[capture] could not read mouse position (need xdotool)", file=sys.stderr)
             return None
-        self.region.x, self.region.y = pos
-        self.cfg.capture_x, self.cfg.capture_y = pos
-        print(f"[capture] aligned top-left to mouse ({pos[0]}, {pos[1]})")
+        # mss will not grab a rect that hangs off the display.
+        screen_w, screen_h = self.display_size()
+        x, y = clamp_capture_origin(
+            pos[0],
+            pos[1],
+            self.region.w,
+            self.region.h,
+            screen_w,
+            screen_h,
+        )
+        self.region.x, self.region.y = x, y
+        self.cfg.capture_x, self.cfg.capture_y = x, y
+        print(f"[capture] aligned top-left to mouse ({x}, {y})")
         return self.region
 
     def display_size(self) -> tuple[int, int]:
