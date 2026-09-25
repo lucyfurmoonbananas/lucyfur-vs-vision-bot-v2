@@ -88,7 +88,6 @@ class Config:
     fps: float = 12.0
     hold_ms: int = 80
     player_radius: int = 28
-    threat_radius: int = 90
     min_blob_area: int = 40
     max_blob_area: int = 12000
     model_path: str | None = None
@@ -132,7 +131,6 @@ class Config:
             fps=_env_float("VS_FPS", 12.0),
             hold_ms=_env_int("VS_HOLD_MS", 80),
             player_radius=_env_int("VS_PLAYER_RADIUS", 28),
-            threat_radius=_env_int("VS_THREAT_RADIUS", 90),
             min_blob_area=_env_int("VS_MIN_BLOB_AREA", 40),
             max_blob_area=_env_int("VS_MAX_BLOB_AREA", 12000),
             model_path=model,
