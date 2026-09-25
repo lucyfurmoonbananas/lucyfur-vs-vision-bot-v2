@@ -292,3 +292,23 @@ def test_game_over_title_matcher():
     assert menus.is_game_over_title("GAME OVER,")
     assert not menus.is_game_over_title("VAMPIRE SURVIVORS")
     assert not menus.is_game_over_title("")
+
+
+@needs_tesseract
+def test_real_results_screen_done_button_after_quit():
+    frame = load("results_screen.png")
+    assert detect_level_up(frame) is None
+    backend = NullBackend()
+    clock = FakeClock()
+    pilot = _pilot(backend, clock)
+    for _ in range(3):
+        clock.t += 1.6
+        assert pilot.step(frame) is None  # not pressed without our own QUIT first
+    pilot._quit_pressed = True
+    clock.t += 1.6
+    pilot.step(frame)
+    clock.t += 1.6
+    assert pilot.step(frame) == "results"
+    x, y = pilot.clicks[-1]
+    assert 440 <= x <= 520 and 490 <= y <= 520
+    assert pilot.finished
