@@ -110,6 +110,12 @@ class HotkeyService:
             self.bus.request_quit()
             self.on_pause_change(True)
             return
+        global_on = self._listener is not None and getattr(self._listener, "running", False)
+        if global_on and key_code in (ord("p"), ord("P"), ord("q"), ord("Q")):
+            # The global XRecord listener already saw this keystroke. If the main
+            # loop was busy (level-up OCR), waitKey can deliver it after the
+            # debounce window and toggle pause a second time.
+            return
         if key_code in (ord("p"), ord("P")):
             paused = self.bus.toggle_pause()
             self.on_pause_change(paused)

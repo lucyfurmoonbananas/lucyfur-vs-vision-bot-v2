@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import time
@@ -13,6 +14,7 @@ from vs_vision_bot.controller import MoveController
 from vs_vision_bot.debug_window import DebugWindow
 from vs_vision_bot.hotkeys import CommandBus, HotkeyService
 from vs_vision_bot.input_backend import make_backend
+from vs_vision_bot.menus import MenuPilot, detect_level_up, tesseract_available
 from vs_vision_bot.pathfind import keys_for_result
 from vs_vision_bot.vision import Vision, draw_synthetic_arena
 
@@ -85,8 +87,6 @@ def _print_banner(cfg: Config, backend_name: str | None = None) -> None:
 
 
 def _display() -> str:
-    import os
-
     return os.environ.get("DISPLAY", "(unset)")
 
 
@@ -104,6 +104,21 @@ def main(argv: list[str] | None = None) -> int:
 
     def on_pause_change(paused: bool) -> None:
         mover.set_paused(paused)
+        if not paused:
+            pilot.reset_run()
+
+    def release_before_menu_key() -> bool:
+        # Lift WASD/arrows (this also re-focuses the game window) before a menu tap.
+        mover.release_and_clear()
+        return True
+
+    def click_in_capture(x: int, y: int) -> None:
+        backend.click(capture.region.x + x, capture.region.y + y)
+
+    pilot = MenuPilot(tap=backend.tap, refocus=release_before_menu_key, click=click_in_capture)
+    auto_menus = not cfg.demo and os.environ.get("VS_AUTO_MENUS", "1").strip() not in ("0", "false", "no")
+    if auto_menus and not tesseract_available():
+        print("[menus] tesseract not found: level-ups pick by position only, chest screens not handled")
 
     hotkeys = HotkeyService(bus, on_pause_change)
     hotkeys.start()
@@ -119,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     last_vector = (0, 0)
     t0 = time.monotonic()
     parked = False
+    in_menu = False
 
     try:
         while not bus.quit:
@@ -144,8 +160,27 @@ def main(argv: list[str] | None = None) -> int:
             vector, keys = keys_for_result(result, cfg, last=last_vector)
             last_vector = vector
 
+            menu_kind = None
+            if auto_menus and not bus.paused:
+                screen = detect_level_up(frame)
+                if screen is not None and not in_menu:
+                    mover.release_and_clear()
+                menu_kind = pilot.step(frame, screen)
+                if menu_kind:
+                    result.menu = True
+                    result.note = pilot.status
+            in_menu = menu_kind is not None
+            if pilot.finished and not bus.paused:
+                # Final GAME OVER handled (QUIT + DONE). Stop acting; the game is
+                # closed / reopened outside the bot. Press p to run again.
+                bus.toggle_pause()
+                mover.set_paused(True)
+
             if bus.paused:
                 mover.set_paused(True)
+            elif menu_kind:
+                # Level-up / chest handled by the pilot; movement stays off.
+                pass
             elif result.menu:
                 # Level-up / pause cards: hold still without flipping the user pause flag.
                 mover.release_and_clear()

@@ -23,7 +23,7 @@ You need Python 3.10+, a working X11 `DISPLAY`, and `xdotool`.
 
 ```bash
 # Debian / Ubuntu / Steam Deck-ish
-sudo apt install xdotool python3-venv python3-pip
+sudo apt install xdotool python3-venv python3-pip tesseract-ocr
 
 git clone <this-repo>
 cd lucyfur-vs-vision-bot-v2   # or whatever you named the checkout
@@ -96,9 +96,18 @@ and press `q`.
   Proton often ignores window-targeted keys. The bot re-activates the game
   before press and release so Model Vision cannot eat a `keyup`. If keys still
   miss, click the game once or unpause again.
-- **Level-up and pause cards** block walking. The bot holds still when it sees
-  those layouts. Press `p` if you want the whole loop paused while you pick a
-  weapon.
+- **Level-up cards are picked automatically** (`vs_vision_bot/menus.py`). The
+  bot recognizes the Level Up panel, reads card names with `tesseract`, picks
+  by the priority list (Garlic, Pummarola, Runetracer, Magic Wand, Empty Tome,
+  Peachone, Ebony Wings, Lightning Ring, Duplicator, Cross, Armor, Clover,
+  Spinach, ...), moves the selection with Up/Down and confirms with Enter.
+  Reroll / Banish / Skip are never pressed. Maxed builds: Floor Chicken when HP
+  is under ~60%, else the coin bag. Without tesseract it takes the first card.
+- **Chest / item-found screens**: Enter (only after two OCR scans agree).
+- **GAME OVER**: REVIVE is always clicked when offered. On the final GAME OVER
+  (only QUIT), the bot clicks QUIT, then DONE on Results, then pauses itself.
+- Main menu, pause menu and anything unrecognized are never pressed.
+  `VS_AUTO_MENUS=0` turns all of this off (the bot then just holds still).
 - Keep Model Vision parked off the playfield. The bot places it in a screen
   corner that does not overlap the capture rect. After you press `q`, it
   re-parks. Force a spot with `VS_DEBUG_X` / `VS_DEBUG_Y` if needed.
@@ -135,6 +144,7 @@ On pause, stop, ESC, SIGINT/SIGTERM, and process exit (`atexit`):
 | `VS_HOLD_MS` | `80` | Max key-hold per tick (interrupted by pause). |
 | `VS_MODEL_PATH` | unset | Optional TorchScript model. |
 | `VS_DRY_RUN` | unset | `1` to disable key sends. |
+| `VS_AUTO_MENUS` | `1` | `0` disables level-up / chest / revive handling. |
 
 ## Layout
 
@@ -144,6 +154,7 @@ vs_vision_bot/
   config.py          env / defaults (WASD + xdotool)
   capture.py         mss grab + mouse align + park math
   vision.py          heuristic blobs + optional torch + menu detect
+  menus.py           level-up picks, chest, revive, final QUIT/DONE
   pathfind.py        8-way repulsion
   input_backend.py   xdotool (default), pynput, null
   controller.py      queue, pause interrupt, atexit release

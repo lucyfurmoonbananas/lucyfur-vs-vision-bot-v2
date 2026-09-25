@@ -5,9 +5,10 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import time
 from abc import ABC, abstractmethod
 
-from vs_vision_bot.config import ALL_MOVE_KEYS, XDOTOOL_KEY_NAMES, Config
+from vs_vision_bot.config import ALL_MOVE_KEYS, MENU_KEY_NAMES, XDOTOOL_KEY_NAMES, Config
 
 
 class InputBackend(ABC):
@@ -23,6 +24,16 @@ class InputBackend(ABC):
 
     def activate_game_once(self) -> bool:
         return True
+
+    def click(self, x: int, y: int) -> None:
+        """Left-click at absolute screen coordinates (REVIVE button). Default: no-op."""
+        return None
+
+    def tap(self, key: str, hold_s: float = 0.06) -> None:
+        """Press and release one key (menu navigation / confirm)."""
+        self.keydown(key)
+        time.sleep(hold_s)
+        self.keyup(key)
 
     def refocus_if_needed(self) -> bool:
         return True
@@ -50,6 +61,9 @@ class NullBackend(InputBackend):
     def __init__(self) -> None:
         self.events: list[tuple[str, str]] = []
         self.held: set[str] = set()
+
+    def click(self, x: int, y: int) -> None:
+        self.events.append(("click", f"{x},{y}"))
 
     def keydown(self, key: str) -> None:
         self.events.append(("down", key))
@@ -134,6 +148,11 @@ class XdotoolBackend(InputBackend):
             return True
         return False
 
+    def click(self, x: int, y: int) -> None:
+        result = _run_xdotool(["mousemove", "--sync", str(x), str(y), "click", "1"])
+        if result.returncode != 0:
+            print(f"[input] xdotool click {x},{y} failed: {result.stderr.strip()}", file=sys.stderr)
+
     def keydown(self, key: str) -> None:
         self._key_event("keydown", key)
 
@@ -143,7 +162,7 @@ class XdotoolBackend(InputBackend):
     def _key_event(self, action: str, key: str) -> None:
         # Global XTest (no --window). Proton often ignores window-targeted
         # key events; we activate/refocus first so the focused window is the game.
-        xname = XDOTOOL_KEY_NAMES.get(key, key)
+        xname = XDOTOOL_KEY_NAMES.get(key) or MENU_KEY_NAMES.get(key, key)
         result = _run_xdotool([action, xname])
         if result.returncode != 0:
             print(
@@ -170,6 +189,7 @@ class PynputBackend(InputBackend):
             "down": Key.down,
             "left": Key.left,
             "right": Key.right,
+            "enter": Key.enter,
         }
 
     def keydown(self, key: str) -> None:

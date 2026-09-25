@@ -47,6 +47,11 @@ XDOTOOL_KEY_NAMES = {
     "right": "Right",
 }
 
+# Menu-only keys (level-up / chest confirm). Kept apart from the movement table.
+MENU_KEY_NAMES = {
+    "enter": "Return",
+}
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
