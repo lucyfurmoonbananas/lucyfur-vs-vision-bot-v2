@@ -714,6 +714,7 @@ class MenuPilot:
     def new_run(self) -> None:
         """A fresh run: forget owned items and HP history."""
         self.reset_run()
+        self.revives = 0
         self.owned = set(self.start_items)
         self._hp.reset()
         self.picks = []

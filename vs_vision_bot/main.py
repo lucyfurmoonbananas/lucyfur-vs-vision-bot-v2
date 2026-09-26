@@ -146,6 +146,12 @@ def main(argv: list[str] | None = None) -> int:
 
     last_vector = (0, 0)
     last_nav_log = [0.0]
+    # Black box: the last ~8 s of gameplay frames, written out when a GAME OVER
+    # (REVIVE or QUIT) is handled, to see what actually killed the character.
+    blackbox: list[tuple[float, object]] = []
+    blackbox_dir = os.environ.get("VS_BLACKBOX_DIR", "/workspace/vsbot-check/deaths")
+    last_box = [0.0]
+    dumped_for = [0]
     t0 = time.monotonic()
     parked = False
     in_menu = False
@@ -182,6 +188,26 @@ def main(argv: list[str] | None = None) -> int:
                     result.menu = True
                     result.note = pilot.status
             in_menu = menu_kind is not None
+            if not cfg.demo and not bus.paused and not menu_kind:
+                now_box = time.monotonic()
+                if now_box - last_box[0] >= 0.5:
+                    last_box[0] = now_box
+                    blackbox.append((now_box, frame.copy()))
+                    del blackbox[:-16]
+            deaths = pilot.revives + (1 if pilot._quit_pressed else 0)
+            if deaths > dumped_for[0] and blackbox:
+                dumped_for[0] = deaths
+                try:
+                    import cv2
+
+                    stamp = time.strftime("%H%M%S")
+                    os.makedirs(blackbox_dir, exist_ok=True)
+                    for i, (_t, fr) in enumerate(blackbox):
+                        cv2.imwrite(os.path.join(blackbox_dir, f"death_{stamp}_{i:02d}.png"), fr)
+                    print(f"[blackbox] saved {len(blackbox)} frames before death to {blackbox_dir}/death_{stamp}_*.png")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[blackbox] failed: {exc}")
+                blackbox.clear()
             if bus.paused or result.menu:
                 vector, keys = (0, 0), ()
             else:
@@ -201,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
             last_vector = vector
             if pilot.finished and not bus.paused:
                 pilot_new_run[0] = True
+                dumped_for[0] = 0
                 # Final GAME OVER handled (QUIT + DONE). Stop acting; the game is
                 # closed / reopened outside the bot. Press p to run again.
                 bus.toggle_pause()

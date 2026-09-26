@@ -89,8 +89,10 @@ class Tuning:
     idle_penalty: float = 0.6   # standing still only when truly safe
     hysteresis: float = 0.35
     min_dwell_s: float = 0.22
-    gem_gain: float = 0.5
-    safe_danger: float = 0.6    # below this, gems may pull
+    gem_gain: float = 1.6
+    gem_danger: float = 1.6     # gems pull below this danger, fading out toward it
+    gem_radius: float = 300.0
+    safe_danger: float = 0.6
     panic_danger: float = 2.5   # above this, kiting bias fades out
     low_hp: float = 0.5
     # Encirclement breakout.
@@ -106,9 +108,9 @@ class Tuning:
     corridor_len: float = 320.0
     corridor_width: float = 34.0
     # Short look-ahead rollout: enemies chase while we walk each direction.
-    rollout_gain: float = 1.0
+    rollout_gain: float = 0.6
     player_speed: float = 100.0    # reference px / s
-    enemy_speed: float = 55.0
+    enemy_speed: float = 70.0
     rollout_s: float = 1.2         # per leg; two legs (turn allowed after the first)
     rollout_steps: int = 4
 
@@ -285,17 +287,21 @@ def score_directions(
         norm = math.hypot(kx, ky) or 1.0
         scores = scores + kite_scale * (_UNIT[:, 0] * kx / norm + _UNIT[:, 1] * ky / norm)
 
-    if gems and here < tune.safe_danger and not defensive:
+    gem_scale = max(0.0, 1.0 - here / tune.gem_danger) if tune.gem_danger > 0 else 0.0
+    if gems and gem_scale > 0 and not defensive:
+        # XP matters as much as dodging (live run8: level 6 at 3:53 with dozens of
+        # gems left on screen), so gems pull at moderate danger too, fading out as
+        # the crowd gets closer.
         g = np.asarray(gems, dtype=np.float32).reshape(-1, 2)
         gd = np.hypot(g[:, 0] - px, g[:, 1] - py)
-        close = g[gd < 220]
+        close = g[gd < tune.gem_radius]
         if close.shape[0]:
             pull = np.zeros(len(DIRS), dtype=np.float32)
             for gx, gy in close:
                 vx, vy = gx - px, gy - py
                 d = math.hypot(vx, vy) or 1.0
                 pull += (_UNIT[:, 0] * vx / d + _UNIT[:, 1] * vy / d) / (1.0 + d / 80.0)
-            scores = scores + tune.gem_gain * np.clip(pull, -1.5, 1.5)
+            scores = scores + tune.gem_gain * gem_scale * np.clip(pull, -1.5, 1.5)
 
     if current in DIRS:
         scores[DIRS.index(current)] += tune.hysteresis * (1.0 - 0.6 * panic)

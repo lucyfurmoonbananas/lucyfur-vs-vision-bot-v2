@@ -292,3 +292,15 @@ def test_denser_horde_sim_survives():
     assert r["damage"] < 70  # alive after the first minute of ~4:30 waves
     still = sim.simulate_horde("still", 30, seed=1)
     assert still["damage"] > 5 * max(r["damage"], 1.0)
+
+
+def test_gems_still_pull_at_moderate_danger():
+    # A few enemies at mid range (here ~0.5-1.0): the old code ignored gems then.
+    pts = np.array(blob(480, 420, n=6, spread=20) + blob(700, 256, n=4, spread=15), np.float32)
+    here = score_directions(pts, P, None, 0.0).danger_here
+    assert 0.3 < here < 1.6
+    dec = score_directions(pts, P, None, 0.0, gems=[(330, 150), (340, 160), (320, 140)])
+    assert dec.vector[0] == -1 and dec.vector[1] == -1
+    # Not when HP is low.
+    low = score_directions(pts, P, None, 0.0, gems=[(330, 150), (340, 160), (320, 140)], hp=0.3)
+    assert low.scores[(-1, -1)] < dec.scores[(-1, -1)]
