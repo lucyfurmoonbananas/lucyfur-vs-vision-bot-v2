@@ -18,6 +18,15 @@ Per frame, every one of the 8 WASD directions is scored:
 * inertia - hysteresis: the current direction gets a bonus and a minimum
   dwell time so the chord does not jitter frame to frame.
 
+Encirclement breakout: the crowd is binned into 16 angular sectors around the
+player. When most sectors are occupied (the ring is closing) or nearby density
+keeps rising while half the sectors fill, the navigator commits to a breakout:
+it casts corridors in the 8 directions, picks the thinnest one that leads to
+open space (preferring not to reverse), and follows it for a second or more
+with a strong bias, re-checking the gap as it goes. Afterwards the roam loop
+continues from that heading, so the character keeps sweeping in big loops
+instead of being boxed in.
+
 Behaviour switches by game phase (tight weaving for the ~7:00 skeleton swarm,
 slow circles later, near-still after ~21:00) and by HP (more defensive when low).
 """
@@ -59,7 +68,7 @@ class Phase:
 def phase_for(game_s: float) -> Phase:
     """Movement style by game time (Mad Forest, Lucyfur's playbook)."""
     if game_s < 6 * 60 + 30:
-        return Phase("wide-circles", 9.0, 1.0)
+        return Phase("wide-circles", 13.0, 1.0)
     if game_s < 9 * 60 + 30:
         return Phase("tight-weave", 4.0, 0.55)
     if game_s < 15 * 60:
@@ -84,6 +93,24 @@ class Tuning:
     safe_danger: float = 0.6    # below this, gems may pull
     panic_danger: float = 2.5   # above this, kiting bias fades out
     low_hp: float = 0.5
+    # Encirclement breakout.
+    sector_radius: float = 260.0   # crowd within this radius counts for encirclement
+    sector_thr: float = 0.30       # per-sector density that counts as "occupied"
+    cover_trigger: float = 0.55    # occupied fraction of sectors that forces a breakout
+    cover_rising: float = 0.40     # ... or this much while density keeps rising
+    rise_trigger: float = 0.8      # fast-minus-slow EMA of nearby density
+    near_min: float = 2.0          # ignore sparse screens
+    breakout_weight: float = 1.5
+    breakout_min_s: float = 1.1
+    breakout_max_s: float = 3.0
+    corridor_len: float = 320.0
+    corridor_width: float = 34.0
+    # Short look-ahead rollout: enemies chase while we walk each direction.
+    rollout_gain: float = 1.0
+    player_speed: float = 100.0    # reference px / s
+    enemy_speed: float = 55.0
+    rollout_s: float = 1.2         # per leg; two legs (turn allowed after the first)
+    rollout_steps: int = 4
 
 
 @dataclass
@@ -121,6 +148,100 @@ def _path_contact(points: np.ndarray, px: float, py: float, length: float, body:
     return out
 
 
+N_SECTORS = 16
+
+
+def sector_profile(points: np.ndarray, px: float, py: float, radius: float = 260.0) -> np.ndarray:
+    """Crowd weight per angular sector (16) around the player, nearer cells count more."""
+    out = np.zeros(N_SECTORS, dtype=np.float32)
+    if points.shape[0] == 0:
+        return out
+    rx = points[:, 0] - px
+    ry = points[:, 1] - py
+    d = np.hypot(rx, ry)
+    keep = (d < radius) & (d > 1e-3)
+    if not keep.any():
+        return out
+    ang = np.arctan2(ry[keep], rx[keep])
+    idx = ((ang + math.pi) / (2 * math.pi) * N_SECTORS).astype(int) % N_SECTORS
+    w = points[keep, 2] / (1.0 + (d[keep] / 140.0) ** 2)
+    np.add.at(out, idx, w)
+    return out
+
+
+def encirclement(points: np.ndarray, px: float, py: float, radius: float = 260.0, thr: float = 0.3) -> tuple[float, float]:
+    """(fraction of occupied sectors, total nearby weight). 1.0 = fully surrounded."""
+    prof = sector_profile(points, px, py, radius)
+    return float((prof > thr).mean()), float(prof.sum())
+
+
+def corridor_costs(points: np.ndarray, px: float, py: float, length: float = 320.0, width: float = 34.0) -> np.ndarray:
+    """Crowd weight inside a widening corridor along each of the 8 directions (low = open)."""
+    out = np.zeros(len(DIRS), dtype=np.float32)
+    if points.shape[0] == 0:
+        return out
+    rel = points[:, :2] - np.array([px, py], dtype=np.float32)
+    for i, (ux, uy) in enumerate(_UNIT):
+        t = rel[:, 0] * ux + rel[:, 1] * uy
+        perp = np.abs(rel[:, 0] * uy - rel[:, 1] * ux)
+        inside = (t > -10) & (t < length) & (perp < width + 0.3 * np.clip(t, 0, None))
+        out[i] = float((points[inside, 2] / (1.0 + np.clip(t[inside], 0, None) / 110.0)).sum())
+    # The visible playfield is shorter vertically: rays that leave the screen early see
+    # less, so a little unseen-space penalty keeps breakouts biased toward long runs.
+    vis = np.array([min(abs(430 / ux) if ux else 1e9, abs(250 / uy) if uy else 1e9) for ux, uy in _UNIT])
+    out += 0.4 * np.clip((length - vis) / length, 0, None)
+    return out
+
+
+def rollout_costs(
+    points: np.ndarray, px: float, py: float, tune: "Tuning",
+) -> np.ndarray:
+    """Predicted crowding for each of the 8 directions over two short legs.
+
+    Enemies are assumed to chase the player at ``enemy_speed``. Leg 1 walks a
+    direction for ``rollout_s``; leg 2 takes the best follow-up direction, so a
+    move that leads into a dead end scores badly even if its first step is clear.
+    """
+    D = len(DIRS)
+    if points.shape[0] == 0:
+        return np.zeros(D, dtype=np.float32)
+    # Only cells that can reach us within the horizon matter.
+    rel = points[:, :2] - np.array([px, py], dtype=np.float32)
+    reach = (tune.player_speed + tune.enemy_speed) * 2 * tune.rollout_s + 60
+    keep = np.hypot(rel[:, 0], rel[:, 1]) < reach
+    pts = points[keep]
+    rel = rel[keep]
+    if pts.shape[0] == 0:
+        return np.zeros(D, dtype=np.float32)
+    w = pts[:, 2]
+    dt = tune.rollout_s / tune.rollout_steps
+    body2 = tune.body * tune.body
+
+    # Leg 1: shape (D, N)
+    p = np.zeros((D, 2), dtype=np.float32)
+    e = np.broadcast_to(rel, (D,) + rel.shape).copy()
+    c1 = np.zeros(D, dtype=np.float32)
+    for k in range(tune.rollout_steps):
+        p = p + _UNIT * tune.player_speed * dt
+        v = p[:, None, :] - e
+        d = np.hypot(v[..., 0], v[..., 1]) + 1e-3
+        e = e + v / d[..., None] * np.minimum(tune.enemy_speed * dt, d)[..., None]
+        d = np.hypot(p[:, None, 0] - e[..., 0], p[:, None, 1] - e[..., 1])
+        c1 += ((w / (1.0 + d * d / body2)) * (1.0 + 2.0 * (d < tune.body))).sum(axis=1) * (1.0 - 0.1 * k)
+    # Leg 2: (D, D, N) best follow-up per first direction.
+    p2 = np.repeat(p[:, None, :], D, axis=1)
+    e2 = np.repeat(e[:, None, :, :], D, axis=1)
+    c2 = np.zeros((D, D), dtype=np.float32)
+    for k in range(tune.rollout_steps):
+        p2 = p2 + _UNIT[None, :, :] * tune.player_speed * dt
+        v = p2[:, :, None, :] - e2
+        d = np.hypot(v[..., 0], v[..., 1]) + 1e-3
+        e2 = e2 + v / d[..., None] * np.minimum(tune.enemy_speed * dt, d)[..., None]
+        d = np.hypot(p2[:, :, None, 0] - e2[..., 0], p2[:, :, None, 1] - e2[..., 1])
+        c2 += ((w / (1.0 + d * d / body2)) * (1.0 + 2.0 * (d < tune.body))).sum(axis=2) * 0.6
+    return (c1 + c2.min(axis=1)) / tune.rollout_steps
+
+
 def score_directions(
     threats: np.ndarray,
     player: tuple[float, float],
@@ -131,6 +252,7 @@ def score_directions(
     hp: float | None = None,
     tune: Tuning | None = None,
     idle_ok: bool = False,
+    kite_floor: bool = False,
 ) -> Decision:
     """Pure scoring: returns the best 8-way (or idle) vector plus diagnostics."""
     tune = tune or Tuning()
@@ -148,10 +270,16 @@ def score_directions(
     danger = _danger_at(pts, nx, ny, radius) + 0.6 * _danger_at(pts, fx, fy, radius * 1.4)
     contact = _path_contact(pts, px, py, tune.step_far, tune.body)
     scores = -(danger_gain * danger + tune.contact_gain * contact)
+    if tune.rollout_gain > 0:
+        scores = scores - tune.rollout_gain * (1.8 if defensive else 1.0) * rollout_costs(pts, px, py, tune)
 
     # Kiting fades out when things get tight: pure escape then.
     panic = min(1.0, max(0.0, (here - tune.safe_danger) / max(tune.panic_danger - tune.safe_danger, 1e-6)))
-    kite_scale = kite_weight * (1.0 - 0.75 * panic) * (0.7 if defensive else 1.0)
+    if kite_floor:
+        # Breakout heading: stays strong under pressure (contact terms still veto bodies).
+        kite_scale = kite_weight * (1.0 - 0.3 * panic)
+    else:
+        kite_scale = kite_weight * (1.0 - 0.75 * panic) * (0.7 if defensive else 1.0)
     if kite_dir is not None and kite_scale > 0:
         kx, ky = kite_dir
         norm = math.hypot(kx, ky) or 1.0
@@ -201,6 +329,14 @@ class Navigator:
         self._since_change = 0.0
         self._blocked_s = 0.0
         self.last: Decision | None = None
+        self._near_fast = 0.0
+        self._near_slow = 0.0
+        self._near_init = False
+        self.breakout: tuple[float, float] | None = None
+        self._breakout_s = 0.0
+        self._breakout_check = 0.0
+        self.breakouts = 0
+        self.cover = 0.0
 
     @property
     def phase(self) -> Phase:
@@ -235,16 +371,67 @@ class Navigator:
         self.heading = math.atan2(ky, kx)  # keep the roam loop continuous
         return (kx, ky)
 
+    def _update_breakout(self, pts: np.ndarray, px: float, py: float, dt: float, hp: float | None) -> None:
+        t = self.tune
+        cover, near = encirclement(pts, px, py, t.sector_radius, t.sector_thr)
+        self.cover = cover
+        if not self._near_init:
+            # First frame: no trend yet (a full screen at unpause is not "rising").
+            self._near_fast = self._near_slow = near
+            self._near_init = True
+        a_fast = min(1.0, dt / 0.35) if dt > 0 else 0.0
+        a_slow = min(1.0, dt / 2.5) if dt > 0 else 0.0
+        self._near_fast += a_fast * (near - self._near_fast)
+        self._near_slow += a_slow * (near - self._near_slow)
+        rising = self._near_fast - self._near_slow
+        low = hp is not None and hp < t.low_hp
+        trigger_cover = t.cover_trigger - (0.1 if low else 0.0)
+        closing = near >= t.near_min and (cover >= trigger_cover or (cover >= t.cover_rising and rising >= t.rise_trigger))
+
+        if self.breakout is not None:
+            self._breakout_s += dt
+            self._breakout_check += dt
+            done = self._breakout_s >= t.breakout_max_s or (
+                self._breakout_s >= t.breakout_min_s and not closing
+            )
+            if done:
+                self.heading = math.atan2(self.breakout[1], self.breakout[0])
+                self.breakout = None
+                return
+            if self._breakout_check >= 0.4:
+                # Re-check the gap: switch only if the chosen corridor clearly closed.
+                self._breakout_check = 0.0
+                costs = corridor_costs(pts, px, py, t.corridor_len, t.corridor_width)
+                cur = DIRS.index(_nearest_dir(self.breakout))
+                best = int(np.argmin(costs))
+                if costs[cur] > 1.6 * costs[best] + 0.5:
+                    self.breakout = tuple(_UNIT[best])
+            return
+        if not closing:
+            return
+        costs = corridor_costs(pts, px, py, t.corridor_len, t.corridor_width)
+        # Prefer keeping momentum over reversing into what we just ran from.
+        if self.current in DIRS:
+            cu = _UNIT[DIRS.index(self.current)]
+            align = _UNIT @ cu
+            costs = costs + 0.25 * (1.0 - align)
+        best = int(np.argmin(costs))
+        self.breakout = tuple(float(v) for v in _UNIT[best])
+        self._breakout_s = 0.0
+        self._breakout_check = 0.0
+        self.breakouts += 1
+
     def step(self, result: VisionResult, hp: float | None = None) -> Decision:
         now = self.clock()
         dt = 0.0 if self._last_t is None else min(0.5, max(0.0, now - self._last_t))
         self._last_t = now
-        self.game_s += dt
-        self._since_change += dt
         if result.menu:
+            # Level-up / chest screens pause the game clock too.
             self.current = (0, 0)
             self.last = Decision((0, 0), {}, 0.0, "menu")
             return self.last
+        self.game_s += dt
+        self._since_change += dt
 
         pts = result.threats
         if pts is None:
@@ -253,16 +440,26 @@ class Navigator:
         px, py = _ref_player(result)
         phase = self.phase
         kite = self._kite_direction(pts, px, py, dt)
-        dec = score_directions(
-            pts, (px, py), kite, phase.kite_weight,
-            gems=result.gems, current=self.current, hp=hp,
-            tune=self.tune, idle_ok=phase.idle_ok,
-        )
+        self._update_breakout(pts, px, py, dt, hp)
+        if self.breakout is not None:
+            dec = score_directions(
+                pts, (px, py), self.breakout, self.tune.breakout_weight,
+                gems=None, current=self.current, hp=hp, tune=self.tune, idle_ok=False,
+                kite_floor=True,
+            )
+            dec.mode = "breakout"
+            kite = self.breakout
+        else:
+            dec = score_directions(
+                pts, (px, py), kite, phase.kite_weight,
+                gems=result.gems, current=self.current, hp=hp,
+                tune=self.tune, idle_ok=phase.idle_ok,
+            )
 
         # Flip the orbit when the field keeps overruling it (the loop runs into
         # a crowd): kiting the other way round stops the two fighting.
         v = dec.vector
-        if v != (0, 0):
+        if v != (0, 0) and self.breakout is None:
             kn = math.hypot(*kite) or 1.0
             agree = (v[0] * kite[0] + v[1] * kite[1]) / (math.hypot(*v) * kn)
             self._blocked_s = self._blocked_s + dt if agree < -0.3 else 0.0

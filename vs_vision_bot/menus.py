@@ -84,6 +84,7 @@ OTHER: list[str] = [
     "Bracer",
     "Wings",
     "Tiragisú",
+    "Tirajisú",
     "Skull O'Maniac",
     "Metaglio Left",
     "Metaglio Right",
@@ -274,8 +275,50 @@ def detect_level_up(frame: np.ndarray) -> LevelUpScreen | None:
 HP_BAR_W_960 = 36  # full player HP bar width on a 960-wide frame
 
 
+# Measured on real 960x540 frames: the bar spans x 462..497, y 272..276.
+HP_BAR_RECT_960 = (462, 272, 498, 277)
+
+
+def read_hp_bar(frame: np.ndarray) -> float | None:
+    """HP from the fixed-position bar under the centered character.
+
+    Each bar column is red (health), dark (missing health) or occluded (a sprite or
+    projectile on top). HP = end of the red part / bar width. None unless most of
+    the bar is visible and it really looks like the bar (red starting at the left edge).
+    """
+    h, w = frame.shape[:2]
+    sx, sy = w / 960.0, h / 540.0
+    x0, y0, x1, y1 = HP_BAR_RECT_960
+    x0, x1 = int(round(x0 * sx)), max(int(round(x1 * sx)), int(round(x0 * sx)) + 2)
+    y0, y1 = int(round(y0 * sy)), max(int(round(y1 * sy)), int(round(y0 * sy)) + 1)
+    roi = frame[y0:y1, x0:x1].astype(np.int16)
+    if roi.size == 0:
+        return None
+    red = ((roi[:, :, 2] > 200) & (roi[:, :, 1] < 50) & (roi[:, :, 0] < 50)).mean(axis=0) >= 0.5
+    dark = (roi.max(axis=2) < 45).mean(axis=0) >= 0.5
+    n = roi.shape[1]
+    seen = red | dark
+    if seen.sum() < 0.6 * n:
+        return None
+    reds = np.flatnonzero(red)
+    if reds.size == 0:
+        # Empty-looking bar: only trust it if the left end is visible and dark.
+        return 0.0 if dark[: max(2, n // 6)].all() else None
+    if reds[0] > max(1, n // 12):
+        # Red must start at the left edge unless that part is occluded.
+        if dark[: reds[0]].any():
+            return None
+    end = int(reds[-1]) + 1
+    if red[end:].sum() == 0 and dark[end:].sum() + red[:end].sum() < 0.5 * n:
+        return None
+    return min(1.0, end / n)
+
+
 def read_hp_fraction(frame: np.ndarray) -> float | None:
     """Player HP from the red bar just under the centered character (None if not seen)."""
+    anchored = read_hp_bar(frame)
+    if anchored is not None:
+        return anchored
     h, w = frame.shape[:2]
     x0, x1 = int(w * 0.42), int(w * 0.58)
     y0, y1 = int(h * 0.47), int(h * 0.56)
@@ -407,14 +450,95 @@ def read_cards(frame: np.ndarray, screen: LevelUpScreen) -> LevelUpScreen:
 
 CHICKEN = "Floor Chicken"
 COINS = ("Gold Coins", "Coin Bag", "Big Coin Bag")
-LOW_HP = 0.6
+LOW_HP = 0.6        # maxed build: chicken below this, otherwise coins
+DEFENSIVE_HP = 0.5  # below this, healing / defense items come first
+MAX_WEAPONS = 6
+
+# Every weapon (base + evolved) so owned-weapon slots can be counted.
+WEAPONS: frozenset[str] = frozenset(
+    {
+        "Whip", "Magic Wand", "Knife", "Axe", "Cross", "King Bible", "Fire Wand", "Garlic",
+        "Santa Water", "Runetracer", "Lightning Ring", "Pentagram", "Peachone", "Ebony Wings",
+        "Phiera Der Tuphello", "Eight The Sparrow", "Gatti Amari", "Song of Mana", "Shadow Pinion",
+        "Clock Lancet", "Laurel", "Bone", "Cherry Bomb", "Carréllo", "Celestial Dusting",
+        "Silver Wind", "Pako Battiliar",
+        "Bloody Tear", "Holy Wand", "Thousand Edge", "Death Spiral", "Heaven Sword",
+        "Unholy Vespers", "Hellfire", "Soul Eater", "La Borra", "NO FUTURE", "Thunder Loop",
+        "Gorgeous Moon", "Vandalier", "Mannajja",
+    }
+)
+EVOLUTIONS: tuple[str, ...] = (
+    "Soul Eater", "Holy Wand", "NO FUTURE", "Thunder Loop", "Vandalier", "La Borra",
+    "Unholy Vespers", "Heaven Sword", "Gorgeous Moon", "Hellfire", "Bloody Tear",
+    "Death Spiral", "Thousand Edge", "Mannajja",
+)
+# Crowd-clearers that need no aiming: wanted early so the build has 5-6 weapons by 5:00.
+CROWD_WEAPONS: tuple[str, ...] = ("Santa Water", "King Bible", "Lightning Ring")
+OTHER_WEAPONS: tuple[str, ...] = (
+    "Magic Wand", "Runetracer", "Peachone", "Ebony Wings", "Cross", "Pentagram", "Fire Wand", "Laurel",
+)
+# Healing / defense, best first. Tirajisú is an extra revival; Laurel is a hit-blocking shield.
+DEFENSE: tuple[str, ...] = (CHICKEN, "Armor", "Hollow Heart", "Pummarola", "Tirajisú", "Tiragisú", "Laurel")
+# Passives that do nothing for survival right now: never taken while HP is low if anything better is offered.
+LUXURY: frozenset[str] = frozenset(
+    {"Duplicator", "Spellbinder", "Stone Mask", "Crown", "Candelabrador", "Clover", "Empty Tome",
+     "Attractorb", "Skull O'Maniac", "Bracer", "Wings", "Spinach"}
+)
 
 
-def choose_card(cards: list[Card], hp: float | None = None) -> int:
-    """Index of the card to take. Priority list, then owned levels, then new non-avoided.
+def owned_weapon_count(owned: set[str] | frozenset[str]) -> int:
+    return sum(1 for n in owned if n in WEAPONS)
 
-    Maxed-out build (only Floor Chicken / coin bag offered): chicken when HP is
-    below ~60 %, otherwise the coin bag.
+
+def _card_rank(c: Card, idx: int, hp: float | None, weapons: int) -> tuple[int, int]:
+    name = c.name
+    low = hp is not None and hp < DEFENSIVE_HP
+    slots_free = weapons < MAX_WEAPONS
+    if name in EVOLUTIONS and not c.new:
+        return (0, EVOLUTIONS.index(name))
+    if low and name in DEFENSE:
+        return (1, DEFENSE.index(name))
+    if name in AVOID:
+        return (40 if c.new else 30, idx)
+    if name == CHICKEN or name in COINS:
+        return (50, idx)
+    if c.new and name in WEAPONS:
+        if not slots_free:
+            return (35, idx)
+        if name in CROWD_WEAPONS:
+            return (2, CROWD_WEAPONS.index(name))
+        if name in OTHER_WEAPONS:
+            return (4, OTHER_WEAPONS.index(name))
+        return (20, idx)  # unknown / unranked new weapon
+    if name == "Garlic":
+        return (3, 0)
+    if name in ("Pummarola", "Armor"):
+        return (5, 0 if name == "Pummarola" else 1)
+    if not c.new and name in WEAPONS:
+        return (6, PRIORITY.index(name) if name in PRIORITY else len(PRIORITY) + idx)
+    if name == "Hollow Heart":
+        return (7, 0)
+    if name in PRIORITY:
+        # Passives by the skill's order; luxury ones sink below everything useful at low HP.
+        return (25 if low and name in LUXURY else 8, PRIORITY.index(name))
+    if not c.new:
+        return (25 if low and name in LUXURY else 10, idx)  # a level on anything owned
+    return (15, idx)
+
+
+def choose_card(cards: list[Card], hp: float | None = None, owned: set[str] | None = None) -> int:
+    """Index of the card to take.
+
+    * Maxed-out build (only Floor Chicken / coin bag offered): chicken when HP is
+      below ~60 %, otherwise the coin bag.
+    * Evolutions first. HP below 50 %: Floor Chicken, Armor, Hollow Heart,
+      Pummarola (then Tirajisú / Laurel) before anything else, and luxury
+      passives such as Duplicator sink below weapon levels.
+    * While weapon slots are free: new crowd-clearers (Santa Water, King Bible,
+      Lightning Ring), then Garlic levels, then other good new weapons, then
+      Pummarola / Armor, owned weapon levels, passives by priority.
+    * The skill's avoid list (Whip, Axe, Knife, ...) and filler come last.
+    Reroll / Banish / Skip are not cards and are never selected.
     """
     if not cards:
         return 0
@@ -428,20 +552,34 @@ def choose_card(cards: list[Card], hp: float | None = None) -> int:
         if coins:
             return coins[0]
         return chicken[0]
+    known = set(owned or ())
+    known |= {c.name for c in cards if c.name and not c.new}
+    weapons = owned_weapon_count(known)
+    return min(range(len(cards)), key=lambda i: _card_rank(cards[i], i, hp, weapons))
 
-    def score(i: int) -> tuple[int, int]:
-        c = cards[i]
-        if c.name in PRIORITY:
-            return (0, PRIORITY.index(c.name))
-        if c.name in AVOID:
-            return (4 if c.new else 3, i)
-        if c.name in filler:
-            return (5, i)
-        if not c.new:
-            return (1, i)  # a level on anything owned beats a new unwanted item
-        return (2, i)
 
-    return min(range(len(cards)), key=score)
+class HpTracker:
+    """Median of the last few HP-bar readings: one frame with a sprite over the bar
+    (or a red hit flash) must not swing the level-up choice."""
+
+    def __init__(self, window: int = 5) -> None:
+        self.window = window
+        self.values: list[float] = []
+
+    def add(self, v: float | None) -> None:
+        if v is None:
+            return
+        self.values.append(float(v))
+        del self.values[: -self.window]
+
+    def reset(self) -> None:
+        self.values.clear()
+
+    @property
+    def value(self) -> float | None:
+        if not self.values:
+            return None
+        return float(np.median(self.values))
 
 
 # ---------------------------------------------------------------- chest OCR
@@ -524,8 +662,12 @@ class MenuPilot:
         settle_frames: int = 2,
         log: Callable[[str], None] = print,
         results_dir: str | None = None,
+        start_items: tuple[str, ...] = ("Garlic",),
     ) -> None:
         self.results_dir = results_dir
+        self.start_items = tuple(start_items)
+        self.owned: set[str] = set(self.start_items)
+        self._hp = HpTracker()
         self.saved_results: list[str] = []
         self.tap = tap
         self.refocus = refocus or (lambda: True)
@@ -540,13 +682,13 @@ class MenuPilot:
         self.revives = 0
         self._quit_pressed = False
         self.finished = False
-        self.hp: float | None = None
         self.settle_frames = settle_frames
         self._stable = 0
         self._next_action = 0.0
         self._sig: bytes | None = None
         self._target: int | None = None
         self._names: list[str] = []
+        self._chosen = ""
         self._presses = 0
         self._unknown_sel = 0
         self._last_scan = -1e9
@@ -556,6 +698,23 @@ class MenuPilot:
         self.picks: list[str] = []
         self.chest_presses = 0
         self.status = ""
+
+    @property
+    def hp(self) -> float | None:
+        """Smoothed HP fraction (median of recent bar readings), None until seen."""
+        return self._hp.value
+
+    @hp.setter
+    def hp(self, v: float | None) -> None:
+        self._hp.reset()
+        self._hp.add(v)
+
+    def new_run(self) -> None:
+        """A fresh run: forget owned items and HP history."""
+        self.reset_run()
+        self.owned = set(self.start_items)
+        self._hp.reset()
+        self.picks = []
 
     # -- helpers
     def _press(self, key: str, cooldown: float) -> None:
@@ -594,9 +753,7 @@ class MenuPilot:
             return "levelup"
         self._sig = None
         self._target = None
-        hp = read_hp_fraction(frame)
-        if hp is not None:
-            self.hp = hp
+        self._hp.add(read_hp_fraction(frame))
         return self._handle_chest(frame, now)
 
     def _handle_level_up(self, frame: np.ndarray, screen: LevelUpScreen, now: float) -> None:
@@ -613,12 +770,15 @@ class MenuPilot:
                 return
             read_cards(frame, screen)
             self._names = [c.name or c.raw or "?" for c in screen.cards]
-            self._target = choose_card(screen.cards, hp=self.hp)
+            self.owned |= {c.name for c in screen.cards if c.name and not c.new}
+            self._target = choose_card(screen.cards, hp=self.hp, owned=self.owned)
+            self._chosen = screen.cards[self._target].name
             self._presses = 0
             self._unknown_sel = 0
             self.log(
                 f"[levelup] cards={self._names} new={[c.new for c in screen.cards]} "
-                f"-> pick #{self._target + 1} {self._names[self._target]} (hp={self.hp})"
+                f"-> pick #{self._target + 1} {self._names[self._target]} "
+                f"(hp={self.hp if self.hp is None else round(self.hp, 2)}, weapons={owned_weapon_count(self.owned)})"
             )
         if now < self._next_action:
             self.status = f"LEVEL UP -> {self._names[self._target]}"
@@ -646,6 +806,8 @@ class MenuPilot:
             name = self._names[target] if target < len(self._names) else "?"
             self._press("enter", self.confirm_cooldown_s)
             self.picks.append(name)
+            if self._chosen:
+                self.owned.add(self._chosen)
             self.log(f"[levelup] picked #{target + 1} {name} (total picks {len(self.picks)})")
             self._target = None
             self._sig = None

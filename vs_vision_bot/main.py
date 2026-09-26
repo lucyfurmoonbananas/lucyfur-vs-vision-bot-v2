@@ -108,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
             pilot.reset_run()
             if pilot_new_run[0]:
                 nav.reset()
+                pilot.new_run()
                 pilot_new_run[0] = False
 
     def release_before_menu_key() -> bool:

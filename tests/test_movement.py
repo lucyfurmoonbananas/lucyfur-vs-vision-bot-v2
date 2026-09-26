@@ -205,3 +205,90 @@ def test_tuning_is_overridable():
     t = Tuning(hysteresis=0.0, min_dwell_s=0.0)
     nav = Navigator(tune=t, clock=Clock())
     assert nav.tune.hysteresis == 0.0
+
+
+# ---------------------------------------------------------------- breakout / rollout
+
+
+def test_encirclement_measures_ring_coverage():
+    full = np.array(ring(480, 256, 150, 32), np.float32)
+    half = np.array([p for p in ring(480, 256, 150, 32) if p[0] > 480], np.float32)
+    cf, nf = pathfind.encirclement(full, 480, 256)
+    ch, nh = pathfind.encirclement(half, 480, 256)
+    assert cf > 0.9
+    assert 0.3 < ch < 0.65
+    assert nf > nh
+    assert pathfind.encirclement(np.zeros((0, 3), np.float32), 480, 256) == (0.0, 0.0)
+
+
+def test_corridor_costs_find_the_thin_side():
+    # Ring with a gap to the upper-left (225 deg on screen = dx<0, dy<0).
+    pts = np.array(ring(480, 256, 140, 36, gap_deg=(205, 245)), np.float32)
+    costs = pathfind.corridor_costs(pts, 480, 256)
+    assert DIRS[int(np.argmin(costs))] == (-1, -1)
+
+
+def test_closing_ring_triggers_breakout_through_the_gap():
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    nav.game_s = 300.0
+    pts = ring(480, 256, 170, 40, gap_deg=(-1, 25))  # gap to the right
+    out = run(nav, clock, result(pts), 10, hp=1.0)
+    assert nav.breakouts >= 1
+    assert nav.last.mode.startswith("breakout")
+    assert sum(1 for v in out[-6:] if v[0] == 1) >= 4
+
+
+def test_breakout_commits_then_resumes_loops():
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    pts = ring(480, 256, 170, 40, gap_deg=(170, 200))  # gap to the left
+    run(nav, clock, result(pts), 6, hp=1.0)
+    assert nav.breakout is not None
+    heading = nav.breakout
+    # Ring gone: keeps the breakout for its minimum time, then drops it.
+    run(nav, clock, result([]), 3)
+    assert nav.breakout == heading
+    run(nav, clock, result([]), 30)
+    assert nav.breakout is None
+    assert abs(math.atan2(math.sin(nav.heading - math.pi), math.cos(nav.heading - math.pi))) < 1.6
+
+
+def test_sparse_or_one_sided_crowd_does_not_trigger_breakout():
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    run(nav, clock, result(blob(600, 256, n=14)), 12, hp=1.0)
+    assert nav.breakouts == 0
+
+
+def test_rollout_avoids_walking_into_an_incoming_wall():
+    # A wall of enemies ahead-right at medium range: the static field barely
+    # notices, the chase rollout does.
+    wall = [(700, y, 1.0) for y in range(120, 400, 14)]
+    costs = pathfind.rollout_costs(np.array(wall, np.float32), 480, 256, Tuning())
+    right = costs[DIRS.index((1, 0))]
+    left = costs[DIRS.index((-1, 0))]
+    assert right > 2 * left
+
+
+def test_menu_frames_do_not_advance_game_clock():
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    run(nav, clock, result([], menu=True), 24)
+    assert nav.game_s == 0.0
+    run(nav, clock, result([]), 12)
+    assert 0.8 < nav.game_s < 1.1
+
+
+def test_denser_horde_sim_survives():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "sim_movement.py"
+    spec = importlib.util.spec_from_file_location("sim_movement", path)
+    sim = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sim)
+    r = sim.simulate_horde("new", 60, seed=1)
+    assert r["damage"] < 70  # alive after the first minute of ~4:30 waves
+    still = sim.simulate_horde("still", 30, seed=1)
+    assert still["damage"] > 5 * max(r["damage"], 1.0)

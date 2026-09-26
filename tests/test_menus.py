@@ -99,8 +99,101 @@ def test_maxed_build_chicken_when_low_hp_else_coins():
     assert choose_card(offer, hp=0.3) == 1
     assert choose_card(offer, hp=0.9) == 0
     assert choose_card(offer, hp=None) == 0
-    # Filler never beats a real item.
-    assert choose_card(_cards(("Floor Chicken", False), ("Axe", True)), hp=0.1) == 1
+    # Filler never beats a real item while healthy (or HP unknown) ...
+    assert choose_card(_cards(("Floor Chicken", False), ("Axe", True)), hp=0.9) == 1
+    assert choose_card(_cards(("Floor Chicken", False), ("Axe", True)), hp=None) == 1
+    # ... but at low HP the chicken's 30 HP heal comes first.
+    assert choose_card(_cards(("Floor Chicken", False), ("Axe", True)), hp=0.1) == 0
+    assert choose_card(_cards(("Garlic", False), ("Floor Chicken", False)), hp=0.2) == 1
+
+
+def test_low_hp_prefers_healing_and_defense_over_duplicator():
+    # Live run7: took Duplicator at 14 % / 6 % HP.
+    offer = _cards(("Duplicator", True), ("Eight The Sparrow", True), ("Armor", True))
+    assert choose_card(offer, hp=0.06) == 2
+    offer = _cards(("Duplicator", False), ("Axe", True), ("Laurel", True))
+    assert choose_card(offer, hp=0.14) == 2  # Laurel shield, not Duplicator
+    offer = _cards(("Duplicator", False), ("Hollow Heart", True), ("Pummarola", True))
+    assert choose_card(offer, hp=0.3) == 1
+    offer = _cards(("Spellbinder", True), ("Pummarola", True), ("Hollow Heart", True))
+    assert choose_card(offer, hp=0.3) == 2
+    # Low HP with no defense offered: a weapon level beats a luxury passive.
+    offer = _cards(("Duplicator", False), ("Cross", False))
+    assert choose_card(offer, hp=0.2, owned={"Garlic", "Cross"}) == 1
+    # Healthy: defense is not forced ahead of a crowd-clearing weapon.
+    offer = _cards(("Armor", True), ("Santa Water", True))
+    assert choose_card(offer, hp=0.9, owned={"Garlic"}) == 1
+
+
+def test_new_crowd_weapons_first_while_slots_are_free():
+    owned = {"Garlic"}
+    assert choose_card(_cards(("Garlic", False), ("King Bible", True)), hp=1.0, owned=owned) == 1
+    assert choose_card(_cards(("Magic Wand", True), ("Lightning Ring", True)), hp=1.0, owned=owned) == 1
+    assert choose_card(_cards(("Santa Water", True), ("Lightning Ring", True), ("King Bible", True))) == 0
+    # A new weapon beats a passive while slots are free.
+    assert choose_card(_cards(("Duplicator", True), ("Peachone", True)), hp=1.0, owned=owned) == 1
+    assert choose_card(_cards(("Empty Tome", True), ("Cross", True)), hp=1.0, owned=owned) == 1
+    # Garlic levels still beat non-crowd new weapons.
+    assert choose_card(_cards(("Magic Wand", True), ("Garlic", False)), owned=owned) == 1
+
+
+def test_full_weapon_slots_stop_new_weapon_preference():
+    six = {"Garlic", "Santa Water", "King Bible", "Lightning Ring", "Magic Wand", "Cross"}
+    assert menus.owned_weapon_count(six) == 6
+    offer = _cards(("Runetracer", True), ("Lightning Ring", False))
+    assert choose_card(offer, hp=1.0, owned=six) == 1
+    offer = _cards(("Peachone", True), ("Pummarola", True))
+    assert choose_card(offer, hp=1.0, owned=six) == 1
+
+
+def test_evolution_comes_first():
+    assert choose_card(_cards(("Armor", True), ("Soul Eater", False)), hp=0.2) == 1
+
+
+def test_hp_tracker_uses_median():
+    t = menus.HpTracker(window=5)
+    assert t.value is None
+    for v in (0.9, 0.9, 0.1, 0.9, None, 0.85):
+        t.add(v)
+    assert t.value == pytest.approx(0.9)
+    for v in (0.3, 0.3, 0.3):
+        t.add(v)
+    assert t.value == pytest.approx(0.3)
+
+
+def _bar_frame(red_cols: int, occlude: tuple[int, int] | None = None) -> np.ndarray:
+    frame = np.full((540, 960, 3), (40, 90, 50), np.uint8)
+    x0, y0, x1, y1 = menus.HP_BAR_RECT_960
+    frame[y0:y1, x0:x1] = (10, 10, 10)
+    frame[y0:y1, x0 : x0 + red_cols] = (0, 0, 255)
+    if occlude:
+        frame[y0 - 3 : y1 + 3, x0 + occlude[0] : x0 + occlude[1]] = (180, 200, 220)
+    return frame
+
+
+def test_anchored_hp_bar_reader():
+    assert menus.read_hp_bar(_bar_frame(36)) == pytest.approx(1.0)
+    assert menus.read_hp_bar(_bar_frame(18)) == pytest.approx(0.5)
+    assert menus.read_hp_bar(_bar_frame(4)) == pytest.approx(4 / 36)
+    # A sprite over the dark part does not change the reading.
+    assert menus.read_hp_bar(_bar_frame(18, occlude=(24, 30))) == pytest.approx(0.5)
+    # Mostly hidden bar: no reading instead of a wrong one.
+    assert menus.read_hp_bar(_bar_frame(18, occlude=(0, 30))) is None
+    # Scaled capture (1280x720) reads the same.
+    big = cv2.resize(_bar_frame(27), (1280, 720), interpolation=cv2.INTER_NEAREST)
+    assert menus.read_hp_bar(big) == pytest.approx(0.75, abs=0.04)
+    # No bar at all.
+    assert menus.read_hp_bar(np.full((540, 960, 3), (40, 90, 50), np.uint8)) is None
+
+
+def test_pilot_tracks_owned_weapons_and_resets_on_new_run():
+    pilot = MenuPilot(tap=lambda k: None, async_chest=False, log=lambda m: None)
+    assert pilot.owned == {"Garlic"}
+    pilot.owned |= {"Cross", "Santa Water"}
+    pilot.hp = 0.4
+    assert pilot.hp == pytest.approx(0.4)
+    pilot.new_run()
+    assert pilot.owned == {"Garlic"} and pilot.hp is None
 
 
 def test_hp_bar_reading():
