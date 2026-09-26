@@ -629,6 +629,26 @@ def is_game_over_title(text: str) -> bool:
     )
 
 
+QUIT_BUTTON_960 = (480, 372)  # center of the red QUIT button on the final GAME OVER
+
+
+def is_final_quit_button(frame: np.ndarray, words: list[tuple[str, int, int, int, int]]) -> bool:
+    """The final GAME OVER's big red QUIT button: the OCR'd word QUIT sits on a solid
+    red button at the fixed spot. Works when the gold GAME OVER title is unreadable
+    over a busy crowd (live run9 sat on this screen because the title OCR failed)."""
+    h, w = frame.shape[:2]
+    sx, sy = w / 960.0, h / 540.0
+    cx, cy = QUIT_BUTTON_960[0] * sx, QUIT_BUTTON_960[1] * sy
+    hit = find_word(words, "quit")
+    if hit is None or abs(hit[0] - cx) > 50 * sx or abs(hit[1] - cy) > 25 * sy:
+        return False
+    box = frame[int(355 * sy) : int(390 * sy), int(410 * sx) : int(550 * sx)].astype(np.int16)
+    if box.size == 0:
+        return False
+    red = (box[:, :, 2] > 150) & (box[:, :, 1] < 90) & (box[:, :, 0] < 70)
+    return float(red.mean()) > 0.6
+
+
 def read_chest_text(frame: np.ndarray) -> str:
     return " ".join(t for t, *_ in read_screen_words(frame))
 
@@ -854,7 +874,7 @@ class MenuPilot:
         lower = set(re.findall(r"[a-z]+", text.lower()))
         if kind is None and "quit" in lower and not ({"resume", "options", "start"} & lower):
             # Final GAME OVER (no revive left): QUIT, then DONE on Results, then stop.
-            if is_game_over_title(read_gold_title(frame)):
+            if is_final_quit_button(frame, words) or is_game_over_title(read_gold_title(frame)):
                 kind = "quit"
         if kind is None and self._quit_pressed and "done" in lower:
             kind = "results"

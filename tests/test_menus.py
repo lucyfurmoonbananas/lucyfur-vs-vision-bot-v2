@@ -472,3 +472,29 @@ def test_keyboard_fallback_never_confirms_without_seeing_the_highlight(monkeypat
     taps = _taps(backend)
     assert "enter" not in taps
     assert len(taps) <= 12
+
+
+def test_final_quit_button_found_over_a_busy_crowd():
+    # Live run9: gold GAME OVER title unreadable over pink skeletons; QUIT must still be found.
+    busy = load("game_over_quit_busy.png")
+    words = menus.read_screen_words(busy) if menus.tesseract_available() else [("QUIT", 452, 362, 56, 20)]
+    assert menus.is_final_quit_button(busy, words)
+    assert menus.is_final_quit_button(load("game_over_quit.png"), [("QUIT", 452, 362, 56, 20)])
+    # QUIT elsewhere (main menu top bar) or no red button: no.
+    assert not menus.is_final_quit_button(load("main_menu.png"), [("QUIT", 330, 18, 50, 16)])
+    assert not menus.is_final_quit_button(load("gameplay_full_hp.png"), [("QUIT", 452, 362, 56, 20)])
+
+
+def test_pilot_quits_busy_final_game_over():
+    frame = load("game_over_quit_busy.png")
+    backend = NullBackend()
+    clock = FakeClock()
+    pilot = _pilot(backend, clock)
+    import unittest.mock as um
+    with um.patch.object(menus, "read_screen_words", lambda f: [("-", 381, 370, 17, 6), ("QUIT", 452, 362, 56, 20)]), \
+         um.patch.object(menus, "read_gold_title", lambda f: "c ora"):
+        for _ in range(4):
+            clock.t += 2.0
+            pilot.step(frame, None)
+    assert pilot._quit_pressed
+    assert pilot.clicks and abs(pilot.clicks[0][0] - 480) < 40
