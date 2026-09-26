@@ -253,7 +253,7 @@ def test_pilot_navigates_up_to_garlic_then_confirms_once():
     screen = detect_level_up(frame)
     backend = NullBackend()
     clock = FakeClock()
-    pilot = _pilot(backend, clock)
+    pilot = _pilot(backend, clock, levelup_click=False)
     for _ in range(3):  # settle frames, reads names, first nav press
         pilot.step(frame, screen)
     assert _taps(backend) == ["up"]
@@ -436,3 +436,39 @@ def test_results_screenshot_disabled_without_dir(monkeypatch):
     monkeypatch.setattr(menus, "read_screen_words", lambda f: [("Results", 0, 0, 1, 1), ("DONE", 5, 5, 4, 4)])
     pilot = _pilot(NullBackend(), FakeClock())
     assert pilot._save_results(load("results_screen.png")) is None
+
+
+@needs_tesseract
+def test_pilot_clicks_the_target_card_instead_of_keyboard():
+    frame = load("levelup_4cards_sel4.png")
+    screen = detect_level_up(frame)
+    backend = NullBackend()
+    clock = FakeClock()
+    pilot = _pilot(backend, clock)
+    for _ in range(3):
+        pilot.step(frame, screen)
+    assert _taps(backend) == []  # no up/down/enter at all
+    assert len(pilot.clicks) == 1
+    x, y = pilot.clicks[0]
+    card = screen.cards[0]  # Garlic
+    assert card.x0 < x < card.x1 and card.y0 < y < card.y1
+    assert pilot.picks == ["Garlic"]
+    # Cooldown: no second click on the same screen right away.
+    pilot.step(frame, screen)
+    assert len(pilot.clicks) == 1
+
+
+def test_keyboard_fallback_never_confirms_without_seeing_the_highlight(monkeypatch):
+    frame = load("levelup_4cards_sel4.png")
+    screen = detect_level_up(frame)
+    monkeypatch.setattr(menus, "read_cards", lambda f, s: s)
+    backend = NullBackend()
+    clock = FakeClock()
+    pilot = _pilot(backend, clock, levelup_click=False)
+    for _ in range(200):
+        clock.t += 0.3
+        screen.selected = None  # highlight off the cards (e.g. on BANISH)
+        pilot.step(frame, screen)
+    taps = _taps(backend)
+    assert "enter" not in taps
+    assert len(taps) <= 12

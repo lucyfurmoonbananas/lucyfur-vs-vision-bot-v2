@@ -663,7 +663,9 @@ class MenuPilot:
         log: Callable[[str], None] = print,
         results_dir: str | None = None,
         start_items: tuple[str, ...] = ("Garlic",),
+        levelup_click: bool = True,
     ) -> None:
+        self.levelup_click = levelup_click
         self.results_dir = results_dir
         self.start_items = tuple(start_items)
         self.owned: set[str] = set(self.start_items)
@@ -784,13 +786,25 @@ class MenuPilot:
             self.status = f"LEVEL UP -> {self._names[self._target]}"
             return
         target = min(self._target or 0, len(screen.cards) - 1)
+        if self.click is not None and self.levelup_click:
+            # Click the card itself: one click picks it. Keyboard navigation could
+            # wander off the card column onto REROLL / BANISH (live run8), so the
+            # mouse is the default; the click point is the card's own center.
+            card = screen.cards[target]
+            x = (card.x0 + card.x1) // 2
+            y = card.cy
+            self.refocus()
+            self.click(x, y)
+            self._next_action = self.clock() + self.confirm_cooldown_s
+            self._record_pick(target)
+            self.status = f"LEVEL UP -> {self._names[target] if target < len(self._names) else '?'}"
+            return
         sel = screen.selected
-        if self._presses >= 12:
-            sel = target  # give up navigating; take whatever is highlighted
         if sel is None:
             self._unknown_sel += 1
-            if self._unknown_sel < 4:
-                # Wait a couple of frames; arrows animate.
+            if self._unknown_sel < 4 or self._presses >= 12:
+                # Wait: arrows animate. After many presses stop pressing at all rather
+                # than confirm something that might be REROLL / BANISH.
                 return
             self._press("down", self.nav_cooldown_s)
             self._presses += 1
@@ -803,15 +817,19 @@ class MenuPilot:
             self._press("up", self.nav_cooldown_s)
             self._presses += 1
         else:
-            name = self._names[target] if target < len(self._names) else "?"
+            # Enter only when the highlight is positively on the target card.
             self._press("enter", self.confirm_cooldown_s)
-            self.picks.append(name)
-            if self._chosen:
-                self.owned.add(self._chosen)
-            self.log(f"[levelup] picked #{target + 1} {name} (total picks {len(self.picks)})")
-            self._target = None
-            self._sig = None
+            self._record_pick(target)
         self.status = f"LEVEL UP -> {self._names[target] if target < len(self._names) else '?'}"
+
+    def _record_pick(self, target: int) -> None:
+        name = self._names[target] if target < len(self._names) else "?"
+        self.picks.append(name)
+        if self._chosen:
+            self.owned.add(self._chosen)
+        self.log(f"[levelup] picked #{target + 1} {name} (total picks {len(self.picks)})")
+        self._target = None
+        self._sig = None
 
     def _save_results(self, frame: np.ndarray) -> str | None:
         """Keep a screenshot of the Results screen (time / level / kills) before DONE."""

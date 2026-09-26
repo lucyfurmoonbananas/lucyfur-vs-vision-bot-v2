@@ -145,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, handle_stop)
 
     last_vector = (0, 0)
+    last_nav_log = [0.0]
     t0 = time.monotonic()
     parked = False
     in_menu = False
@@ -186,7 +187,17 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 decision = nav.step(result, hp=pilot.hp)
                 vector, keys = decision.vector, cfg.keys_for_vector(decision.vector)
-                result.note = f"{decision.mode} d={decision.danger_here:.1f} hp={pilot.hp}"
+                hp_txt = "?" if pilot.hp is None else f"{pilot.hp:.2f}"
+                result.note = f"{decision.mode} d={decision.danger_here:.1f} hp={hp_txt}"
+                now_log = time.monotonic()
+                if now_log - last_nav_log[0] >= 3.0:
+                    last_nav_log[0] = now_log
+                    n_thr = 0 if result.threats is None else len(result.threats)
+                    print(
+                        f"[nav] game~{nav.game_s:5.0f}s {decision.mode} v={decision.vector} "
+                        f"danger={decision.danger_here:.2f} cover={nav.cover:.2f} "
+                        f"cells={n_thr} gems={len(result.gems)} hp={hp_txt} breakouts={nav.breakouts}"
+                    )
             last_vector = vector
             if pilot.finished and not bus.paused:
                 pilot_new_run[0] = True
