@@ -174,6 +174,11 @@ def _masks(w: int, h: int) -> tuple[np.ndarray, np.ndarray]:
     return _MASK_CACHE[key]
 
 
+# Padding (px) around each dark component's bounding box for the bush band
+# check in enemy_mask; also the crop margin for its per-component work.
+BAND_PAD = 4
+
+
 def enemy_mask(frame: np.ndarray) -> np.ndarray:
     """
     Binary mask of enemy pixels.
@@ -217,8 +222,15 @@ def enemy_mask(frame: np.ndarray) -> np.ndarray:
             continue
         if bw <= max_flat and aspect <= (1.0 / 2.6):
             continue
-        comp = labels == i
-        pix = frame[comp]
+        # Work on the component's bounding box padded by BAND_PAD (clipped to
+        # the frame) instead of the whole frame. The pad covers the lime /
+        # purple band below, and its >= 1 px ring of non-component pixels
+        # gives the distance transform the same nearest zeros it sees on the
+        # full frame, so results are identical.
+        y0, y1 = max(0, y - BAND_PAD), min(h, y + bh + BAND_PAD)
+        x0, x1 = max(0, x - BAND_PAD), min(w, x + bw + BAND_PAD)
+        comp = labels[y0:y1, x0:x1] == i
+        pix = frame[y0:y1, x0:x1][comp]
         # Bush outlines are green/brown tinted; bat / ghoul bodies are gray-black.
         chroma = float((pix.max(axis=1) - pix.min(axis=1)).mean()) if len(pix) else 0.0
         if chroma >= 8.0 and area < int(200 * scale):
@@ -234,15 +246,14 @@ def enemy_mask(frame: np.ndarray) -> np.ndarray:
             and fill > 0.30
         ):
             continue
-        # Small thin rings hugging lime leaves or purple berries / flowers.
+        # Small thin rings hugging lime leaves or purple berries / flowers:
+        # the bbox padded by BAND_PAD px (the crop above), minus the component.
         if area < int(100 * scale) and max_t <= 2.0:
-            pad = 4
-            y0, y1 = max(0, y - pad), min(h, y + bh + pad)
-            x0, x1 = max(0, x - pad), min(w, x + bw + pad)
-            band = np.zeros((h, w), dtype=bool)
-            band[y0:y1, x0:x1] = True
-            band[comp] = False
-            if int(lime[band].sum()) >= 40 or int(purple[band].sum()) >= 8:
+            band = ~comp
+            if (
+                int(lime[y0:y1, x0:x1][band].sum()) >= 40
+                or int(purple[y0:y1, x0:x1][band].sum()) >= 8
+            ):
                 continue
         keep[i] = True
     return keep[labels]
