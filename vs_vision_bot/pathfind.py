@@ -360,6 +360,7 @@ class Navigator:
         t = self.tune
         dur = t.flee_after_revive_s if duration_s is None else float(duration_s)
         self._flee_remaining = max(t.breakout_min_s, min(dur, t.breakout_max_s))
+        self.breakout = None  # pre-death corridor and its elapsed time are stale
 
     def _start_breakout(self, pts: np.ndarray, px: float, py: float) -> None:
         t = self.tune

@@ -336,3 +336,17 @@ def test_request_flee_holds_for_configured_duration():
     run(nav, clock, result([]), 30)  # ~2.5 s at 12 fps
     assert nav.breakout is None
     assert nav._flee_remaining == 0.0
+
+
+def test_request_flee_drops_pre_death_breakout():
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    nav.game_s = 300.0
+    ring_pts = result(ring(480, 256, 170, 40, gap_deg=(-1, 25)))  # gap right
+    while nav.breakout is None or nav._breakout_s < 2.3:
+        run(nav, clock, ring_pts, 1, hp=1.0)
+    clock.t += 3.0  # death + REVIVE screen
+    nav.request_flee(2.0)
+    out = run(nav, clock, result(blob(600, 256, n=20, spread=40)), 20, hp=1.0)
+    assert nav.breakout is not None  # full ~2 s flee, not the stale leftover
+    assert all(v[0] == -1 for v in out)
