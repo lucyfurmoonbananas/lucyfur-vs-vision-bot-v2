@@ -37,6 +37,8 @@ PRIORITY: list[str] = [
     "Garlic",
     "Soul Eater",
     "Pummarola",
+    "Tirajisú",
+    "Tiragisú",
     "Runetracer",
     "NO FUTURE",
     "Magic Wand",
@@ -83,8 +85,6 @@ OTHER: list[str] = [
     "Gentle Wings",
     "Bracer",
     "Wings",
-    "Tiragisú",
-    "Tirajisú",
     "Skull O'Maniac",
     "Metaglio Left",
     "Metaglio Right",
@@ -512,8 +512,9 @@ def _card_rank(c: Card, idx: int, hp: float | None, weapons: int) -> tuple[int, 
         return (20, idx)  # unknown / unranked new weapon
     if name == "Garlic":
         return (3, 0)
-    if name in ("Pummarola", "Armor"):
-        return (5, 0 if name == "Pummarola" else 1)
+    if name in ("Pummarola", "Tirajisú", "Tiragisú", "Armor"):
+        order = ("Pummarola", "Tirajisú", "Tiragisú", "Armor")
+        return (5, order.index(name))
     if not c.new and name in WEAPONS:
         return (6, PRIORITY.index(name) if name in PRIORITY else len(PRIORITY) + idx)
     if name == "Hollow Heart":

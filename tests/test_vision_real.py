@@ -106,3 +106,26 @@ def test_vision_analyze_fills_threats_and_gems():
 def test_non_gameplay_frames_do_not_crash(name):
     result = Vision(Config()).analyze(load(name))
     assert result.threats is not None
+
+
+# Vegetation hand-checked on gameplay_bats_bushes.png: berry bushes, a bramble
+# clump, a flower, clovers, and a small tree. Their near-black outlines must not
+# register as threats (bats above still must).
+VEGETATION = [
+    (345, 269),  # bramble / bush clump left of player
+    (222, 88),   # purple flower
+    (272, 202),  # berry bush band
+    (203, 353),  # berry bush
+    (840, 176),  # small tree / leafy bush on the right
+    (131, 377),  # clover
+    (155, 404),  # clover
+]
+
+
+def test_bushes_and_trees_are_not_threats():
+    pts = threat_points(enemy_mask(load("gameplay_bats_bushes.png")))
+    for x, y in VEGETATION:
+        assert _near(pts, x, y, 14) < 0.08, (x, y)
+    # Broader bands that used to leak bush rim cells into the threat grid.
+    assert _inside(pts, (150, 185, 450, 215)) == 0
+    assert _inside(pts, (100, 360, 180, 420)) == 0

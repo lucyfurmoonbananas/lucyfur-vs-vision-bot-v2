@@ -187,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
                 if menu_kind:
                     result.menu = True
                     result.note = pilot.status
+                if menu_kind == "revive":
+                    # Always break out of the death crowd for ~2 s (no gem pull).
+                    nav.request_flee()
             in_menu = menu_kind is not None
             if not cfg.demo and not bus.paused and not menu_kind:
                 now_box = time.monotonic()

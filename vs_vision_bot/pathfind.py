@@ -25,7 +25,8 @@ it casts corridors in the 8 directions, picks the thinnest one that leads to
 open space (preferring not to reverse), and follows it for a second or more
 with a strong bias, re-checking the gap as it goes. Afterwards the roam loop
 continues from that heading, so the character keeps sweeping in big loops
-instead of being boxed in.
+instead of being boxed in. After a REVIVE, ``request_flee`` forces the same
+breakout for ~2 s even when encirclement metrics are still low (no gem pull).
 
 Behaviour switches by game phase (tight weaving for the ~7:00 skeleton swarm,
 slow circles later, near-still after ~21:00) and by HP (more defensive when low).
@@ -105,6 +106,7 @@ class Tuning:
     breakout_weight: float = 1.5
     breakout_min_s: float = 1.1
     breakout_max_s: float = 3.0
+    flee_after_revive_s: float = 2.0  # forced breakout after taking REVIVE
     corridor_len: float = 320.0
     corridor_width: float = 34.0
     # Short look-ahead rollout: enemies chase while we walk each direction.
@@ -343,12 +345,37 @@ class Navigator:
         self._breakout_check = 0.0
         self.breakouts = 0
         self.cover = 0.0
+        self._flee_remaining = 0.0  # >0: force breakout (post-revive flee)
 
     @property
     def phase(self) -> Phase:
         return phase_for(self.game_s)
 
+    def request_flee(self, duration_s: float | None = None) -> None:
+        """Force a breakout for ~1.5–2.5 s after REVIVE (ignore gem pull).
+
+        Picks the open corridor on the next ``step`` even when encirclement
+        metrics are still low (the crowd has not been re-measured yet).
+        """
+        t = self.tune
+        dur = t.flee_after_revive_s if duration_s is None else float(duration_s)
+        self._flee_remaining = max(t.breakout_min_s, min(dur, t.breakout_max_s))
+
+    def _start_breakout(self, pts: np.ndarray, px: float, py: float) -> None:
+        t = self.tune
+        costs = corridor_costs(pts, px, py, t.corridor_len, t.corridor_width)
+        if self.current in DIRS:
+            cu = _UNIT[DIRS.index(self.current)]
+            align = _UNIT @ cu
+            costs = costs + 0.25 * (1.0 - align)
+        best = int(np.argmin(costs))
+        self.breakout = tuple(float(v) for v in _UNIT[best])
+        self._breakout_s = 0.0
+        self._breakout_check = 0.0
+        self.breakouts += 1
+
     def _kite_direction(self, pts: np.ndarray, px: float, py: float, dt: float) -> tuple[float, float]:
+
         phase = self.phase
         self.heading += self.orbit * dt * 2.0 * math.pi / phase.orbit_period_s
         roam = (math.cos(self.heading), math.sin(self.heading))
@@ -397,12 +424,18 @@ class Navigator:
         if self.breakout is not None:
             self._breakout_s += dt
             self._breakout_check += dt
-            done = self._breakout_s >= t.breakout_max_s or (
-                self._breakout_s >= t.breakout_min_s and not closing
-            )
+            if self._flee_remaining > 0:
+                # Post-revive flee: hold the corridor for the full window.
+                self._flee_remaining = max(0.0, self._flee_remaining - dt)
+                done = self._flee_remaining <= 0 or self._breakout_s >= t.breakout_max_s
+            else:
+                done = self._breakout_s >= t.breakout_max_s or (
+                    self._breakout_s >= t.breakout_min_s and not closing
+                )
             if done:
                 self.heading = math.atan2(self.breakout[1], self.breakout[0])
                 self.breakout = None
+                self._flee_remaining = 0.0
                 return
             if self._breakout_check >= 0.4:
                 # Re-check the gap: switch only if the chosen corridor clearly closed.
@@ -413,19 +446,13 @@ class Navigator:
                 if costs[cur] > 1.6 * costs[best] + 0.5:
                     self.breakout = tuple(_UNIT[best])
             return
+        if self._flee_remaining > 0 and self.breakout is None:
+            # Post-revive: commit to a corridor even if the ring is not closing yet.
+            self._start_breakout(pts, px, py)
+            return
         if not closing:
             return
-        costs = corridor_costs(pts, px, py, t.corridor_len, t.corridor_width)
-        # Prefer keeping momentum over reversing into what we just ran from.
-        if self.current in DIRS:
-            cu = _UNIT[DIRS.index(self.current)]
-            align = _UNIT @ cu
-            costs = costs + 0.25 * (1.0 - align)
-        best = int(np.argmin(costs))
-        self.breakout = tuple(float(v) for v in _UNIT[best])
-        self._breakout_s = 0.0
-        self._breakout_check = 0.0
-        self.breakouts += 1
+        self._start_breakout(pts, px, py)
 
     def step(self, result: VisionResult, hp: float | None = None) -> Decision:
         now = self.clock()

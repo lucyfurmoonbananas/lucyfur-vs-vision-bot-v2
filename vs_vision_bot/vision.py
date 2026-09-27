@@ -180,8 +180,9 @@ def enemy_mask(frame: np.ndarray) -> np.ndarray:
 
     Vampire Survivors sprites (bats, ghouls, mudmen outlines, skeletons,
     mantises) carry near-black pixels, while stage ground (grass, dirt) never
-    goes that dark. Saturation-based detection mostly found gems, braziers and
-    flowers instead, and missed black bats entirely.
+    goes that dark. Mad Forest bushes / clovers / trees also draw near-black
+    outlines; those are stripped below by shape + vegetation cues so they are
+    not counted as threats.
     """
     h, w = frame.shape[:2]
     ignore, side = _masks(w, h)
@@ -190,11 +191,60 @@ def enemy_mask(frame: np.ndarray) -> np.ndarray:
     dark[side] = mx[side] < SIDE_DARK_MAX
     dark[ignore] = False
     mask = dark.astype(np.uint8) * 255
-    # Drop isolated specks (bush / gem outlines) but keep crowds.
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    min_area = max(4, int(MIN_DARK_AREA * (w * h) / (REF_W * REF_H)))
-    keep = stats[:, cv2.CC_STAT_AREA] >= min_area
-    keep[0] = False
+    scale = (w * h) / (REF_W * REF_H)
+    min_area = max(4, int(MIN_DARK_AREA * scale))
+    b = frame[:, :, 0].astype(np.int16)
+    g = frame[:, :, 1].astype(np.int16)
+    r = frame[:, :, 2].astype(np.int16)
+    # Bright leaf pixels and purple berries / flowers that sit inside bush rings.
+    lime = (g > 90) & (g > r + 20) & (g > b + 20)
+    purple = (r > 70) & (b > 70) & (g < np.minimum(r, b) - 15)
+    keep = np.zeros(n, dtype=bool)
+    max_flat = max(4, int(round(8 * h / REF_H)))
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        x = int(stats[i, cv2.CC_STAT_LEFT])
+        y = int(stats[i, cv2.CC_STAT_TOP])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        fill = area / float(bw * bh)
+        aspect = bw / float(max(bh, 1))
+        # Flat decoration strokes (bush rims, ground cracks).
+        if bh <= max_flat and aspect >= 2.6:
+            continue
+        if bw <= max_flat and aspect <= (1.0 / 2.6):
+            continue
+        comp = labels == i
+        pix = frame[comp]
+        # Bush outlines are green/brown tinted; bat / ghoul bodies are gray-black.
+        chroma = float((pix.max(axis=1) - pix.min(axis=1)).mean()) if len(pix) else 0.0
+        if chroma >= 8.0 and area < int(200 * scale):
+            continue
+        dist = cv2.distanceTransform(comp.astype(np.uint8), cv2.DIST_L2, 3)
+        max_t = float(dist.max())
+        interior = float((dist >= 2.0).sum()) / float(area)
+        # Compact but hollow bramble clumps: gray like bats, no solid body.
+        if (
+            area < int(160 * scale)
+            and max_t < 2.6
+            and interior < 0.05
+            and fill > 0.30
+        ):
+            continue
+        # Small thin rings hugging lime leaves or purple berries / flowers.
+        if area < int(100 * scale) and max_t <= 2.0:
+            pad = 4
+            y0, y1 = max(0, y - pad), min(h, y + bh + pad)
+            x0, x1 = max(0, x - pad), min(w, x + bw + pad)
+            band = np.zeros((h, w), dtype=bool)
+            band[y0:y1, x0:x1] = True
+            band[comp] = False
+            if int(lime[band].sum()) >= 40 or int(purple[band].sum()) >= 8:
+                continue
+        keep[i] = True
     return keep[labels]
 
 

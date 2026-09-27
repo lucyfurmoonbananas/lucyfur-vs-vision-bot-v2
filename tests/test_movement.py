@@ -304,3 +304,35 @@ def test_gems_still_pull_at_moderate_danger():
     # Not when HP is low.
     low = score_directions(pts, P, None, 0.0, gems=[(330, 150), (340, 160), (320, 140)], hp=0.3)
     assert low.scores[(-1, -1)] < dec.scores[(-1, -1)]
+
+
+def test_request_flee_forces_breakout_without_encirclement():
+    """After REVIVE the navigator must flee even when the ring is not closing."""
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    # One-sided sparse crowd: normal logic must NOT break out.
+    sparse = result(blob(600, 256, n=10, spread=30))
+    run(nav, clock, sparse, 8, hp=1.0)
+    assert nav.breakouts == 0
+    nav.request_flee(2.0)
+    # Attractive gem toward the crowd: flee must ignore gem pull.
+    gems = [(700.0, 256.0)]
+    out = run(nav, clock, result(blob(600, 256, n=10, spread=30), gems=gems), 6, hp=0.5)
+    assert nav.breakouts >= 1
+    assert nav.breakout is not None
+    assert nav.last.mode.startswith("breakout")
+    # Corridor away from the right-side blob: mostly leftward.
+    assert sum(1 for v in out if v[0] == -1) >= 3
+
+
+def test_request_flee_holds_for_configured_duration():
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    nav.request_flee(1.8)
+    # Empty field: still commits to a flee corridor.
+    run(nav, clock, result([]), 2)
+    assert nav.breakout is not None
+    assert nav._flee_remaining > 0
+    run(nav, clock, result([]), 30)  # ~2.5 s at 12 fps
+    assert nav.breakout is None
+    assert nav._flee_remaining == 0.0

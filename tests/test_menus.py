@@ -88,6 +88,21 @@ def test_priority_order():
     assert choose_card(_cards(("Lightning Ring", False), ("Silver Wind", True), ("Pummarola", False))) == 2
 
 
+def test_tirajisu_ranked_high():
+    # Extra revival for low-HP Poe: both spellings sit with Pummarola / Armor.
+    assert "Tirajisú" in menus.PRIORITY and "Tiragisú" in menus.PRIORITY
+    assert menus.PRIORITY.index("Tirajisú") < menus.PRIORITY.index("Armor")
+    assert menus.PRIORITY.index("Tiragisú") < menus.PRIORITY.index("Armor")
+    # Healthy: Tirajisú beats a luxury passive and an avoid-list weapon.
+    assert choose_card(_cards(("Duplicator", True), ("Tirajisú", True))) == 1
+    assert choose_card(_cards(("Axe", True), ("Tiragisú", True))) == 1
+    # Near Pummarola / Armor band (rank tier 5), above owned non-Garlic weapon levels.
+    assert choose_card(_cards(("Cross", False), ("Tirajisú", True)), hp=0.9, owned={"Garlic", "Cross"}) == 1
+    # Low HP: still in DEFENSE (after Floor Chicken / Armor / Hollow Heart / Pummarola).
+    assert choose_card(_cards(("Duplicator", True), ("Tirajisú", True)), hp=0.2) == 1
+    assert choose_card(_cards(("Tiragisú", True), ("Pummarola", True)), hp=0.2) == 1
+
+
 def test_owned_level_beats_new_unwanted_and_avoid_list_is_last():
     assert choose_card(_cards(("Whip", True), ("Bone", False))) == 1
     assert choose_card(_cards(("Axe", True), ("King Bible", True))) == 1
