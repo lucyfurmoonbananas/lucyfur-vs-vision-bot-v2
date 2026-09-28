@@ -71,7 +71,8 @@ def phase_for(game_s: float) -> Phase:
     if game_s < 6 * 60 + 30:
         return Phase("wide-circles", 13.0, 1.0)
     if game_s < 9 * 60 + 30:
-        return Phase("tight-weave", 4.0, 0.55)
+        # Skeleton swarm (~7:00): tighter, less tangential so circles stay dense.
+        return Phase("tight-weave", 3.0, 0.45)
     if game_s < 15 * 60:
         return Phase("wide-loops", 11.0, 1.0)
     if game_s < 21 * 60:
@@ -459,12 +460,17 @@ class Navigator:
         now = self.clock()
         dt = 0.0 if self._last_t is None else min(0.5, max(0.0, now - self._last_t))
         self._last_t = now
+        # Prefer the on-screen stage timer when OCR is confident; otherwise
+        # accumulate wall-clock dt (menus pause the in-game clock).
+        if result.timer_s is not None:
+            self.game_s = float(result.timer_s)
+        elif not result.menu:
+            self.game_s += dt
         if result.menu:
             # Level-up / chest screens pause the game clock too.
             self.current = (0, 0)
             self.last = Decision((0, 0), {}, 0.0, "menu")
             return self.last
-        self.game_s += dt
         self._since_change += dt
 
         pts = result.threats

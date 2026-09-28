@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import re
+import shutil
+import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 
 import cv2
@@ -40,6 +44,8 @@ class VisionResult:
     threats: np.ndarray | None = None
     # Blue XP gem centers in reference pixels.
     gems: list[tuple[float, float]] = field(default_factory=list)
+    # On-screen stage timer in seconds, when OCR is confident; else None.
+    timer_s: float | None = None
     # Frame size the detections were measured in.
     size: tuple[int, int] = (REF_W_DEFAULT, REF_H_DEFAULT)
 
@@ -48,17 +54,21 @@ class Vision:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self._model = None
+        self._timer_at = 0.0
         if cfg.model_path:
             self._model = self._load_torch_model(cfg.model_path)
 
     def analyze(self, frame: np.ndarray) -> VisionResult:
         h, w = frame.shape[:2]
         player = player_position(w, h)
+        timer_s = self._maybe_read_timer(frame)
         if self._model is not None:
             try:
                 monsters = self._infer_model(frame)
                 menu = detect_level_up_menu(frame)
-                return VisionResult(player=player, monsters=monsters, menu=menu, note="torch")
+                return VisionResult(
+                    player=player, monsters=monsters, menu=menu, note="torch", timer_s=timer_s,
+                )
             except Exception as exc:  # noqa: BLE001
                 self._model = None
                 print(f"[vision] model failed, falling back to heuristic: {exc}", file=sys.stderr)
@@ -70,8 +80,16 @@ class Vision:
         menu = detect_level_up_menu(frame)
         return VisionResult(
             player=player, monsters=monsters, menu=menu, note="heuristic",
-            threats=threats, gems=gems, size=(w, h),
+            threats=threats, gems=gems, timer_s=timer_s, size=(w, h),
         )
+
+    def _maybe_read_timer(self, frame: np.ndarray) -> float | None:
+        """OCR the HUD timer at most every TIMER_OCR_PERIOD_S (avoids hitching)."""
+        now = time.monotonic()
+        if self._timer_at and now - self._timer_at < TIMER_OCR_PERIOD_S:
+            return None
+        self._timer_at = now
+        return read_timer_seconds(frame)
 
     def _load_torch_model(self, path: str):
         try:
@@ -129,6 +147,9 @@ HUD_RECTS = (
     (715, 16, 912, 46),
     (858, 16, 912, 96),
 )
+# Tight crop of the stage timer digits inside HUD_RECTS[2] (ref 960x540).
+TIMER_RECT = (445, 20, 520, 48)
+TIMER_OCR_PERIOD_S = 2.0
 # Player sprite + HP bar (camera keeps the character here).
 PLAYER_RECT = (452, 220, 508, 282)
 PLAYER_POS = (480, 256)
@@ -260,11 +281,16 @@ def enemy_mask(frame: np.ndarray) -> np.ndarray:
 
 
 def gem_mask(frame: np.ndarray) -> np.ndarray:
-    """Blue XP gems: saturated cyan-blue cores (grass is never bluer than green)."""
+    """Blue XP gems: saturated cyan-blue cores (grass is never bluer than green).
+
+    The Glowing Bat's outline is also cyan-blue but carries much more red
+    (r ~ 110 vs gem cores r ~ 38); requiring ``b - r > 150`` and ``r < 90``
+    drops that outline before geometry runs.
+    """
     b = frame[:, :, 0].astype(np.int16)
     g = frame[:, :, 1].astype(np.int16)
     r = frame[:, :, 2].astype(np.int16)
-    m = (b > 170) & (b - r > 110) & (g > 110) & (b > g + 25)
+    m = (b > 170) & (b - r > 150) & (g > 110) & (b > g + 25) & (r < 90)
     h, w = frame.shape[:2]
     ignore, side = _masks(w, h)
     m[ignore | side] = False
@@ -321,28 +347,100 @@ def detect_gems(frame: np.ndarray, enemies: np.ndarray | None = None) -> list[tu
     """
     Centers of blue XP gems, in frame pixels.
 
-    When ``enemies`` (from enemy_mask) is given, a candidate sitting in a lot of
-    dark pixels is the blue-outlined Glowing Bat, not a gem; real gems get their
-    thin dark outline erased from ``enemies`` in place.
+    Real gems are tiny saturated cores (area ~2–20 at 960x540). The Glowing
+    Bat's blue outline is larger, redder, and rings a dark body — rejected by
+    color (``gem_mask``), max area, aspect, and dark-fill checks. When
+    ``enemies`` (from enemy_mask) is given, a leftover candidate sitting in a
+    lot of dark pixels is also dropped, and real gems get their thin dark
+    outline erased from ``enemies`` in place.
     """
     m = gem_mask(frame)
     h, w = frame.shape[:2]
+    scale = (w * h) / (REF_W * REF_H)
+    max_area = max(8, int(round(40 * scale)))
     n, _l, stats, cents = cv2.connectedComponentsWithStats(m.astype(np.uint8), connectivity=8)
     rx = max(4, int(round(12 * w / REF_W)))
     ry = max(4, int(round(14 * h / REF_H)))
     out = []
     for i in range(1, n):
-        if not 2 <= stats[i, cv2.CC_STAT_AREA] <= 120:
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if not 2 <= area <= max_area:
+            continue
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        aspect = bw / float(max(bh, 1))
+        if aspect < 0.4 or aspect > 2.2:
+            continue
+        bx = int(stats[i, cv2.CC_STAT_LEFT])
+        by = int(stats[i, cv2.CC_STAT_TOP])
+        # Hollow ring around a dark bat body (works even without enemies mask).
+        roi_mx = frame[by : by + bh, bx : bx + bw].max(axis=2)
+        dark_frac = float((roi_mx < DARK_MAX).sum()) / float(max(1, bw * bh))
+        if dark_frac > 0.12:
             continue
         cx, cy = int(cents[i][0]), int(cents[i][1])
         if enemies is not None:
             y0, y1, x0, x1 = max(0, cy - ry), cy + ry, max(0, cx - rx), cx + rx
             dark = int(np.count_nonzero(enemies[y0:y1, x0:x1]))
-            if dark > 70 * (w * h) / (REF_W * REF_H):
+            if dark > 70 * scale:
                 continue
             enemies[y0:y1, x0:x1] = False
         out.append((cx, cy))
     return out
+
+
+
+def parse_timer_text(text: str) -> float | None:
+    """Parse a stage-timer string like ``3:45`` / ``12:00`` / ``01:41`` into seconds."""
+    if not text:
+        return None
+    m = re.search(r"(\d{1,2}):(\d{2})", text.strip())
+    if not m:
+        return None
+    minutes, seconds = int(m.group(1)), int(m.group(2))
+    if seconds > 59 or minutes > 59:
+        return None
+    return float(minutes * 60 + seconds)
+
+
+def _timer_ocr_image(img: np.ndarray) -> str:
+    """Tesseract digit+colon whitelist over a white-text crop (menus-style)."""
+    if img is None or img.size == 0 or shutil.which("tesseract") is None:
+        return ""
+    # Bright HUD glyphs -> black-on-white, upscaled (same idea as menus._white_text).
+    bright = img.min(axis=2) if img.ndim == 3 else img
+    binary = np.where(bright > 190, 0, 255).astype(np.uint8)
+    binary = cv2.resize(binary, None, fx=4, fy=4, interpolation=cv2.INTER_NEAREST)
+    binary = cv2.GaussianBlur(binary, (3, 3), 0)
+    binary = cv2.copyMakeBorder(binary, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
+    ok, buf = cv2.imencode(".png", binary)
+    if not ok:
+        return ""
+    try:
+        out = subprocess.run(
+            [
+                "tesseract", "stdin", "stdout",
+                "--psm", "7",
+                "-c", "tessedit_char_whitelist=0123456789:",
+            ],
+            input=buf.tobytes(),
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"[vision] timer OCR failed: {exc}", file=sys.stderr)
+        return ""
+    return out.stdout.decode("utf-8", "replace").strip()
+
+
+def read_timer_seconds(frame: np.ndarray) -> float | None:
+    """OCR the on-screen Mad Forest timer; None when the reading is not confident."""
+    h, w = frame.shape[:2]
+    x0, y0, x1, y1 = _scaled_rect(TIMER_RECT, w, h)
+    crop = frame[y0:y1, x0:x1]
+    if crop.size == 0:
+        return None
+    return parse_timer_text(_timer_ocr_image(crop))
 
 
 def detect_level_up_menu(frame: np.ndarray) -> bool:

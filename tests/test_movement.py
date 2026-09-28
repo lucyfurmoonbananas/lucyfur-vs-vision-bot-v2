@@ -37,9 +37,11 @@ def blob(cx: float, cy: float, n: int = 12, spread: float = 20.0, seed: int = 0)
     return [(cx + rng.uniform(-spread, spread), cy + rng.uniform(-spread, spread), 1.0) for _ in range(n)]
 
 
-def result(points, gems=None, menu=False) -> VisionResult:
+def result(points, gems=None, menu=False, timer_s=None) -> VisionResult:
     arr = np.array(points, dtype=np.float32).reshape(-1, 3)
-    return VisionResult(player=P, monsters=[], threats=arr, gems=list(gems or []), menu=menu)
+    return VisionResult(
+        player=P, monsters=[], threats=arr, gems=list(gems or []), menu=menu, timer_s=timer_s,
+    )
 
 
 def run(nav: Navigator, clock: Clock, res: VisionResult, frames: int, hp=None) -> list[tuple[int, int]]:
@@ -350,3 +352,31 @@ def test_request_flee_drops_pre_death_breakout():
     out = run(nav, clock, result(blob(600, 256, n=20, spread=40)), 20, hp=1.0)
     assert nav.breakout is not None  # full ~2 s flee, not the stale leftover
     assert all(v[0] == -1 for v in out)
+
+
+def test_timer_ocr_syncs_game_clock():
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    # Drift the internal clock, then snap from a confident HUD reading.
+    run(nav, clock, result([]), 12)
+    assert nav.game_s > 0.5
+    clock.t += 1 / 12
+    nav.step(result([], timer_s=7 * 60 + 15.0))
+    assert nav.game_s == 7 * 60 + 15.0
+    assert nav.phase.name == "tight-weave"
+
+
+def test_timer_ocr_none_falls_back_to_dt():
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    run(nav, clock, result([], timer_s=None), 12)
+    assert 0.8 < nav.game_s < 1.1
+
+
+def test_tight_weave_circles_are_denser_than_early_game():
+    early = phase_for(60)
+    swarm = phase_for(7 * 60)
+    assert swarm.name == "tight-weave"
+    assert swarm.orbit_period_s < early.orbit_period_s
+    assert swarm.orbit_period_s <= 3.0
+    assert swarm.kite_weight < early.kite_weight

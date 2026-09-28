@@ -15,6 +15,7 @@ from vs_vision_bot.vision import (
     Vision,
     detect_gems,
     enemy_mask,
+    read_timer_seconds,
     threat_points,
 )
 
@@ -74,11 +75,16 @@ def test_blue_gems_found_and_not_counted_as_threats():
 
 
 def test_glowing_bat_is_an_enemy_not_a_gem():
-    frame = load("gameplay_hurt.png")  # blue-outlined boss bat at ~(642, 350)
-    mask = enemy_mask(frame)
-    gems = detect_gems(frame, mask)
-    assert not any(abs(x - 642) < 20 and abs(y - 350) < 20 for x, y in gems)
-    assert _near(threat_points(mask), 642, 350, 20) > 0.12
+    cases = [
+        ("gameplay_hurt.png", 642, 350),
+        ("gameplay_skeleton_swarm.png", 531, 176),
+    ]
+    for name, bx, by in cases:
+        frame = load(name)
+        mask = enemy_mask(frame)
+        gems = detect_gems(frame, mask)
+        assert not any(abs(x - bx) < 20 and abs(y - by) < 20 for x, y in gems), name
+        assert _near(threat_points(mask), bx, by, 20) > 0.12, name
 
 
 def test_ghouls_detected_on_hurt_frame():
@@ -129,3 +135,20 @@ def test_bushes_and_trees_are_not_threats():
     # Broader bands that used to leak bush rim cells into the threat grid.
     assert _inside(pts, (150, 185, 450, 215)) == 0
     assert _inside(pts, (100, 360, 180, 420)) == 0
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("gameplay_bats_bushes.png", 20.0),
+        ("gameplay_hurt.png", 60.0 + 41.0),
+        ("gameplay_full_hp.png", 60.0 + 25.0),
+    ],
+)
+def test_read_timer_seconds_on_fixtures(name, expected):
+    from vs_vision_bot.menus import tesseract_available
+
+    if not tesseract_available():
+        pytest.skip("tesseract not installed")
+    got = read_timer_seconds(load(name))
+    assert got == expected, (name, got)
