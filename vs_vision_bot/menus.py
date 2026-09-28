@@ -596,9 +596,7 @@ def classify_chest_text(text: str) -> str | None:
     if any(word in t for word in BANNED_WORDS):
         return None
     words = set(re.findall(r"[a-z]+", t))
-    if "treasure" in words or "open" in words or ("found" in words and ({"get", "done"} & words)):
-        return "chest"
-    if "done" in words and "found" in words:
+    if {"treasure", "open", "done"} & words or {"found", "get"} <= words:
         return "chest"
     return None
 

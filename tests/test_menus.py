@@ -230,6 +230,12 @@ def test_chest_text_classification():
     assert classify_chest_text("") is None
 
 
+def test_chest_reward_screen_after_open_is_a_chest():
+    # OCR of the post-OPEN reward screen (gold, item, DONE): no "Treasure Found!" title.
+    assert classify_chest_text("01:17 - DONE Lever:3 Effect lasts 0.5 seconds longer. Base Damage up by 10.") == "chest"
+    assert classify_chest_text("01:04 bv DONE level:2 [ALL] Base Speed up by 108.") == "chest"
+
+
 @needs_tesseract
 def test_game_over_revive_button_located():
     words = menus.read_screen_words(load("game_over_revive.png"))
