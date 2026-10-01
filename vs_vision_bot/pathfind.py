@@ -321,6 +321,12 @@ def score_directions(
     return Decision(best, table, here, mode)
 
 
+# HUD timer OCR plausibility (see Navigator._sync_timer).
+TIMER_JUMP_TOL_S = 8.0       # accept readings this close to the wall-clock estimate
+TIMER_RESYNC_N = 3           # consecutive agreeing out-of-range readings to resync
+TIMER_RESYNC_AGREE_S = 2.0   # max spread of those readings' offsets to the estimate
+
+
 class Navigator:
     """Stateful wrapper: orbit direction, rotating heading, dwell, game clock."""
 
@@ -332,6 +338,7 @@ class Navigator:
     def reset(self) -> None:
         self.game_s = 0.0
         self._last_t: float | None = None
+        self._timer_cands: list[float] = []  # offsets (reading - game_s) of rejected OCR jumps
         self.heading = 0.0          # radians, roam heading when nothing is around
         self.orbit = 1              # +1 clockwise on screen, -1 counter-clockwise
         self.current: tuple[int, int] = (0, 0)
@@ -456,16 +463,49 @@ class Navigator:
             return
         self._start_breakout(pts, px, py)
 
+    def _sync_timer(self, reading: float) -> None:
+        """Plausibility-check an OCR'd HUD timer reading against the wall clock.
+
+        ``self.game_s`` already holds the expected time (last accepted reading
+        plus elapsed unpaused wall time). The minute digit is sometimes misread
+        (e.g. 05:27 read as 06:27, 01:34 as 11:34), which would flip the phase, so:
+
+        * a reading within ``TIMER_JUMP_TOL_S`` of the expectation is accepted;
+        * anything else is rejected and the wall-clock estimate keeps running;
+        * ``game_s`` never moves backwards;
+        * a real drift (e.g. a stall/pause of the loop) is resynced only when
+          ``TIMER_RESYNC_N`` consecutive readings agree with each other.
+        """
+        expected = self.game_s
+        if abs(reading - expected) <= TIMER_JUMP_TOL_S:
+            self.game_s = max(expected, reading)
+            self._timer_cands.clear()
+            return
+        if reading < expected:
+            # Behind the estimate: moving back is never allowed, so it cannot
+            # seed a resync either.
+            self._timer_cands.clear()
+            return
+        # Ahead by more than the tolerance. Track the offset to our own clock:
+        # successive readings of one true clock keep that offset constant.
+        off = reading - expected
+        if self._timer_cands and abs(off - self._timer_cands[0]) > TIMER_RESYNC_AGREE_S:
+            self._timer_cands.clear()
+        self._timer_cands.append(off)
+        if len(self._timer_cands) >= TIMER_RESYNC_N:
+            self.game_s = max(expected, reading)
+            self._timer_cands.clear()
+
     def step(self, result: VisionResult, hp: float | None = None) -> Decision:
         now = self.clock()
         dt = 0.0 if self._last_t is None else min(0.5, max(0.0, now - self._last_t))
         self._last_t = now
-        # Prefer the on-screen stage timer when OCR is confident; otherwise
-        # accumulate wall-clock dt (menus pause the in-game clock).
-        if result.timer_s is not None:
-            self.game_s = float(result.timer_s)
-        elif not result.menu:
+        # Advance on the wall clock (menus pause the in-game clock), then let a
+        # plausible HUD timer OCR reading correct the estimate.
+        if not result.menu:
             self.game_s += dt
+        if result.timer_s is not None:
+            self._sync_timer(float(result.timer_s))
         if result.menu:
             # Level-up / chest screens pause the game clock too.
             self.current = (0, 0)

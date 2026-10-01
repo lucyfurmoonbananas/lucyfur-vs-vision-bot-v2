@@ -354,16 +354,103 @@ def test_request_flee_drops_pre_death_breakout():
     assert all(v[0] == -1 for v in out)
 
 
-def test_timer_ocr_syncs_game_clock():
+def timer_frame(nav: Navigator, clock: Clock, reading: float, wall_s: float = 0.0) -> float:
+    """Walk ``wall_s`` of plain frames at 12 fps, then one frame carrying a HUD timer reading."""
+    run(nav, clock, result([]), round(wall_s * 12))
+    clock.t += 1 / 12
+    nav.step(result([], timer_s=reading))
+    return nav.game_s
+
+
+def test_timer_ocr_resyncs_after_three_agreeing_readings():
+    # Genuine drift: the loop stalled ~30 s while the game kept running (dt is
+    # capped per frame), so the HUD is far ahead of the wall-clock estimate.
     clock = Clock()
     nav = Navigator(clock=clock)
-    # Drift the internal clock, then snap from a confident HUD reading.
-    run(nav, clock, result([]), 12)
-    assert nav.game_s > 0.5
-    clock.t += 1 / 12
-    nav.step(result([], timer_s=7 * 60 + 15.0))
-    assert nav.game_s == 7 * 60 + 15.0
-    assert nav.phase.name == "tight-weave"
+    nav.game_s = 100.0
+    timer_frame(nav, clock, 100.0)
+    clock.t += 30.0
+    assert timer_frame(nav, clock, 131.0) < 103.0   # 1st out-of-range reading: rejected
+    assert timer_frame(nav, clock, 133.0, 2.0) < 105.0  # 2nd agrees but is not enough
+    assert timer_frame(nav, clock, 135.0, 2.0) == 135.0  # 3rd agreeing reading: resync
+    assert 136.0 < timer_frame(nav, clock, 137.0, 2.0) < 138.5  # back to normal tracking
+    # A jump into 7:15 is honoured the same way (3 consistent readings).
+    clock2 = Clock()
+    nav2 = Navigator(clock=clock2)
+    for k in range(3):
+        timer_frame(nav2, clock2, 7 * 60 + 15.0 + 2 * k, 2.0 if k else 1.0)
+    assert nav2.game_s == 7 * 60 + 19.0
+    assert nav2.phase.name == "tight-weave"
+
+
+def test_timer_ocr_rejects_minute_misread_at_start_0_608_10():
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    assert timer_frame(nav, clock, 0.0) < 0.2
+    g = timer_frame(nav, clock, 608.0, 8.0)       # 00:08 misread as 10:08
+    assert 7.5 < g < 8.5
+    assert nav.phase.name == "wide-circles"
+    g = timer_frame(nav, clock, 10.0, 2.0)
+    assert 10.0 <= g < 10.6
+    assert nav.phase.name == "wide-circles"
+
+
+def test_timer_ocr_rejects_minute_misread_90_694_97():
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    nav.game_s = 90.0
+    timer_frame(nav, clock, 90.0)
+    g = timer_frame(nav, clock, 694.0, 3.0)       # 01:34 misread as 11:34
+    assert 92.5 < g < 94.0
+    assert nav.phase.name == "wide-circles"
+    g = timer_frame(nav, clock, 97.0, 3.0)
+    assert 97.0 <= g < 97.6
+    assert nav.phase.name == "wide-circles"
+
+
+def test_timer_ocr_misread_minute_06_27_for_true_05_27_does_not_flip_phase():
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    nav.game_s = 5 * 60 + 25.0
+    timer_frame(nav, clock, 5 * 60 + 25.0)
+    # True 05:27 read as 06:27 (+60 s), between correct readings.
+    assert timer_frame(nav, clock, 6 * 60 + 27.0, 2.0) < 5 * 60 + 28.0
+    assert nav.phase.name == "wide-circles"
+    assert 5 * 60 + 29.0 <= timer_frame(nav, clock, 5 * 60 + 29.0, 2.0) < 5 * 60 + 30.0
+    # Same misread just under the 6:30 boundary would flip to tight-weave.
+    assert timer_frame(nav, clock, 6 * 60 + 31.0, 2.0) < 5 * 60 + 32.0
+    assert nav.phase.name == "wide-circles"
+    assert timer_frame(nav, clock, 5 * 60 + 33.0, 2.0) >= 5 * 60 + 33.0
+    assert nav.phase.name == "wide-circles"
+
+
+def test_timer_ocr_steady_ticking_tracks_and_never_goes_backwards():
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    prev = nav.game_s
+    for k in range(1, 61):
+        # HUD shows whole seconds of the true (wall) time, read every ~2 s.
+        g = timer_frame(nav, clock, float(int(clock.t + 2.0)), 2.0 - 1 / 12)
+        assert g >= prev
+        assert abs(g - clock.t) < 1.0
+        prev = g
+    assert nav.phase.name == "wide-circles"
+    # Readings behind the estimate never move it backwards, even when repeated.
+    before = nav.game_s
+    for _ in range(4):
+        assert timer_frame(nav, clock, before - 30.0) >= before
+    # A one-off small lag inside the tolerance is accepted but keeps the max.
+    assert timer_frame(nav, clock, nav.game_s - 3.0) >= before
+
+
+def test_timer_ocr_disagreeing_jumps_do_not_resync():
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    nav.game_s = 200.0
+    timer_frame(nav, clock, 200.0)
+    for bad in (800.0, 260.0, 860.0, 860.0 + 60.0):
+        timer_frame(nav, clock, bad, 2.0)
+    assert nav.game_s < 210.0
 
 
 def test_timer_ocr_none_falls_back_to_dt():
