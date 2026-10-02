@@ -488,6 +488,17 @@ def test_timer_ocr_disagreeing_jumps_do_not_resync():
     assert nav.game_s < 210.0
 
 
+def test_timer_ocr_resyncs_when_slow_frames_keep_lagging():
+    # Oct 1 run9: frames took ~1.5 s, so the 0.5 s dt cap let game_s fall
+    # further behind on every frame (game~ 217 at a true 5:17).
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    for k in range(120):
+        clock.t += 1.5
+        nav.step(result([], timer_s=float(int(clock.t)) if k >= 20 and k % 2 else None))
+    assert abs(nav.game_s - clock.t) < pathfind.TIMER_JUMP_TOL_S
+
+
 def test_timer_ocr_none_falls_back_to_dt():
     clock = Clock()
     nav = Navigator(clock=clock)

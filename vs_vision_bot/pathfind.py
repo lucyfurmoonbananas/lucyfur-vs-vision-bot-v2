@@ -350,7 +350,7 @@ class Navigator:
     def reset(self) -> None:
         self.game_s = 0.0
         self._last_t: float | None = None
-        self._timer_cands: list[float] = []  # offsets (reading - game_s) of rejected OCR jumps
+        self._timer_cands: list[float] = []  # offsets (reading - wall clock) of rejected OCR jumps
         self.heading = 0.0          # radians, roam heading when nothing is around
         self.orbit = 1              # +1 clockwise on screen, -1 counter-clockwise
         self.current: tuple[int, int] = (0, 0)
@@ -518,7 +518,7 @@ class Navigator:
             return
         self._start_breakout(pts, px, py)
 
-    def _sync_timer(self, reading: float) -> None:
+    def _sync_timer(self, reading: float, now: float) -> None:
         """Plausibility-check an OCR'd HUD timer reading against the wall clock.
 
         ``self.game_s`` already holds the expected time (last accepted reading
@@ -541,9 +541,10 @@ class Navigator:
             # seed a resync either.
             self._timer_cands.clear()
             return
-        # Ahead by more than the tolerance. Track the offset to our own clock:
-        # successive readings of one true clock keep that offset constant.
-        off = reading - expected
+        # Ahead by more than the tolerance. Track the offset to the wall clock:
+        # successive readings of one true clock keep that offset constant even
+        # while game_s keeps lagging (slow frames hit the dt cap).
+        off = reading - now
         if self._timer_cands and abs(off - self._timer_cands[0]) > TIMER_RESYNC_AGREE_S:
             self._timer_cands.clear()
         self._timer_cands.append(off)
@@ -560,7 +561,7 @@ class Navigator:
         if not result.menu:
             self.game_s += dt
         if result.timer_s is not None:
-            self._sync_timer(float(result.timer_s))
+            self._sync_timer(float(result.timer_s), now)
         if result.menu:
             # Level-up / chest screens pause the game clock too.
             self.current = (0, 0)
