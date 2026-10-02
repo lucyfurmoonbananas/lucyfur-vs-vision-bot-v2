@@ -78,6 +78,30 @@ def test_match_name_snaps_ocr_noise():
     assert match_name("~ =") == ""
 
 
+def test_ocr_garbage_card_names_rank_below_avoid_and_real():
+    """Short / unmatched OCR must not beat AVOID or real names via rank (15, idx)."""
+    assert match_name("P") == ""
+    assert match_name("wr") == ""
+    assert match_name("") == ""
+    # Pipeline leaves name="" for garbage; that must lose to real cards.
+    assert choose_card(_cards(("", True), ("Garlic", False))) == 1
+    assert choose_card(_cards(("Whip", True), ("", True), ("Garlic", False))) == 2
+    # Known AVOID still beats unmatched garbage (junk tier 45 > AVOID-new 40).
+    assert choose_card(_cards(("", True), ("Whip", True))) == 1
+    junk_vs_owned = [
+        Card(0, 1, 0, 1, name="", raw="P", new=True),
+        Card(0, 1, 0, 1, name="Whip", raw="Whip", new=False),
+    ]
+    assert choose_card(junk_vs_owned) == 1
+    junk_wr = [
+        Card(0, 1, 0, 1, name="", raw="wr", new=True),
+        Card(0, 1, 0, 1, name="Garlic", raw="Garlic", new=False),
+    ]
+    assert choose_card(junk_wr) == 1
+    # All junk: still picks an index (unknown-select cycling stays elsewhere).
+    assert choose_card(_cards(("", True), ("", True), ("", True))) in (0, 1, 2)
+
+
 def _cards(*spec: tuple[str, bool]) -> list[Card]:
     return [Card(0, 1, 0, 1, name=n, new=new) for n, new in spec]
 
@@ -506,6 +530,7 @@ def test_final_quit_button_found_over_a_busy_crowd():
     assert not menus.is_final_quit_button(load("gameplay_full_hp.png"), [("QUIT", 452, 362, 56, 20)])
 
 
+@needs_tesseract
 def test_pilot_quits_busy_final_game_over():
     frame = load("game_over_quit_busy.png")
     backend = NullBackend()

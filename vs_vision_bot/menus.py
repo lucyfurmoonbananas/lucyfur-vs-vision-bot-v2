@@ -492,6 +492,11 @@ def owned_weapon_count(owned: set[str] | frozenset[str]) -> int:
 
 def _card_rank(c: Card, idx: int, hp: float | None, weapons: int) -> tuple[int, int]:
     name = c.name
+    # OCR garbage (empty / unmatched after match_name): worse than AVOID-new (40)
+    # so a real named card always wins. If every card is junk, choose_card still
+    # picks one via this shared tier (existing unknown-select cycling stays).
+    if not name:
+        return (45, idx)
     low = hp is not None and hp < DEFENSIVE_HP
     slots_free = weapons < MAX_WEAPONS
     if name in EVOLUTIONS and not c.new:

@@ -354,6 +354,41 @@ def test_request_flee_drops_pre_death_breakout():
     assert all(v[0] == -1 for v in out)
 
 
+
+def test_hp_crash_forces_breakout_without_encirclement():
+    """Fast HP drop (Man-eater ring) must force a flee corridor like post-revive."""
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    sparse = result(blob(600, 256, n=10, spread=30))
+    run(nav, clock, sparse, 6, hp=1.0)
+    assert nav.breakouts == 0
+    # Crash: 1.0 -> 0.65 within the look-back window (Δ <= -0.3).
+    run(nav, clock, sparse, 2, hp=1.0)
+    out = run(nav, clock, sparse, 6, hp=0.65)
+    assert nav._hp_crashing is True
+    assert nav.breakouts >= 1
+    assert nav.breakout is not None
+    assert nav.last.mode.startswith("breakout")
+    assert sum(1 for v in out if v[0] == -1) >= 2
+
+
+def test_flower_phase_lowers_cover_trigger():
+    """Around game_s 280–360 a partial ring should break out sooner than early-game."""
+    clock = Clock()
+    # cover ≈ 0.50: below early cover_trigger (0.55), at/above flower mid (0.45).
+    # Steady density so the rising-EMA path does not fire.
+    partial = ring(480, 256, 160, 32, gap_deg=(0, 170))
+    early = Navigator(clock=clock)
+    early.game_s = 60.0
+    run(early, clock, result(partial), 16, hp=1.0)
+    assert early.breakouts == 0
+    clock2 = Clock()
+    mid = Navigator(clock=clock2)
+    mid.game_s = 300.0  # inside flower window
+    run(mid, clock2, result(partial), 16, hp=1.0)
+    assert mid.breakouts >= 1
+
+
 def timer_frame(nav: Navigator, clock: Clock, reading: float, wall_s: float = 0.0) -> float:
     """Walk ``wall_s`` of plain frames at 12 fps, then one frame carrying a HUD timer reading."""
     run(nav, clock, result([]), round(wall_s * 12))

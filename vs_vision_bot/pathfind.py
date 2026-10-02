@@ -27,6 +27,9 @@ with a strong bias, re-checking the gap as it goes. Afterwards the roam loop
 continues from that heading, so the character keeps sweeping in big loops
 instead of being boxed in. After a REVIVE, ``request_flee`` forces the same
 breakout for ~2 s even when encirclement metrics are still low (no gem pull).
+A fast HP crash (e.g. Man-eater flower ring ~5:00) also forces that flee, and
+during the mid-run flower window the cover trigger is lowered so breakouts
+start earlier and last longer.
 
 Behaviour switches by game phase (tight weaving for the ~7:00 skeleton swarm,
 slow circles later, near-still after ~21:00) and by HP (more defensive when low).
@@ -108,6 +111,15 @@ class Tuning:
     breakout_min_s: float = 1.1
     breakout_max_s: float = 3.0
     flee_after_revive_s: float = 2.0  # forced breakout after taking REVIVE
+    # Man-eater flower ring (~4:40–6:00): HP can drop 1.0→0.1 in 2–3 s.
+    hp_crash_delta: float = -0.3       # peak-to-now drop that counts as crashing
+    hp_crash_window_s: float = 1.5     # look-back for that drop
+    flower_phase_lo: float = 280.0     # game_s start of flower-ring window
+    flower_phase_hi: float = 360.0     # game_s end
+    cover_trigger_crash: float = 0.35  # cover fraction when HP is crashing
+    cover_trigger_mid: float = 0.45    # cover fraction during flower window
+    breakout_max_crash_s: float = 4.5  # longer commit while HP crashes / mid phase
+    flee_on_hp_crash_s: float = 2.5    # forced flee length on a fresh HP crash
     corridor_len: float = 320.0
     corridor_width: float = 34.0
     # Short look-ahead rollout: enemies chase while we walk each direction.
@@ -354,6 +366,9 @@ class Navigator:
         self.breakouts = 0
         self.cover = 0.0
         self._flee_remaining = 0.0  # >0: force breakout (post-revive flee)
+        self._hp_hist: list[tuple[float, float]] = []  # (wall_t, hp) for crash detect
+        self._hp_crashing = False
+        self._hp_crash_latched = False  # edge-trigger flee once per crash bout
 
     @property
     def phase(self) -> Phase:
@@ -413,8 +428,42 @@ class Navigator:
         self.heading = math.atan2(ky, kx)  # keep the roam loop continuous
         return (kx, ky)
 
+    def _note_hp_crash(self, hp: float | None, now: float) -> bool:
+        """Update HP history; return True while HP is crashing hard.
+
+        A crash is a peak-to-now drop of ``hp_crash_delta`` (default -0.3) inside
+        ``hp_crash_window_s``. Used to force / extend breakouts for the Man-eater
+        flower ring that can dump HP from ~1.0 to ~0.1 in a couple of seconds.
+        """
+        t = self.tune
+        if hp is None:
+            return self._hp_crashing
+        win = t.hp_crash_window_s
+        self._hp_hist = [(ts, h) for ts, h in self._hp_hist if now - ts <= win]
+        self._hp_hist.append((now, float(hp)))
+        if len(self._hp_hist) < 2:
+            self._hp_crashing = False
+            self._hp_crash_latched = False
+            return False
+        peak = max(h for _, h in self._hp_hist)
+        drop = float(hp) - peak
+        crashing = drop <= t.hp_crash_delta
+        if not crashing:
+            self._hp_crash_latched = False
+        self._hp_crashing = crashing
+        return crashing
+
     def _update_breakout(self, pts: np.ndarray, px: float, py: float, dt: float, hp: float | None) -> None:
         t = self.tune
+        now = self.clock()
+        crashing = self._note_hp_crash(hp, now)
+        flower = t.flower_phase_lo <= self.game_s <= t.flower_phase_hi
+        # Fresh HP crash: force a flee corridor (ignore gem pull via breakout path).
+        if crashing and not self._hp_crash_latched:
+            dur = max(t.breakout_min_s, min(t.flee_on_hp_crash_s, t.breakout_max_crash_s))
+            self._flee_remaining = max(self._flee_remaining, dur)
+            self.breakout = None  # pick a fresh corridor on the next start
+            self._hp_crash_latched = True
         cover, near = encirclement(pts, px, py, t.sector_radius, t.sector_thr)
         self.cover = cover
         if not self._near_init:
@@ -427,18 +476,24 @@ class Navigator:
         self._near_slow += a_slow * (near - self._near_slow)
         rising = self._near_fast - self._near_slow
         low = hp is not None and hp < t.low_hp
-        trigger_cover = t.cover_trigger - (0.1 if low else 0.0)
+        if crashing:
+            trigger_cover = t.cover_trigger_crash
+        elif flower:
+            trigger_cover = t.cover_trigger_mid - (0.05 if low else 0.0)
+        else:
+            trigger_cover = t.cover_trigger - (0.1 if low else 0.0)
+        max_s = t.breakout_max_crash_s if (crashing or flower) else t.breakout_max_s
         closing = near >= t.near_min and (cover >= trigger_cover or (cover >= t.cover_rising and rising >= t.rise_trigger))
 
         if self.breakout is not None:
             self._breakout_s += dt
             self._breakout_check += dt
             if self._flee_remaining > 0:
-                # Post-revive flee: hold the corridor for the full window.
+                # Post-revive / HP-crash flee: hold the corridor for the full window.
                 self._flee_remaining = max(0.0, self._flee_remaining - dt)
-                done = self._flee_remaining <= 0 or self._breakout_s >= t.breakout_max_s
+                done = self._flee_remaining <= 0 or self._breakout_s >= max_s
             else:
-                done = self._breakout_s >= t.breakout_max_s or (
+                done = self._breakout_s >= max_s or (
                     self._breakout_s >= t.breakout_min_s and not closing
                 )
             if done:
@@ -456,7 +511,7 @@ class Navigator:
                     self.breakout = tuple(_UNIT[best])
             return
         if self._flee_remaining > 0 and self.breakout is None:
-            # Post-revive: commit to a corridor even if the ring is not closing yet.
+            # Post-revive / HP-crash: commit to a corridor even if the ring is not closing yet.
             self._start_breakout(pts, px, py)
             return
         if not closing:
