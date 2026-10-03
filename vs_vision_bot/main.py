@@ -20,7 +20,9 @@ from vs_vision_bot.pathfind import Navigator
 from vs_vision_bot.vision import Vision, draw_synthetic_arena
 from vs_vision_bot.watchdog import LoopHeartbeat, ProgressWatchdog, Stall
 
-# Exit status when a watchdog ended the run (play_run.sh treats it as "recover the game").
+# Exit status when a watchdog ended the run. play_run.sh (scripts/) answers it by
+# killing the game, relaunching it and realigning the window; session_loop does not
+# count it as a failure.
 EXIT_WATCHDOG = 3
 
 
@@ -200,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
                     frame = capture.grab()
                 except Exception as exc:  # noqa: BLE001
                     print(f"[capture] grab failed: {exc}", file=sys.stderr)
-                    stall = watchdog.update(None, None, paused=bus.paused)
+                    stall = watchdog.update(None, paused=bus.paused)
                     if stall is not None:
                         print(f"[watchdog] STALL {stall.describe()} -> ending run (exit {EXIT_WATCHDOG})")
                         exit_code = EXIT_WATCHDOG
@@ -272,9 +274,7 @@ def main(argv: list[str] | None = None) -> int:
                 bus.toggle_pause()
                 mover.set_paused(True)
 
-            stall = watchdog.update(
-                frame, result.timer_s, in_menu=bool(result.menu), paused=bus.paused,
-            )
+            stall = watchdog.update(frame, paused=bus.paused)
             if stall is not None:
                 print(f"[watchdog] STALL {stall.describe()} game~{nav.game_s:.0f}s -> ending run (exit {EXIT_WATCHDOG})")
                 exit_code = EXIT_WATCHDOG

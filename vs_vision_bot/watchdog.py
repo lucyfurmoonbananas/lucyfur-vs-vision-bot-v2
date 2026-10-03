@@ -4,16 +4,10 @@ Two independent guards, both on ``time.monotonic`` (a VM pause / host suspend do
 not advance it, so a resumed box does not trip them spuriously):
 
 * :class:`ProgressWatchdog` — fed once per main-loop frame. Trips when, during an
-  unpaused run,
-
-  - ``frozen_frame``: the captured screen has not visibly changed for ``limit_s``
-    (counts on menus too: a level-up / chest / GAME OVER screen that sits
-    unchanged that long is stuck); ``no_frames`` when capture itself kept failing;
-  - ``menu_stuck``: a menu screen (level-up, chest, revive, ...) has been up
-    continuously for ``limit_s``;
-  - ``timer_stalled``: outside menus, the OCR'd HUD timer kept reading the same
-    value for ``limit_s`` (at least ``min_timer_reads`` confident reads). Menu
-    time does not count: the game timer legitimately stops on level-up screens.
+  unpaused run, the captured screen has not visibly changed for ``limit_s``
+  (``frozen_frame``; menus included: a level-up / chest / GAME OVER screen that
+  sits unchanged that long is stuck), or capture itself kept failing that long
+  (``no_frames``).
 
 * :class:`LoopHeartbeat` — a daemon thread that fires ``on_stall`` when the main
   loop itself has not called :meth:`LoopHeartbeat.beat` for ``limit_s`` (a capture,
@@ -38,10 +32,6 @@ LOOP_STALL_LIMIT_S = 90.0
 # drifts only ~0.1-0.2 and an identical frame differs by 0.
 SIG_SIZE = (32, 18)
 FRAME_CHANGE_MIN = 1.0
-# A single non-menu frame inside a menu (detector flicker) does not end the menu.
-MENU_EXIT_S = 2.0
-# Timer stall needs this many confident identical HUD reads (OCR misses are not stalls).
-MIN_TIMER_READS = 3
 
 
 def frame_signature(frame: np.ndarray) -> np.ndarray:
@@ -59,7 +49,7 @@ def signature_change(a: np.ndarray, b: np.ndarray) -> float:
 
 @dataclass(frozen=True)
 class Stall:
-    reason: str        # frozen_frame | menu_stuck | timer_stalled | loop_blocked
+    reason: str        # frozen_frame | no_frames | loop_blocked
     stalled_s: float
     detail: str = ""
 
@@ -74,14 +64,10 @@ class ProgressWatchdog:
         limit_s: float = WATCHDOG_LIMIT_S,
         clock: Callable[[], float] = time.monotonic,
         change_min: float = FRAME_CHANGE_MIN,
-        menu_exit_s: float = MENU_EXIT_S,
-        min_timer_reads: int = MIN_TIMER_READS,
     ) -> None:
         self.limit_s = float(limit_s)
         self.clock = clock
         self.change_min = change_min
-        self.menu_exit_s = menu_exit_s
-        self.min_timer_reads = min_timer_reads
         self.reset()
 
     @property
@@ -89,25 +75,18 @@ class ProgressWatchdog:
         return self.limit_s > 0
 
     def reset(self) -> None:
-        """Forget all baselines (paused, new run)."""
+        """Forget the baseline (paused, new run)."""
         self._ref_sig: np.ndarray | None = None
         self._frame_t: float | None = None
-        self._menu_since: float | None = None
-        self._last_menu_t = 0.0
-        self._timer_val: float | None = None
-        self._timer_t = 0.0
-        self._timer_reads = 0
 
     def update(
         self,
         frame: np.ndarray | None,
-        timer_s: float | None = None,
-        in_menu: bool = False,
         paused: bool = False,
         now: float | None = None,
         signature: np.ndarray | None = None,
     ) -> Stall | None:
-        """Feed one frame. Returns a :class:`Stall` once the run has stopped progressing."""
+        """Feed one frame (None = capture failed). Returns a :class:`Stall` once frozen."""
         if not self.enabled:
             return None
         if paused:
@@ -115,10 +94,10 @@ class ProgressWatchdog:
             return None
         now = self.clock() if now is None else now
         sig = signature if signature is not None else (frame_signature(frame) if frame is not None else None)
-
-        # -- screen motion (menus included). No frame at all (capture failing) is no progress.
         if self._frame_t is None:
             self._frame_t = now
+        # Compare against the frame at the last change (not the previous frame), so slow
+        # but real motion still accumulates past the threshold.
         if sig is not None and (
             self._ref_sig is None
             or self._ref_sig.shape != sig.shape
@@ -126,32 +105,7 @@ class ProgressWatchdog:
         ):
             self._ref_sig, self._frame_t = sig, now
         elif now - self._frame_t >= self.limit_s:
-            reason = "frozen_frame" if sig is not None else "no_frames"
-            return Stall(reason, now - self._frame_t, f"menu={int(self._menu_since is not None)}")
-
-        # -- menu dwell (debounced so detector flicker does not restart it)
-        if in_menu:
-            self._last_menu_t = now
-            if self._menu_since is None:
-                self._menu_since = now
-        elif self._menu_since is not None and now - self._last_menu_t >= self.menu_exit_s:
-            self._menu_since = None
-        if self._menu_since is not None:
-            # The HUD timer is stopped on these screens; restart its stall clock.
-            self._timer_t, self._timer_reads = now, 0
-            if now - self._menu_since >= self.limit_s:
-                return Stall("menu_stuck", now - self._menu_since)
-            return None
-
-        # -- HUD timer (outside menus)
-        # Judged only on a fresh confident read: OCR misses are never evidence of a stall.
-        if timer_s is not None:
-            if self._timer_val is None or timer_s != self._timer_val:
-                self._timer_val, self._timer_t, self._timer_reads = float(timer_s), now, 0
-            else:
-                self._timer_reads += 1
-                if self._timer_reads >= self.min_timer_reads and now - self._timer_t >= self.limit_s:
-                    return Stall("timer_stalled", now - self._timer_t, f"hud={self._timer_val:.0f}s")
+            return Stall("frozen_frame" if sig is not None else "no_frames", now - self._frame_t)
         return None
 
 

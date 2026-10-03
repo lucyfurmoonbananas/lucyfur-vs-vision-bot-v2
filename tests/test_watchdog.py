@@ -1,4 +1,4 @@
-"""No-progress watchdog: frozen screen, stuck menu, stalled HUD timer, blocked loop."""
+"""No-progress watchdog: frozen screen / no frames, and a blocked main loop."""
 
 from pathlib import Path
 
@@ -56,14 +56,18 @@ def test_signature_separates_live_and_frozen_frames():
     assert signature_change(frame_signature(a), frame_signature(blurred)) < FRAME_CHANGE_MIN
 
 
-def test_live_gameplay_with_advancing_timer_never_trips():
+def test_live_gameplay_never_trips():
     clock = FakeClock()
     wd = ProgressWatchdog(limit_s=60, clock=clock)
-    stall = _run(
-        wd, clock, 300,
-        frame=lambda i: _frame(i),
-        timer_s=lambda i: float(i // 4) if i % 4 == 0 else None,  # a read every 2 s
-    )
+    assert _run(wd, clock, 300, frame=lambda i: _frame(i)) is None
+
+
+def test_slow_motion_accumulates_against_the_reference_frame():
+    """Each step changes little, but the screen keeps drifting: not frozen."""
+    clock = FakeClock()
+    wd = ProgressWatchdog(limit_s=60, clock=clock)
+    base = np.full((54, 96, 3), 60, np.uint8)
+    stall = _run(wd, clock, 200, frame=lambda i: np.clip(base.astype(int) + (i // 4) % 120, 0, 255).astype(np.uint8))
     assert stall is None
 
 
@@ -77,56 +81,13 @@ def test_frozen_frame_trips_after_limit_not_before():
     assert "frozen_frame" in stall.describe()
 
 
-def test_frozen_frame_counts_on_menu_screens_too():
+def test_static_menu_screen_counts_too():
+    """A level-up / GAME OVER screen sitting unchanged for 60 s is stuck as well."""
     clock = FakeClock()
     wd = ProgressWatchdog(limit_s=60, clock=clock)
-    stall = _run(wd, clock, 70, frame=STILL, in_menu=True)
-    assert stall is not None and stall.reason in ("frozen_frame", "menu_stuck")
-
-
-def test_short_level_up_does_not_trip_but_a_stuck_one_does():
-    clock = FakeClock()
-    wd = ProgressWatchdog(limit_s=60, clock=clock)
-    # Level-up screens animate a little; 10 s of menu then back to play is fine.
-    assert _run(wd, clock, 10, frame=lambda i: _frame(1000 + i), in_menu=True) is None
-    assert _run(wd, clock, 30, frame=lambda i: _frame(2000 + i), timer_s=lambda i: float(i)) is None
-    # A menu that never goes away (bot keeps failing to pick) trips even if it animates.
-    stall = _run(wd, clock, 70, frame=lambda i: _frame(3000 + i), in_menu=True)
-    assert stall is not None and stall.reason == "menu_stuck"
-
-
-def test_menu_detector_flicker_does_not_reset_menu_dwell():
-    clock = FakeClock()
-    wd = ProgressWatchdog(limit_s=60, clock=clock)
-    stall = _run(wd, clock, 70, frame=lambda i: _frame(i), in_menu=lambda i: i % 3 != 0)
-    assert stall is not None and stall.reason == "menu_stuck"
-
-
-def test_timer_stall_trips_while_screen_still_moves():
-    """E.g. the game paused itself (focus loss) behind an animated overlay."""
-    clock = FakeClock()
-    wd = ProgressWatchdog(limit_s=60, clock=clock)
-    assert _run(wd, clock, 20, frame=lambda i: _frame(i), timer_s=lambda i: 100.0 + i // 2) is None
-    stall = _run(wd, clock, 70, frame=lambda i: _frame(500 + i), timer_s=lambda i: 110.0 if i % 4 == 0 else None)
-    assert stall is not None and stall.reason == "timer_stalled"
-    assert "hud=110s" in stall.detail
-
-
-def test_timer_ocr_misses_are_not_a_stall():
-    clock = FakeClock()
-    wd = ProgressWatchdog(limit_s=60, clock=clock)
-    _run(wd, clock, 4, frame=lambda i: _frame(i), timer_s=50.0)
-    # No confident reading for 2 minutes (busy screen): no timer stall, screen is live.
-    assert _run(wd, clock, 120, frame=lambda i: _frame(100 + i), timer_s=None) is None
-
-
-def test_menu_time_does_not_count_toward_timer_stall():
-    clock = FakeClock()
-    wd = ProgressWatchdog(limit_s=60, clock=clock)
-    _run(wd, clock, 40, frame=lambda i: _frame(i), timer_s=lambda i: 200.0 if i % 4 == 0 else None)
-    # Level-up (timer frozen on screen) for 15 s, then play resumes with a moving timer.
-    assert _run(wd, clock, 15, frame=lambda i: _frame(900 + i), timer_s=200.0, in_menu=True) is None
-    assert _run(wd, clock, 30, frame=lambda i: _frame(1900 + i), timer_s=lambda i: 201.0 + i) is None
+    assert _run(wd, clock, 10, frame=lambda i: _frame(i)) is None
+    stall = _run(wd, clock, 70, frame=STILL)
+    assert stall is not None and stall.reason == "frozen_frame"
 
 
 def test_pause_resets_everything():
@@ -141,7 +102,7 @@ def test_disabled_watchdog_never_trips():
     clock = FakeClock()
     wd = ProgressWatchdog(limit_s=0, clock=clock)
     assert not wd.enabled
-    assert _run(wd, clock, 600, frame=STILL, in_menu=True) is None
+    assert _run(wd, clock, 600, frame=STILL) is None
 
 
 def test_precomputed_signature_path():
