@@ -8,7 +8,7 @@ not advance it, so a resumed box does not trip them spuriously):
 
   - ``frozen_frame``: the captured screen has not visibly changed for ``limit_s``
     (counts on menus too: a level-up / chest / GAME OVER screen that sits
-    unchanged that long is stuck);
+    unchanged that long is stuck); ``no_frames`` when capture itself kept failing;
   - ``menu_stuck``: a menu screen (level-up, chest, revive, ...) has been up
     continuously for ``limit_s``;
   - ``timer_stalled``: outside menus, the OCR'd HUD timer kept reading the same
@@ -91,7 +91,7 @@ class ProgressWatchdog:
     def reset(self) -> None:
         """Forget all baselines (paused, new run)."""
         self._ref_sig: np.ndarray | None = None
-        self._frame_t = 0.0
+        self._frame_t: float | None = None
         self._menu_since: float | None = None
         self._last_menu_t = 0.0
         self._timer_val: float | None = None
@@ -116,14 +116,18 @@ class ProgressWatchdog:
         now = self.clock() if now is None else now
         sig = signature if signature is not None else (frame_signature(frame) if frame is not None else None)
 
-        # -- screen motion (menus included)
-        if sig is not None:
-            if self._ref_sig is None or self._ref_sig.shape != sig.shape:
-                self._ref_sig, self._frame_t = sig, now
-            elif signature_change(sig, self._ref_sig) >= self.change_min:
-                self._ref_sig, self._frame_t = sig, now
-            elif now - self._frame_t >= self.limit_s:
-                return Stall("frozen_frame", now - self._frame_t, f"menu={int(self._menu_since is not None)}")
+        # -- screen motion (menus included). No frame at all (capture failing) is no progress.
+        if self._frame_t is None:
+            self._frame_t = now
+        if sig is not None and (
+            self._ref_sig is None
+            or self._ref_sig.shape != sig.shape
+            or signature_change(sig, self._ref_sig) >= self.change_min
+        ):
+            self._ref_sig, self._frame_t = sig, now
+        elif now - self._frame_t >= self.limit_s:
+            reason = "frozen_frame" if sig is not None else "no_frames"
+            return Stall(reason, now - self._frame_t, f"menu={int(self._menu_since is not None)}")
 
         # -- menu dwell (debounced so detector flicker does not restart it)
         if in_menu:

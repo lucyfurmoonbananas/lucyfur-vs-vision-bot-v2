@@ -195,3 +195,18 @@ def test_limit_is_configurable(limit):
     wd = ProgressWatchdog(limit_s=limit, clock=clock)
     stall = _run(wd, clock, limit + 5, frame=STILL)
     assert stall is not None and limit <= stall.stalled_s < limit + 1
+
+
+def test_capture_failures_count_as_no_progress():
+    clock = FakeClock()
+    wd = ProgressWatchdog(limit_s=60, clock=clock)
+    assert _run(wd, clock, 5, frame=lambda i: _frame(i)) is None
+    stall = _run(wd, clock, 70, frame=None)
+    assert stall is not None and stall.reason == "no_frames"
+
+
+def test_capture_failing_from_the_start_also_trips():
+    clock = FakeClock()
+    wd = ProgressWatchdog(limit_s=60, clock=clock)
+    stall = _run(wd, clock, 70, frame=None)
+    assert stall is not None and stall.reason == "no_frames"
