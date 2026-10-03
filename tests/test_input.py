@@ -114,3 +114,42 @@ def test_xdotool_key_events_are_global_xtest_not_window_targeted(monkeypatch):
     assert ["keydown", "d"] in key_calls
     assert ["keydown", "Right"] in key_calls
     assert all("--window" not in c for c in key_calls)
+
+
+def test_run_xdotool_times_out_instead_of_blocking(monkeypatch):
+    """A wedged `xdotool windowactivate --sync` must not hang the main loop."""
+    seen: dict[str, object] = {}
+
+    def fake_subprocess_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["timeout"] = kwargs.get("timeout")
+        raise ib.subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+    monkeypatch.setattr(ib.subprocess, "run", fake_subprocess_run)
+    result = ib._run_xdotool(["windowactivate", "--sync", "123"])
+    assert seen["argv"] == ["xdotool", "windowactivate", "--sync", "123"]
+    assert seen["timeout"] == ib.XDOTOOL_TIMEOUT_S
+    assert result.returncode == 124
+    assert result.stdout == ""
+
+
+def test_run_xdotool_missing_binary_is_a_failed_result(monkeypatch):
+    def fake_subprocess_run(argv, **kwargs):
+        raise FileNotFoundError("xdotool")
+
+    monkeypatch.setattr(ib.subprocess, "run", fake_subprocess_run)
+    result = ib._run_xdotool(["getactivewindow"])
+    assert result.returncode == 127
+
+
+def test_refocus_survives_a_timed_out_activate(monkeypatch):
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[1] == "search":
+            return ib.subprocess.CompletedProcess(argv, 0, "42\n", "")
+        if argv[1] == "getactivewindow":
+            return ib.subprocess.CompletedProcess(argv, 0, "7\n", "")
+        raise ib.subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+    monkeypatch.setattr(ib.subprocess, "run", fake_subprocess_run)
+    backend = XdotoolBackend("Vampire Survivors")
+    assert backend.refocus_if_needed() is False

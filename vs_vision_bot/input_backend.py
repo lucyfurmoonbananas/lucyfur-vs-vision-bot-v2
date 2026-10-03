@@ -74,13 +74,27 @@ class NullBackend(InputBackend):
         self.held.discard(key)
 
 
-def _run_xdotool(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["xdotool", *args],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+# Every xdotool call is bounded: ``windowactivate --sync`` (and any call while the X
+# server or the game window is wedged) can otherwise block the main loop forever.
+XDOTOOL_TIMEOUT_S = 5.0
+
+
+def _run_xdotool(args: list[str], timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+    argv = ["xdotool", *args]
+    limit = XDOTOOL_TIMEOUT_S if timeout is None else timeout
+    try:
+        return subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=limit,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[input] xdotool {' '.join(args)} timed out after {limit:.0f}s", file=sys.stderr)
+        return subprocess.CompletedProcess(argv, 124, "", f"timed out after {limit:.0f}s")
+    except OSError as exc:
+        return subprocess.CompletedProcess(argv, 127, "", str(exc))
 
 
 class XdotoolBackend(InputBackend):
