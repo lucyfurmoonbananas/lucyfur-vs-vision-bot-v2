@@ -24,6 +24,9 @@ from vs_vision_bot.watchdog import LoopHeartbeat, ProgressWatchdog, Stall
 # killing the game, relaunching it and realigning the window; session_loop does not
 # count it as a failure.
 EXIT_WATCHDOG = 3
+# After a REVIVE click, log the move vector and held keys this long (~4 lines/s).
+REVIVE_TRACE_S = 3.0
+REVIVE_TRACE_EVERY_S = 0.25
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -185,6 +188,8 @@ def main(argv: list[str] | None = None) -> int:
     last_box = [0.0]
     dumped_for = [0]
     t0 = time.monotonic()
+    revive_seen = [0]
+    revive_trace = [0.0, -1e9, 0.0]  # started_at, until, last_line_at
     parked = False
     in_menu = False
 
@@ -292,6 +297,20 @@ def main(argv: list[str] | None = None) -> int:
                 mover.set_paused(False)
                 mover.set_intent(keys)
                 mover.tick()
+
+            if pilot.revives != revive_seen[0]:
+                if pilot.revives > revive_seen[0]:
+                    now_rv = time.monotonic()
+                    revive_trace[0], revive_trace[1] = now_rv, now_rv + REVIVE_TRACE_S
+                revive_seen[0] = pilot.revives
+            now_tr = time.monotonic()
+            if now_tr < revive_trace[1] and now_tr - revive_trace[2] >= REVIVE_TRACE_EVERY_S:
+                revive_trace[2] = now_tr
+                held = ",".join(sorted(mover.held)) or "-"
+                print(
+                    f"[revive+{now_tr - revive_trace[0]:.1f}s] v={vector} keys={','.join(keys) or '-'} "
+                    f"held={held} menu={menu_kind or '-'} {result.note}"
+                )
 
             debug.render(frame, result, bus.paused, mover, vector)
             hotkeys.handle_waitkey(debug.poll_key())

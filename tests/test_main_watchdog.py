@@ -118,3 +118,57 @@ def test_watchdog_env_knobs(monkeypatch):
     monkeypatch.delenv("VS_LOOP_STALL_S")
     cfg = Config.from_env()
     assert cfg.watchdog_s == 60.0 and cfg.loop_stall_s == 90.0
+
+
+class RevivingPilot:
+    """Clicks REVIVE on the first frame, then reports plain gameplay."""
+
+    def __init__(self, **kw) -> None:
+        self.hp = 0.5
+        self.revives = 0
+        self._quit_pressed = False
+        self.finished = False
+        self.status = ""
+        self.calls = 0
+
+    def step(self, frame, screen=None):
+        self.calls += 1
+        if self.calls == 1:
+            self.revives = 1
+            return "revive"
+        return None
+
+    def reset_run(self):
+        pass
+
+    def new_run(self):
+        pass
+
+
+class LiveThenFrozenCapture(FakeCapture):
+    def __init__(self, cfg) -> None:
+        super().__init__(cfg)
+        self.n = 0
+
+    def grab(self):
+        self.n += 1
+        if self.n < 60:
+            rng = np.random.default_rng(self.n)
+            return rng.integers(0, 255, size=(54, 96, 3), dtype=np.uint8)
+        return self.frame
+
+
+def test_revive_traces_vector_and_held_keys(frozen_game, capsys):
+    frozen_game.setenv("VS_AUTO_MENUS", "1")
+    frozen_game.setattr(m, "tesseract_available", lambda: True)
+    frozen_game.setattr(m, "detect_level_up", lambda frame: None)
+    frozen_game.setattr(m, "MenuPilot", RevivingPilot)
+    frozen_game.setattr(m, "ScreenCapture", LiveThenFrozenCapture)
+    frozen_game.setattr(m, "REVIVE_TRACE_S", 0.4)
+    frozen_game.setattr(m, "REVIVE_TRACE_EVERY_S", 0.05)
+    assert m.main(["--dry-run"]) == m.EXIT_WATCHDOG
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("[revive+")]
+    assert len(lines) >= 3
+    assert "menu=revive" in lines[0]
+    assert all(" v=(" in ln and " held=" in ln and " keys=" in ln for ln in lines)
+    assert any("menu=-" in ln for ln in lines[1:])
