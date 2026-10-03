@@ -6,6 +6,7 @@ import argparse
 import os
 import signal
 import sys
+import threading
 import time
 
 from vs_vision_bot.capture import ScreenCapture
@@ -17,6 +18,10 @@ from vs_vision_bot.input_backend import make_backend
 from vs_vision_bot.menus import MenuPilot, detect_level_up, tesseract_available
 from vs_vision_bot.pathfind import Navigator
 from vs_vision_bot.vision import Vision, draw_synthetic_arena
+from vs_vision_bot.watchdog import LoopHeartbeat, ProgressWatchdog, Stall
+
+# Exit status when a watchdog ended the run (play_run.sh treats it as "recover the game").
+EXIT_WATCHDOG = 3
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,6 +95,22 @@ def _display() -> str:
     return os.environ.get("DISPLAY", "(unset)")
 
 
+def _abort_blocked_loop(stall: Stall, release_keys) -> None:
+    """Heartbeat callback (runs on the heartbeat thread): the main loop is wedged.
+
+    Best-effort key release on a helper thread (it may itself hit a wedged X
+    server; xdotool calls are bounded), then hard-exit so the session script
+    sees the bot die and can recover the game.
+    """
+    print(f"[watchdog] STALL {stall.describe()} -> ending run (exit {EXIT_WATCHDOG})", flush=True)
+    t = threading.Thread(target=release_keys, daemon=True)
+    t.start()
+    t.join(15.0)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(EXIT_WATCHDOG)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = apply_cli(Config.from_env(), args)
@@ -144,6 +165,15 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, handle_stop)
     signal.signal(signal.SIGTERM, handle_stop)
 
+    # No-progress watchdogs (monotonic clock: a VM pause does not trip them).
+    watchdog = ProgressWatchdog(limit_s=0 if cfg.demo else cfg.watchdog_s)
+    heartbeat = LoopHeartbeat(
+        lambda stall: _abort_blocked_loop(stall, mover.shutdown),
+        limit_s=0 if cfg.demo else cfg.loop_stall_s,
+    )
+    heartbeat.start()
+    exit_code = 0
+
     last_vector = (0, 0)
     last_nav_log = [0.0]
     # Black box: the last ~8 s of gameplay frames, written out when a GAME OVER
@@ -158,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while not bus.quit:
+            heartbeat.beat()
             if bus.consume_align():
                 capture.align_to_mouse()
                 debug.repark(capture.region, capture.display_size())
@@ -169,6 +200,11 @@ def main(argv: list[str] | None = None) -> int:
                     frame = capture.grab()
                 except Exception as exc:  # noqa: BLE001
                     print(f"[capture] grab failed: {exc}", file=sys.stderr)
+                    stall = watchdog.update(None, None, paused=bus.paused)
+                    if stall is not None:
+                        print(f"[watchdog] STALL {stall.describe()} -> ending run (exit {EXIT_WATCHDOG})")
+                        exit_code = EXIT_WATCHDOG
+                        break
                     time.sleep(cfg.frame_s)
                     continue
 
@@ -236,6 +272,14 @@ def main(argv: list[str] | None = None) -> int:
                 bus.toggle_pause()
                 mover.set_paused(True)
 
+            stall = watchdog.update(
+                frame, result.timer_s, in_menu=bool(result.menu), paused=bus.paused,
+            )
+            if stall is not None:
+                print(f"[watchdog] STALL {stall.describe()} game~{nav.game_s:.0f}s -> ending run (exit {EXIT_WATCHDOG})")
+                exit_code = EXIT_WATCHDOG
+                break
+
             if bus.paused:
                 mover.set_paused(True)
             elif menu_kind:
@@ -258,8 +302,9 @@ def main(argv: list[str] | None = None) -> int:
                 interrupted = mover.hold_current(min(cfg.hold_s, cfg.frame_s))
                 if interrupted:
                     continue
-        return 0
+        return exit_code
     finally:
+        heartbeat.stop()
         mover.shutdown()
         debug.close()
         hotkeys.stop()

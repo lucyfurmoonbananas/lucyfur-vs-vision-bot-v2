@@ -99,6 +99,11 @@ class Config:
     model_path: str | None = None
     dry_run: bool = False
     demo: bool = False
+    # No-progress watchdog (0 disables): end the run after this long with a frozen
+    # screen, a menu stuck up, or a HUD timer that stopped (see watchdog.py).
+    watchdog_s: float = 60.0
+    # Main-loop heartbeat (0 disables): exit if one iteration blocks this long.
+    loop_stall_s: float = 90.0
 
     @classmethod
     def from_env(cls) -> Config:
@@ -142,6 +147,8 @@ class Config:
             max_blob_area=_env_int("VS_MAX_BLOB_AREA", 12000),
             model_path=model,
             dry_run=dry,
+            watchdog_s=_env_float("VS_WATCHDOG_S", 60.0),
+            loop_stall_s=_env_float("VS_LOOP_STALL_S", 90.0),
         )
 
     @property
