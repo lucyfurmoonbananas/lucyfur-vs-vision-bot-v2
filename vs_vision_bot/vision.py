@@ -394,7 +394,8 @@ def parse_timer_text(text: str) -> float | None:
     """Parse a stage-timer string like ``3:45`` / ``12:00`` / ``01:41`` into seconds."""
     if not text:
         return None
-    m = re.search(r"(\d{1,2}):(\d{2})", text.strip())
+    # The digit whitelist can turn the colon into a digit ("06313" = 06:13).
+    m = re.search(r"(\d{1,2}):(\d{2})", text.strip()) or re.fullmatch(r"(\d{2})\d(\d{2})", text.strip())
     if not m:
         return None
     minutes, seconds = int(m.group(1)), int(m.group(2))

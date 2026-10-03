@@ -80,6 +80,16 @@ def test_parse_timer_text_accepts_common_forms():
     assert parse_timer_text('"00:20') == 20  # leading OCR noise
 
 
+def test_parse_timer_text_colon_read_as_a_digit():
+    # Oct 3 run5 death frames (true 06:10-06:20, a sprite over the colon) and
+    # session shots: tesseract's digit whitelist turns the colon into a digit.
+    assert parse_timer_text("06313") == 6 * 60 + 13
+    assert parse_timer_text("06210") == 6 * 60 + 10
+    assert parse_timer_text("04056") == 4 * 60 + 56
+    assert parse_timer_text("00205") == 5
+    assert parse_timer_text("110205") is None
+
+
 def test_parse_timer_text_rejects_garbage():
     assert parse_timer_text("") is None
     assert parse_timer_text("Sorat") is None
