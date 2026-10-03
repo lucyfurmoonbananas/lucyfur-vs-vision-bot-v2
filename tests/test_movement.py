@@ -513,3 +513,23 @@ def test_tight_weave_circles_are_denser_than_early_game():
     assert swarm.orbit_period_s < early.orbit_period_s
     assert swarm.orbit_period_s <= 3.0
     assert swarm.kite_weight < early.kite_weight
+
+
+def test_hp_crash_flee_and_flower_window_are_logged():
+    clock = Clock()
+    lines: list[str] = []
+    nav = Navigator(clock=clock, log=lines.append)
+    sparse = result(blob(600, 256, n=10, spread=30))
+    run(nav, clock, sparse, 8, hp=1.0)
+    assert not any("HP-crash" in ln for ln in lines)
+    run(nav, clock, sparse, 6, hp=0.65)
+    crash = [ln for ln in lines if "HP-crash flee" in ln]
+    assert len(crash) == 1  # edge-triggered once per crash bout
+    assert "hp 1.00->0.65" in crash[0]
+
+    nav.game_s = 300.0
+    run(nav, clock, sparse, 4, hp=0.65)
+    nav.game_s = 400.0
+    run(nav, clock, sparse, 4, hp=0.65)
+    assert sum("flower window ON" in ln for ln in lines) == 1
+    assert sum("flower window OFF" in ln for ln in lines) == 1

@@ -342,9 +342,10 @@ TIMER_RESYNC_AGREE_S = 2.0   # max spread of those readings' offsets to the esti
 class Navigator:
     """Stateful wrapper: orbit direction, rotating heading, dwell, game clock."""
 
-    def __init__(self, tune: Tuning | None = None, clock=time.monotonic) -> None:
+    def __init__(self, tune: Tuning | None = None, clock=time.monotonic, log=print) -> None:
         self.tune = tune or Tuning()
         self.clock = clock
+        self.log = log
         self.reset()
 
     def reset(self) -> None:
@@ -369,6 +370,8 @@ class Navigator:
         self._hp_hist: list[tuple[float, float]] = []  # (wall_t, hp) for crash detect
         self._hp_crashing = False
         self._hp_crash_latched = False  # edge-trigger flee once per crash bout
+        self._hp_crash_peak = 0.0       # peak HP of the current crash look-back (for the log)
+        self._flower_on = False         # edge-trigger the flower-window log line
 
     @property
     def phase(self) -> Phase:
@@ -446,6 +449,7 @@ class Navigator:
             self._hp_crash_latched = False
             return False
         peak = max(h for _, h in self._hp_hist)
+        self._hp_crash_peak = peak
         drop = float(hp) - peak
         crashing = drop <= t.hp_crash_delta
         if not crashing:
@@ -458,12 +462,26 @@ class Navigator:
         now = self.clock()
         crashing = self._note_hp_crash(hp, now)
         flower = t.flower_phase_lo <= self.game_s <= t.flower_phase_hi
+        if flower != self._flower_on:
+            self._flower_on = flower
+            if flower:
+                self.log(
+                    f"[nav] flower window ON game~{self.game_s:.0f}s "
+                    f"({t.flower_phase_lo:.0f}-{t.flower_phase_hi:.0f}s): cover trigger {t.cover_trigger_mid:.2f}, "
+                    f"breakouts up to {t.breakout_max_crash_s:.1f}s"
+                )
+            else:
+                self.log(f"[nav] flower window OFF game~{self.game_s:.0f}s")
         # Fresh HP crash: force a flee corridor (ignore gem pull via breakout path).
         if crashing and not self._hp_crash_latched:
             dur = max(t.breakout_min_s, min(t.flee_on_hp_crash_s, t.breakout_max_crash_s))
             self._flee_remaining = max(self._flee_remaining, dur)
             self.breakout = None  # pick a fresh corridor on the next start
             self._hp_crash_latched = True
+            self.log(
+                f"[nav] HP-crash flee: hp {self._hp_crash_peak:.2f}->{hp:.2f} within "
+                f"{t.hp_crash_window_s:.1f}s, flee {dur:.1f}s game~{self.game_s:.0f}s"
+            )
         cover, near = encirclement(pts, px, py, t.sector_radius, t.sector_thr)
         self.cover = cover
         if not self._near_init:
