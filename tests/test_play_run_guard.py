@@ -1,4 +1,4 @@
-"""scripts/play_run.sh guard, against stub binaries.
+"""scripts/play_run.sh guard + scripts/session_loop.sh rc handling, against stub binaries.
 
 Nothing here touches X, Steam or the game: xdotool / wmctrl / xwininfo / scrot / steam.sh /
 pkill / pgrep are shell stubs that only record their arguments, and the real run body is
@@ -16,6 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAY_RUN = ROOT / "scripts" / "play_run.sh"
+SESSION_LOOP = ROOT / "scripts" / "session_loop.sh"
 
 pytestmark = pytest.mark.skipif(
     any(shutil.which(b) is None for b in ("bash", "setsid", "timeout")) or not Path("/proc/uptime").exists(),
@@ -131,3 +132,38 @@ def test_chatty_run_over_the_wall_limit_is_killed(box):
     assert res.returncode == 3
     assert "GUARD_TRIP wall" in (session / "loop.log").read_text()
     assert "steam.sh steam://rungameid/1794680" in _calls(tmp_path)
+
+
+def _session_with_fake_play_run(session: Path, codes: list[int]) -> None:
+    seq = " ".join(str(c) for c in codes)
+    (session / "play_run.sh").write_text(
+        "#!/bin/bash\n"
+        f"codes=({seq})\n"
+        'i=$(( $1 - 1 )); [ $i -lt ${#codes[@]} ] || exit 2\n'
+        "exit ${codes[$i]}\n"
+    )
+    (session / "play_run.sh").chmod(0o755)
+    shutil.copy(SESSION_LOOP, session / "session_loop.sh")
+
+
+def _loop(env, session: Path) -> str:
+    env = dict(env, VS_RUN_GAP_S="0", VS_TEST_NO_CLEANUP="1")
+    subprocess.run(["bash", str(session / "session_loop.sh")], env=env, capture_output=True, text=True, timeout=60)
+    return (session / "session-log.md").read_text()
+
+
+def test_session_loop_does_not_count_watchdog_rc3_as_failures(box):
+    _tmp, session, env = box
+    _session_with_fake_play_run(session, [3] * 10 + [0])
+    md = _loop(env, session)
+    assert "too many consecutive failures" not in md
+    assert "### Run 11" in md  # kept going past 8 watchdog recoveries
+    assert md.count("Watchdog ended the run") == 10
+
+
+def test_session_loop_still_stops_after_8_real_failures(box):
+    _tmp, session, env = box
+    _session_with_fake_play_run(session, [1, 3, 1, 1, 1, 1, 1, 1, 1, 0])
+    md = _loop(env, session)
+    assert "too many consecutive failures (8)" in md
+    assert "### Run 9" in md and "### Run 10" not in md
