@@ -365,6 +365,30 @@ def test_pilot_clicks_revive_on_game_over():
 
 
 @needs_tesseract
+def test_revive_resets_hp_history():
+    """Oct 1 runs 3 / 12: hp stayed 0.19 (pre-death median) after REVIVE refilled the bar."""
+    backend = NullBackend()
+    clock = FakeClock()
+    pilot = _pilot(backend, clock)
+    for v in (0.2, 0.19, 0.15, 0.1, 0.19):
+        pilot._hp.add(v)
+    assert pilot.hp == pytest.approx(0.19)
+    frame = load("game_over_revive.png")
+    pilot.step(frame)
+    clock.t += 1.6
+    assert pilot.step(frame) == "revive"
+    assert pilot.revives == 1
+    assert pilot.hp is None  # stale pre-death readings dropped
+    # Readings during the hold-off (death screen fading) are ignored ...
+    pilot.step(load("gameplay_hurt.png"))
+    assert pilot.hp is None
+    # ... then the revived bar is read fresh.
+    clock.t += menus.REVIVE_HP_HOLDOFF_S + 0.1
+    pilot.step(load("gameplay_full_hp.png"))
+    assert pilot.hp == pytest.approx(1.0)
+
+
+@needs_tesseract
 def test_final_game_over_clicks_quit_then_done_then_stops(monkeypatch):
     backend = NullBackend()
     clock = FakeClock()

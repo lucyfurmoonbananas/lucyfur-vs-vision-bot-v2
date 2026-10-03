@@ -564,6 +564,12 @@ def choose_card(cards: list[Card], hp: float | None = None, owned: set[str] | No
     return min(range(len(cards)), key=lambda i: _card_rank(cards[i], i, hp, weapons))
 
 
+# After REVIVE the bar refills while the death screen fades; readings in this window
+# (and the pre-death history) are stale. Oct 1 runs 3 / 12 logged hp=0.19 after a
+# revive while the bar read 0.50, which kept the HP-aware picks and flee in "low HP".
+REVIVE_HP_HOLDOFF_S = 1.0
+
+
 class HpTracker:
     """Median of the last few HP-bar readings: one frame with a sprite over the bar
     (or a red hit flash) must not swing the level-up choice."""
@@ -706,6 +712,7 @@ class MenuPilot:
         self.log = log
         self.click = click
         self.revives = 0
+        self._hp_ignore_until = 0.0
         self._quit_pressed = False
         self.finished = False
         self.settle_frames = settle_frames
@@ -739,6 +746,7 @@ class MenuPilot:
         """A fresh run: forget owned items and HP history."""
         self.reset_run()
         self.revives = 0
+        self._hp_ignore_until = 0.0
         self.owned = set(self.start_items)
         self._hp.reset()
         self.picks = []
@@ -780,7 +788,8 @@ class MenuPilot:
             return "levelup"
         self._sig = None
         self._target = None
-        self._hp.add(read_hp_fraction(frame))
+        if now >= self._hp_ignore_until:
+            self._hp.add(read_hp_fraction(frame))
         return self._handle_chest(frame, now)
 
     def _handle_level_up(self, frame: np.ndarray, screen: LevelUpScreen, now: float) -> None:
@@ -923,6 +932,9 @@ class MenuPilot:
                     self.log(f"[{kind}] Enter on {label} ({hit[1]!r})")
                 if kind == "revive":
                     self.revives += 1
+                    # Pre-death readings are stale; start HP over from the revived bar.
+                    self._hp.reset()
+                    self._hp_ignore_until = self.clock() + REVIVE_HP_HOLDOFF_S
                 elif kind == "quit":
                     self._quit_pressed = True
                 else:
