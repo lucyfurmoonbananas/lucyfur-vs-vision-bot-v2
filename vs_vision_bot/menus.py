@@ -101,6 +101,8 @@ OTHER: list[str] = [
     "Mannajja",
     "Thousand Edge",
     "Heart of Fire",
+    "Glass Fandango",
+    "Parm Aegis",
 ]
 VOCAB: list[str] = PRIORITY + AVOID + OTHER
 
@@ -461,7 +463,7 @@ WEAPONS: frozenset[str] = frozenset(
         "Santa Water", "Runetracer", "Lightning Ring", "Pentagram", "Peachone", "Ebony Wings",
         "Phiera Der Tuphello", "Eight The Sparrow", "Gatti Amari", "Song of Mana", "Shadow Pinion",
         "Clock Lancet", "Laurel", "Bone", "Cherry Bomb", "Carréllo", "Celestial Dusting",
-        "Silver Wind", "Pako Battiliar",
+        "Silver Wind", "Pako Battiliar", "Glass Fandango",
         "Bloody Tear", "Holy Wand", "Thousand Edge", "Death Spiral", "Heaven Sword",
         "Unholy Vespers", "Hellfire", "Soul Eater", "La Borra", "NO FUTURE", "Thunder Loop",
         "Gorgeous Moon", "Vandalier", "Mannajja",

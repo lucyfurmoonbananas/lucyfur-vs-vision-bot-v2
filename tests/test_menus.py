@@ -106,6 +106,26 @@ def _cards(*spec: tuple[str, bool]) -> list[Card]:
     return [Card(0, 1, 0, 1, name=n, new=new) for n, new in spec]
 
 
+def test_match_name_snaps_glass_fandango_and_parm_aegis():
+    """VOCAB must include Glass Fandango / Parm Aegis so OCR noise does not stay junk."""
+    assert "Glass Fandango" in menus.OTHER
+    assert "Parm Aegis" in menus.OTHER
+    assert "Glass Fandango" in menus.WEAPONS
+    assert "Parm Aegis" not in menus.WEAPONS  # passive invuln item
+    assert match_name("Glass Fandango") == "Glass Fandango"
+    assert match_name("Parm Aegis") == "Parm Aegis"
+    # OCR-ish variants (difflib cutoff 0.6 once the real names are in VOCAB).
+    assert match_name("Glass Fandanqo") == "Glass Fandango"
+    assert match_name("Cless Fandango") == "Glass Fandango"
+    assert match_name("Glass Fandang0") == "Glass Fandango"
+    assert match_name("Parm Aegls") == "Parm Aegis"
+    assert match_name("Parn Aegis") == "Parm Aegis"
+    assert match_name("Parm Aeqis") == "Parm Aegis"
+    # Matched names must beat AVOID / junk (no longer rely on rank-45 alone).
+    assert choose_card(_cards(("Whip", True), ("Glass Fandango", True))) == 1
+    assert choose_card(_cards(("", True), ("Parm Aegis", True))) == 1
+
+
 def test_priority_order():
     assert choose_card(_cards(("Knife", True), ("Magic Wand", True), ("Garlic", False))) == 2
     assert choose_card(_cards(("Axe", True), ("Pummarola", True))) == 1
