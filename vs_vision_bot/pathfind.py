@@ -119,7 +119,7 @@ class Tuning:
     cover_trigger_crash: float = 0.35  # cover fraction when HP is crashing
     cover_trigger_mid: float = 0.45    # cover fraction during flower window
     breakout_max_crash_s: float = 4.5  # longer commit while HP crashes / mid phase
-    flee_on_hp_crash_s: float = 2.5    # forced flee length on a fresh HP crash
+    flee_on_hp_crash_s: float = 3.0    # forced flee length on a fresh HP crash (was 2.5; flower ring ~5:15)
     corridor_len: float = 320.0
     corridor_width: float = 34.0
     # Short look-ahead rollout: enemies chase while we walk each direction.
@@ -377,16 +377,25 @@ class Navigator:
     def phase(self) -> Phase:
         return phase_for(self.game_s)
 
-    def request_flee(self, duration_s: float | None = None) -> None:
-        """Force a breakout for ~1.5–2.5 s after REVIVE (ignore gem pull).
+    def request_flee(
+        self, duration_s: float | None = None, *, max_s: float | None = None
+    ) -> float:
+        """Force a breakout after REVIVE or an HP crash (ignore gem pull).
 
         Picks the open corridor on the next ``step`` even when encirclement
         metrics are still low (the crowd has not been re-measured yet).
+
+        ``max_s`` caps the flee window (defaults to ``breakout_max_s``; HP-crash
+        passes ``breakout_max_crash_s``). Extends an existing flee rather than
+        shortening it. Returns the clamped duration applied this call.
         """
         t = self.tune
         dur = t.flee_after_revive_s if duration_s is None else float(duration_s)
-        self._flee_remaining = max(t.breakout_min_s, min(dur, t.breakout_max_s))
-        self.breakout = None  # pre-death corridor and its elapsed time are stale
+        cap = t.breakout_max_s if max_s is None else float(max_s)
+        clamped = max(t.breakout_min_s, min(dur, cap))
+        self._flee_remaining = max(self._flee_remaining, clamped)
+        self.breakout = None  # pre-death / stale corridor; pick fresh on next start
+        return clamped
 
     def _start_breakout(self, pts: np.ndarray, px: float, py: float) -> None:
         t = self.tune
@@ -472,11 +481,9 @@ class Navigator:
                 )
             else:
                 self.log(f"[nav] flower window OFF game~{self.game_s:.0f}s")
-        # Fresh HP crash: force a flee corridor (ignore gem pull via breakout path).
+        # Fresh HP crash: same flee path as post-revive (shared request_flee).
         if crashing and not self._hp_crash_latched:
-            dur = max(t.breakout_min_s, min(t.flee_on_hp_crash_s, t.breakout_max_crash_s))
-            self._flee_remaining = max(self._flee_remaining, dur)
-            self.breakout = None  # pick a fresh corridor on the next start
+            dur = self.request_flee(t.flee_on_hp_crash_s, max_s=t.breakout_max_crash_s)
             self._hp_crash_latched = True
             self.log(
                 f"[nav] HP-crash flee: hp {self._hp_crash_peak:.2f}->{hp:.2f} within "

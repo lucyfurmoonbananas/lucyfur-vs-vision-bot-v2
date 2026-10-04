@@ -370,6 +370,24 @@ def test_hp_crash_forces_breakout_without_encirclement():
     assert nav.breakout is not None
     assert nav.last.mode.startswith("breakout")
     assert sum(1 for v in out if v[0] == -1) >= 2
+    # HP-crash goes through request_flee (shared helper), not a duplicated setter.
+    assert nav._flee_remaining > 0 or nav.breakout is not None
+    assert nav._hp_crash_latched is True
+
+
+def test_hp_crash_uses_request_flee_duration():
+    """Crash flee length comes from flee_on_hp_crash_s via request_flee (shared path)."""
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    sparse = result(blob(600, 256, n=10, spread=30))
+    run(nav, clock, sparse, 4, hp=1.0)
+    run(nav, clock, sparse, 2, hp=0.65)
+    assert nav._hp_crash_latched is True
+    # Fresh latch: remaining should be ~flee_on_hp_crash_s minus a couple frames.
+    expected = nav.tune.flee_on_hp_crash_s
+    assert expected == 3.0  # flower-ring survival bump (was 2.5)
+    assert nav._flee_remaining > expected - 0.5
+    assert nav._flee_remaining <= expected
 
 
 def test_flower_phase_lowers_cover_trigger():
