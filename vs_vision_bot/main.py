@@ -110,8 +110,9 @@ def main(argv: list[str] | None = None) -> int:
 
     def handle_stop(signum: int, _frame: object) -> None:
         print(f"[main] signal {signum}, releasing keys")
-        bus.request_quit()
-        mover.shutdown()
+        # Unwind into `finally` instead of calling bus/mover here: the handler
+        # runs on the main thread, which may already hold their non-reentrant locks.
+        raise SystemExit(0)
 
     signal.signal(signal.SIGINT, handle_stop)
     signal.signal(signal.SIGTERM, handle_stop)
