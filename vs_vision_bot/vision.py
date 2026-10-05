@@ -444,6 +444,22 @@ def read_timer_seconds(frame: np.ndarray) -> float | None:
     return parse_timer_text(_timer_ocr_image(crop))
 
 
+# Real level-up / pause / game-over overlays leave at most ~40% of the center
+# showing grass (level-up fixture 0.35, GAME OVER ~0.04); Mad Forest gameplay
+# is 0.78-0.99 even inside a flower ring.
+MENU_GRASS_MAX = 0.6
+
+
+def playfield_grass_fraction(region: np.ndarray) -> float:
+    """Fraction of pixels in ``region`` (BGR) that look like Mad Forest grass."""
+    if region.size == 0:
+        return 0.0
+    hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+    hue, sat, val = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    grass = (hue >= 35) & (hue <= 85) & (sat >= 60) & (val >= 45)
+    return float(grass.mean())
+
+
 def detect_level_up_menu(frame: np.ndarray) -> bool:
     """
     Level-up / pause cards sit as a few large rounded rectangles on a dim overlay.
@@ -457,6 +473,13 @@ def detect_level_up_menu(frame: np.ndarray) -> bool:
 
     mean = float(np.mean(center))
     if mean > 145:
+        return False
+    if playfield_grass_fraction(frame[h // 5 : 4 * h // 5, w // 8 : 7 * w // 8]) >= MENU_GRASS_MAX:
+        # Open Mad Forest grass in the middle: this is gameplay, not a card
+        # overlay. Dense Man-eater flower rings (~5:00) otherwise produce big
+        # dilated edge blobs that count as "cards", and the bot froze in place
+        # for seconds right before most deaths (Oct 4 blackboxes: ~60% of
+        # pre-death gameplay frames were flagged as a menu).
         return False
 
     blur = cv2.GaussianBlur(center, (5, 5), 0)
