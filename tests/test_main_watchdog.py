@@ -172,3 +172,32 @@ def test_revive_traces_vector_and_held_keys(frozen_game, capsys):
     assert "menu=revive" in lines[0]
     assert all(" v=(" in ln and " held=" in ln and " keys=" in ln for ln in lines)
     assert any("menu=-" in ln for ln in lines[1:])
+
+
+class HeuristicMenuVision(FakeVision):
+    """Vision fallback that flags every frame as a menu (heuristic only, no pilot)."""
+
+    def analyze(self, frame):
+        return VisionResult(player=(48, 27), timer_s=None, size=(96, 54), menu=True, note="heuristic")
+
+
+def test_revive_escape_ignores_heuristic_menu_until_frames_agree(frozen_game, capsys):
+    frozen_game.setenv("VS_AUTO_MENUS", "1")
+    frozen_game.setattr(m, "tesseract_available", lambda: True)
+    frozen_game.setattr(m, "detect_level_up", lambda frame: None)
+    frozen_game.setattr(m, "MenuPilot", RevivingPilot)
+    frozen_game.setattr(m, "ScreenCapture", LiveThenFrozenCapture)
+    frozen_game.setattr(m, "Vision", HeuristicMenuVision)
+    frozen_game.setattr(m, "REVIVE_TRACE_S", 0.4)
+    frozen_game.setattr(m, "REVIVE_TRACE_EVERY_S", 0.0)
+    assert m.main(["--dry-run"]) == m.EXIT_WATCHDOG
+    out = capsys.readouterr().out
+    lines = [ln for ln in out.splitlines() if ln.startswith("[revive+")]
+    assert "menu=revive" in lines[0]
+    # The first heuristic-only frames during the escape keep moving ...
+    assert "menu hint ignored x1" in lines[1] and "revive-escape" in lines[1]
+    assert "menu hint ignored x2" in lines[2]
+    assert " v=(0, 0)" not in lines[1]
+    # ... the third agreeing frame freezes like before.
+    assert " v=(0, 0)" in lines[3] and "ignored" not in lines[3]
+    assert "[nav] revive escape" in out

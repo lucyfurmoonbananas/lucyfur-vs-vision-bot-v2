@@ -25,8 +25,10 @@ it casts corridors in the 8 directions, picks the thinnest one that leads to
 open space (preferring not to reverse), and follows it for a second or more
 with a strong bias, re-checking the gap as it goes. Afterwards the roam loop
 continues from that heading, so the character keeps sweeping in big loops
-instead of being boxed in. After a REVIVE, ``request_flee`` forces the same
-breakout for ~2 s even when encirclement metrics are still low (no gem pull).
+instead of being boxed in. After a REVIVE, ``request_revive_escape`` (built on
+``request_flee``) runs a committed ~3 s escape toward the least threat-dense
+side: steering stays within ~45 deg of that heading, the heading is only re-aimed
+early or when its corridor is clearly shut, and it never turns back.
 A fast HP crash (e.g. Man-eater flower ring ~5:00) also forces that flee, and
 during the mid-run flower window the cover trigger is lowered so breakouts
 start earlier and last longer.
@@ -111,6 +113,17 @@ class Tuning:
     breakout_min_s: float = 1.1
     breakout_max_s: float = 3.0
     flee_after_revive_s: float = 2.0  # forced breakout after taking REVIVE
+    # Committed post-REVIVE escape (request_revive_escape): HP 0.50 inside the crowd
+    # that just killed us. Oct 5 logs: the plain 2 s flee re-picked its corridor every
+    # 0.4 s and reversed (w -> s, d -> a), walking back into the ring.
+    revive_escape_s: float = 3.0      # length of the committed escape
+    escape_len: float = 420.0         # corridor length when picking the escape heading
+    escape_wedge_radius: float = 480.0  # crowd within this radius counts for the wedge term
+    escape_wedge_gain: float = 0.5    # weight of whole-screen wedge density vs. corridor
+    escape_repick_s: float = 0.5      # early window: the first frames after REVIVE may be stale
+    escape_repick_ratio: float = 1.25  # early re-pick only when clearly better
+    escape_switch_ratio: float = 3.0  # later: switch only when the corridor is clearly shut
+    escape_cone_dot: float = 0.70     # steer only within ~45 deg of the escape heading
     # Man-eater flower ring (~4:40–6:00): HP can drop 1.0→0.1 in 2–3 s.
     hp_crash_delta: float = -0.3       # peak-to-now drop that counts as crashing
     hp_crash_window_s: float = 1.5     # look-back for that drop
@@ -208,6 +221,24 @@ def corridor_costs(points: np.ndarray, px: float, py: float, length: float = 320
     vis = np.array([min(abs(430 / ux) if ux else 1e9, abs(250 / uy) if uy else 1e9) for ux, uy in _UNIT])
     out += 0.4 * np.clip((length - vis) / length, 0, None)
     return out
+
+
+def escape_costs(points: np.ndarray, px: float, py: float, tune: "Tuning") -> np.ndarray:
+    """Per-direction cost for the post-REVIVE escape (low = least threat density).
+
+    A long corridor cast (what is directly in the way) plus the crowd weight in a
+    wide 3-sector (~67 deg) wedge out to most of the screen, so the heading points
+    at the emptiest side / edge rather than at a thin gap between two walls.
+    """
+    costs = corridor_costs(points, px, py, tune.escape_len, tune.corridor_width)
+    prof = sector_profile(points, px, py, tune.escape_wedge_radius)
+    if prof.sum() <= 0:
+        return costs
+    wedge = np.zeros(len(DIRS), dtype=np.float32)
+    for i, (ux, uy) in enumerate(_UNIT):
+        k = int(((math.atan2(uy, ux) + math.pi) / (2 * math.pi) * N_SECTORS)) % N_SECTORS
+        wedge[i] = prof[(k - 1) % N_SECTORS] + prof[k] + prof[(k + 1) % N_SECTORS]
+    return costs + tune.escape_wedge_gain * wedge
 
 
 def rollout_costs(
@@ -372,6 +403,15 @@ class Navigator:
         self._hp_crash_latched = False  # edge-trigger flee once per crash bout
         self._hp_crash_peak = 0.0       # peak HP of the current crash look-back (for the log)
         self._flower_on = False         # edge-trigger the flower-window log line
+        self._escape_remaining = 0.0    # >0: committed post-REVIVE escape running
+        self._escape_s = 0.0            # time spent in the current escape
+        self._escape_pending = False    # escape requested, heading not picked yet
+        self._escape_origin: tuple[float, float] | None = None  # heading after the early window
+
+    @property
+    def escaping(self) -> bool:
+        """True while a committed post-REVIVE escape is requested or running."""
+        return self._escape_pending or self._escape_remaining > 0
 
     @property
     def phase(self) -> Phase:
@@ -397,8 +437,40 @@ class Navigator:
         self.breakout = None  # pre-death / stale corridor; pick fresh on next start
         return clamped
 
+    def request_revive_escape(self, duration_s: float | None = None) -> float:
+        """Committed escape after REVIVE (built on ``request_flee``).
+
+        For ``revive_escape_s`` (~3 s) of gameplay the navigator walks toward the
+        lowest-threat-density direction (``escape_costs``), steering only within
+        ~45 deg of that heading. The heading may be re-picked during the first
+        ``escape_repick_s`` (stale first frames), afterwards only if that corridor
+        is clearly shut and never into a reversal. An HP crash during the escape
+        does not drop the heading. Calling it again while the REVIVE screen is up
+        just restarts the same window. Returns the applied duration.
+        """
+        t = self.tune
+        dur = t.revive_escape_s if duration_s is None else float(duration_s)
+        dur = self.request_flee(dur, max_s=max(dur, t.breakout_min_s))
+        self._flee_remaining = dur  # restart, do not stack repeated REVIVE frames
+        self._escape_remaining = dur
+        self._escape_s = 0.0
+        self._escape_pending = True
+        return dur
+
     def _start_breakout(self, pts: np.ndarray, px: float, py: float) -> None:
         t = self.tune
+        if self._escape_pending:
+            self._escape_pending = False
+            self.breakout = tuple(float(v) for v in _UNIT[int(np.argmin(escape_costs(pts, px, py, t)))])
+            self._escape_origin = self.breakout
+            self._breakout_s = 0.0
+            self._breakout_check = 0.0
+            self.breakouts += 1
+            self.log(
+                f"[nav] revive escape {_nearest_dir(self.breakout)} for {self._escape_remaining:.1f}s "
+                f"game~{self.game_s:.0f}s"
+            )
+            return
         costs = corridor_costs(pts, px, py, t.corridor_len, t.corridor_width)
         if self.current in DIRS:
             cu = _UNIT[DIRS.index(self.current)]
@@ -482,6 +554,9 @@ class Navigator:
             else:
                 self.log(f"[nav] flower window OFF game~{self.game_s:.0f}s")
         # Fresh HP crash: same flee path as post-revive (shared request_flee).
+        # A committed revive escape keeps its heading (no fresh corridor pick).
+        if crashing and not self._hp_crash_latched and self.escaping:
+            self._hp_crash_latched = True
         if crashing and not self._hp_crash_latched:
             dur = self.request_flee(t.flee_on_hp_crash_s, max_s=t.breakout_max_crash_s)
             self._hp_crash_latched = True
@@ -510,6 +585,9 @@ class Navigator:
         max_s = t.breakout_max_crash_s if (crashing or flower) else t.breakout_max_s
         closing = near >= t.near_min and (cover >= trigger_cover or (cover >= t.cover_rising and rising >= t.rise_trigger))
 
+        if self.breakout is not None and self._escape_remaining > 0:
+            self._update_escape(pts, px, py, dt)
+            return
         if self.breakout is not None:
             self._breakout_s += dt
             self._breakout_check += dt
@@ -542,6 +620,38 @@ class Navigator:
         if not closing:
             return
         self._start_breakout(pts, px, py)
+
+    def _update_escape(self, pts: np.ndarray, px: float, py: float, dt: float) -> None:
+        """Advance a committed post-REVIVE escape (no small-gap re-evaluation)."""
+        t = self.tune
+        self._breakout_s += dt
+        self._escape_s += dt
+        self._escape_remaining = max(0.0, self._escape_remaining - dt)
+        self._flee_remaining = self._escape_remaining
+        if self._escape_remaining <= 0:
+            self.heading = math.atan2(self.breakout[1], self.breakout[0])
+            self.log(f"[nav] revive escape done {_nearest_dir(self.breakout)} game~{self.game_s:.0f}s")
+            self.breakout = None
+            self._flee_remaining = 0.0
+            return
+        costs = escape_costs(pts, px, py, t)
+        cur_d = _nearest_dir(self.breakout)
+        cur = DIRS.index(cur_d)
+        if self._escape_s <= t.escape_repick_s:
+            best = int(np.argmin(costs))
+            switch = best != cur and costs[cur] > t.escape_repick_ratio * costs[best] + 0.3
+        else:
+            # Locked: only a clearly shut corridor, and never a reversal (the
+            # replacement stays within 90 deg of the current heading).
+            org = np.asarray(self._escape_origin or self.breakout, dtype=np.float32)
+            ahead = ((_UNIT @ _UNIT[cur]) >= -1e-6) & ((_UNIT @ org) >= -1e-6)
+            best = int(np.argmin(np.where(ahead, costs, np.inf)))
+            switch = best != cur and costs[cur] > t.escape_switch_ratio * costs[best] + 1.5
+        if switch:
+            self.breakout = tuple(float(v) for v in _UNIT[best])
+            if self._escape_s <= t.escape_repick_s:
+                self._escape_origin = self.breakout
+            self.log(f"[nav] revive escape re-aim {cur_d}->{DIRS[best]} at +{self._escape_s:.1f}s")
 
     def _sync_timer(self, reading: float, now: float) -> None:
         """Plausibility-check an OCR'd HUD timer reading against the wall clock.
@@ -602,6 +712,8 @@ class Navigator:
         phase = self.phase
         kite = self._kite_direction(pts, px, py, dt)
         self._update_breakout(pts, px, py, dt, hp)
+        escape = self.breakout is not None and self._escape_remaining > 0
+        cone: list[tuple[int, int]] | None = None
         if self.breakout is not None:
             dec = score_directions(
                 pts, (px, py), self.breakout, self.tune.breakout_weight,
@@ -610,6 +722,18 @@ class Navigator:
             )
             dec.mode = "breakout"
             kite = self.breakout
+            if escape:
+                # Committed: best-scoring direction inside the ~45 deg cone only
+                # (the field can still side-step a body, never turn back).
+                bx, by = self.breakout
+                ox, oy = self._escape_origin or self.breakout
+                cone = [
+                    d for i, d in enumerate(DIRS)
+                    if _UNIT[i, 0] * bx + _UNIT[i, 1] * by >= self.tune.escape_cone_dot
+                    and _UNIT[i, 0] * ox + _UNIT[i, 1] * oy >= -1e-6
+                ]
+                dec.vector = max(cone, key=lambda d: dec.scores[d])
+                dec.mode = "revive-escape"
         else:
             dec = score_directions(
                 pts, (px, py), kite, phase.kite_weight,
@@ -630,7 +754,9 @@ class Navigator:
                 self._blocked_s = 0.0
 
         choice = dec.vector
-        if choice != self.current and self.current != (0, 0) and self._since_change < self.tune.min_dwell_s:
+        # During the escape the dwell may only keep a chord that is inside the cone.
+        keep_ok = cone is None or self.current in cone
+        if keep_ok and choice != self.current and self.current != (0, 0) and self._since_change < self.tune.min_dwell_s:
             cur_score = dec.scores.get(self.current, -1e9)
             # Keep the current chord for a moment unless it is clearly worse.
             if cur_score > dec.scores[choice] - 1.0:

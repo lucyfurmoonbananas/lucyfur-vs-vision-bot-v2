@@ -25,8 +25,30 @@ from vs_vision_bot.watchdog import LoopHeartbeat, ProgressWatchdog, Stall
 # count it as a failure.
 EXIT_WATCHDOG = 3
 # After a REVIVE click, log the move vector and held keys this long (~4 lines/s).
-REVIVE_TRACE_S = 3.0
+REVIVE_TRACE_S = 3.5  # covers the whole ~3 s revive escape
 REVIVE_TRACE_EVERY_S = 0.25
+# During the committed post-REVIVE escape a vision-heuristic-only menu flag (no
+# pilot / OCR confirmation) must hold this many consecutive frames before the
+# character is frozen. Real level-ups are confirmed by the pilot within a frame.
+ESCAPE_HEURISTIC_MENU_FRAMES = 3
+
+
+def gate_heuristic_menu(
+    menu: bool, menu_kind: str | None, escaping: bool, streak: int,
+    need: int = ESCAPE_HEURISTIC_MENU_FRAMES,
+) -> tuple[bool, int]:
+    """(menu flag to act on, new heuristic streak).
+
+    Only a heuristic-only flag (``menu`` set by vision, ``menu_kind`` None)
+    during a revive escape is downgraded, until ``need`` frames agree. A
+    pilot-confirmed menu always freezes; outside the escape nothing changes.
+    """
+    if not menu or menu_kind is not None:
+        return menu, 0
+    if not escaping:
+        return menu, 0
+    streak += 1
+    return streak >= need, streak
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -192,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
     revive_trace = [0.0, -1e9, 0.0]  # started_at, until, last_line_at
     parked = False
     in_menu = False
+    heur_streak = [0]
 
     try:
         while not bus.quit:
@@ -231,8 +254,9 @@ def main(argv: list[str] | None = None) -> int:
                     result.menu = True
                     result.note = pilot.status
                 if menu_kind == "revive":
-                    # Always break out of the death crowd for ~2 s (no gem pull).
-                    nav.request_flee()
+                    # Committed ~3 s escape out of the death crowd (no gem pull,
+                    # no small-gap re-picks, heuristic menu hints ignored).
+                    nav.request_revive_escape()
             in_menu = menu_kind is not None
             if not cfg.demo and not bus.paused and not menu_kind:
                 now_box = time.monotonic()
@@ -254,13 +278,21 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception as exc:  # noqa: BLE001
                     print(f"[blackbox] failed: {exc}")
                 blackbox.clear()
+            menu_hint = ""
+            if result.menu and not menu_kind:
+                acted, heur_streak[0] = gate_heuristic_menu(True, None, nav.escaping, heur_streak[0])
+                if not acted:
+                    result.menu = False
+                    menu_hint = f" (menu hint ignored x{heur_streak[0]})"
+            else:
+                heur_streak[0] = 0
             if bus.paused or result.menu:
                 vector, keys = (0, 0), ()
             else:
                 decision = nav.step(result, hp=pilot.hp)
                 vector, keys = decision.vector, cfg.keys_for_vector(decision.vector)
                 hp_txt = "?" if pilot.hp is None else f"{pilot.hp:.2f}"
-                result.note = f"{decision.mode} d={decision.danger_here:.1f} hp={hp_txt}"
+                result.note = f"{decision.mode} d={decision.danger_here:.1f} hp={hp_txt}{menu_hint}"
                 now_log = time.monotonic()
                 if now_log - last_nav_log[0] >= 3.0:
                     last_nav_log[0] = now_log
