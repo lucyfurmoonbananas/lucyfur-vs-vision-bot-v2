@@ -31,7 +31,9 @@ side: steering stays within ~45 deg of that heading, the heading is only re-aime
 early or when its corridor is clearly shut, and it never turns back.
 A fast HP crash (e.g. Man-eater flower ring ~5:00) also forces that flee, and
 during the mid-run flower window the cover trigger is lowered so breakouts
-start earlier and last longer.
+start earlier and last longer; there a ring-closing breakout is also run as the
+same committed escape when ``ring_commit_s`` > 0 (reason "ring"; off by
+default, opt-in) so it is not dropped when cover dips and never turns back.
 
 Behaviour switches by game phase (tight weaving for the ~7:00 skeleton swarm,
 slow circles later, near-still after ~21:00) and by HP (more defensive when low).
@@ -124,6 +126,13 @@ class Tuning:
     escape_repick_ratio: float = 1.25  # early re-pick only when clearly better
     escape_switch_ratio: float = 3.0  # later: switch only when the corridor is clearly shut
     escape_cone_dot: float = 0.70     # steer only within ~45 deg of the escape heading
+    # Flower window: a ring-closing breakout becomes the same committed escape, so it
+    # is not abandoned after 1.1 s when cover dips and never reverses into the ring
+    # (Oct 5: cells 150 -> 400-600 at game~315-335 s, HP-crash flee fired too late).
+    # OFF by default: in scripts/sim_movement.py --horde style runs (density 1.5, 6 seeds,
+    # game 270-370 s) it did not help: damage 69 off vs 75 / 81 / 76 at 2.5 / 1.5 / 3.5 s.
+    # Opt in with Tuning(ring_commit_s=2.5) for a live A/B once the revive escape is proven.
+    ring_commit_s: float = 0.0        # 0 disables
     # Man-eater flower ring (~4:40–6:00): HP can drop 1.0→0.1 in 2–3 s.
     hp_crash_delta: float = -0.3       # peak-to-now drop that counts as crashing
     hp_crash_window_s: float = 1.5     # look-back for that drop
@@ -407,6 +416,7 @@ class Navigator:
         self._escape_s = 0.0            # time spent in the current escape
         self._escape_pending = False    # escape requested, heading not picked yet
         self._escape_origin: tuple[float, float] | None = None  # heading after the early window
+        self._escape_reason = "revive"  # "revive" or "ring" (flower-window commit)
 
     @property
     def escaping(self) -> bool:
@@ -435,6 +445,10 @@ class Navigator:
         clamped = max(t.breakout_min_s, min(dur, cap))
         self._flee_remaining = max(self._flee_remaining, clamped)
         self.breakout = None  # pre-death / stale corridor; pick fresh on next start
+        # A plain flee replaces any committed escape (request_revive_escape and the
+        # flower-ring commit re-arm it right after this call).
+        self._escape_remaining = 0.0
+        self._escape_pending = False
         return clamped
 
     def request_revive_escape(self, duration_s: float | None = None) -> float:
@@ -450,7 +464,12 @@ class Navigator:
         """
         t = self.tune
         dur = t.revive_escape_s if duration_s is None else float(duration_s)
+        return self._request_escape(dur, "revive")
+
+    def _request_escape(self, dur: float, reason: str) -> float:
+        t = self.tune
         dur = self.request_flee(dur, max_s=max(dur, t.breakout_min_s))
+        self._escape_reason = reason
         self._flee_remaining = dur  # restart, do not stack repeated REVIVE frames
         self._escape_remaining = dur
         self._escape_s = 0.0
@@ -467,8 +486,8 @@ class Navigator:
             self._breakout_check = 0.0
             self.breakouts += 1
             self.log(
-                f"[nav] revive escape {_nearest_dir(self.breakout)} for {self._escape_remaining:.1f}s "
-                f"game~{self.game_s:.0f}s"
+                f"[nav] {self._escape_reason} escape {_nearest_dir(self.breakout)} for {self._escape_remaining:.1f}s "
+                f"game~{self.game_s:.0f}s cover={self.cover:.2f}"
             )
             return
         costs = corridor_costs(pts, px, py, t.corridor_len, t.corridor_width)
@@ -619,6 +638,9 @@ class Navigator:
             return
         if not closing:
             return
+        if flower and t.ring_commit_s > 0:
+            # Flower ring closing: commit (least-dense side, cone, no reversal).
+            self._request_escape(t.ring_commit_s, "ring")
         self._start_breakout(pts, px, py)
 
     def _update_escape(self, pts: np.ndarray, px: float, py: float, dt: float) -> None:
@@ -630,7 +652,7 @@ class Navigator:
         self._flee_remaining = self._escape_remaining
         if self._escape_remaining <= 0:
             self.heading = math.atan2(self.breakout[1], self.breakout[0])
-            self.log(f"[nav] revive escape done {_nearest_dir(self.breakout)} game~{self.game_s:.0f}s")
+            self.log(f"[nav] {self._escape_reason} escape done {_nearest_dir(self.breakout)} game~{self.game_s:.0f}s")
             self.breakout = None
             self._flee_remaining = 0.0
             return
@@ -651,7 +673,7 @@ class Navigator:
             self.breakout = tuple(float(v) for v in _UNIT[best])
             if self._escape_s <= t.escape_repick_s:
                 self._escape_origin = self.breakout
-            self.log(f"[nav] revive escape re-aim {cur_d}->{DIRS[best]} at +{self._escape_s:.1f}s")
+            self.log(f"[nav] {self._escape_reason} escape re-aim {cur_d}->{DIRS[best]} at +{self._escape_s:.1f}s")
 
     def _sync_timer(self, reading: float, now: float) -> None:
         """Plausibility-check an OCR'd HUD timer reading against the wall clock.
@@ -733,7 +755,7 @@ class Navigator:
                     and _UNIT[i, 0] * ox + _UNIT[i, 1] * oy >= -1e-6
                 ]
                 dec.vector = max(cone, key=lambda d: dec.scores[d])
-                dec.mode = "revive-escape"
+                dec.mode = f"{self._escape_reason}-escape"
         else:
             dec = score_directions(
                 pts, (px, py), kite, phase.kite_weight,

@@ -193,3 +193,72 @@ def test_gate_needs_agreeing_frames_during_escape():
     menu, s = m.gate_heuristic_menu(True, None, True, s)
     assert (menu, s) == (True, 3)
     assert m.ESCAPE_HEURISTIC_MENU_FRAMES == 3
+
+
+# -- flower-window ring commit (same committed escape, reason "ring")
+
+
+def _ring_nav(game_s, tune=None):
+    clock = Clock()
+    logs: list[str] = []
+    tune = tune or Tuning(ring_commit_s=2.5)  # opt-in (default off)
+    nav = Navigator(tune=tune, clock=clock, log=logs.append)
+    nav.game_s = game_s
+    return nav, clock, logs
+
+
+def test_flower_window_closing_ring_commits_escape_through_gap():
+    nav, clock, logs = _ring_nav(318.0)
+    pts = result(ring(480, 256, 170, 40, gap_deg=(-1, 25)))  # gap right
+    out = run(nav, clock, pts, 10, hp=1.0)
+    assert nav.escaping and nav.last.mode.startswith("ring-escape")
+    assert any(line.startswith("[nav] ring escape (1, 0)") for line in logs)
+    assert sum(1 for v in out[-6:] if v[0] == 1) >= 4
+
+
+def test_ring_escape_is_not_abandoned_when_cover_dips():
+    """Plain breakouts stop after 1.1 s once 'closing' is false; the ring commit holds."""
+    nav, clock, logs = _ring_nav(318.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 2, hp=1.0)
+    assert nav.escaping
+    h0 = nav.breakout
+    out = run(nav, clock, result(blob(330, 256, n=8, spread=30)), 18, hp=1.0)  # ~1.5 s, sparse
+    assert nav.escaping and nav.breakout is not None
+    assert all(_dot(v, h0) >= -1e-6 for v in out)
+    run(nav, clock, result([]), 14, hp=1.0)
+    assert not nav.escaping
+    assert any("ring escape done" in line for line in logs)
+
+
+def test_outside_flower_window_plain_breakout_unchanged():
+    nav, clock, logs = _ring_nav(100.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 10, hp=1.0)
+    assert nav.breakouts >= 1 and not nav.escaping
+    assert nav.last.mode.startswith("breakout")
+    assert not any("ring escape" in line for line in logs)
+
+
+def test_ring_commit_is_off_by_default():
+    assert Tuning().ring_commit_s == 0.0
+    nav, clock, logs = _ring_nav(318.0, tune=Tuning())
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 10, hp=1.0)
+    assert nav.breakouts >= 1 and not nav.escaping
+    assert nav.last.mode.startswith("breakout")
+
+
+def test_revive_overrides_running_ring_escape():
+    nav, clock, logs = _ring_nav(318.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 4, hp=1.0)
+    assert nav._escape_reason == "ring"
+    nav.request_revive_escape()
+    assert nav._escape_reason == "revive" and nav._escape_remaining == nav.tune.revive_escape_s
+    run(nav, clock, result(blob(620, 256, n=30, spread=40)), 2, hp=0.5)
+    assert nav.last.mode.startswith("revive-escape")
+
+
+def test_plain_flee_cancels_committed_escape():
+    nav, clock, _ = _ring_nav(318.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 4, hp=1.0)
+    assert nav.escaping
+    nav.request_flee(2.0)
+    assert not nav.escaping and nav._flee_remaining >= 2.0  # extends, never shortens
