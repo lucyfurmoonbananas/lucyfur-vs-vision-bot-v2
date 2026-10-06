@@ -818,6 +818,11 @@ class MenuPilot:
                 f"-> pick #{self._target + 1} {self._names[self._target]} "
                 f"(hp={self.hp if self.hp is None else round(self.hp, 2)}, weapons={owned_weapon_count(self.owned)})"
             )
+            if any(not c.name for c in screen.cards):
+                # Unmatched OCR ('P', 'wr', 'or'): keep the frame to learn what the card is.
+                path = self._save_frame(frame, "levelup_unread")
+                if path:
+                    self.log(f"[levelup] unread card, saved {path}")
         if now < self._next_action:
             self.status = f"LEVEL UP -> {self._names[self._target]}"
             return
@@ -867,20 +872,25 @@ class MenuPilot:
         self._target = None
         self._sig = None
 
-    def _save_results(self, frame: np.ndarray) -> str | None:
-        """Keep a screenshot of the Results screen (time / level / kills) before DONE."""
+    def _save_frame(self, frame: np.ndarray, prefix: str) -> str | None:
         if not self.results_dir:
             return None
         try:
             os.makedirs(self.results_dir, exist_ok=True)
-            path = os.path.join(self.results_dir, time.strftime("results_%Y%m%d_%H%M%S.png"))
+            path = os.path.join(self.results_dir, time.strftime(f"{prefix}_%Y%m%d_%H%M%S.png"))
             if cv2.imwrite(path, frame):
-                self.saved_results.append(path)
-                self.log(f"[results] saved {path}")
                 return path
         except Exception as exc:  # noqa: BLE001
-            self.log(f"[results] could not save screenshot: {exc}")
+            self.log(f"[{prefix}] could not save screenshot: {exc}")
         return None
+
+    def _save_results(self, frame: np.ndarray) -> str | None:
+        """Keep a screenshot of the Results screen (time / level / kills) before DONE."""
+        path = self._save_frame(frame, "results")
+        if path:
+            self.saved_results.append(path)
+            self.log(f"[results] saved {path}")
+        return path
 
     def _scan(self, frame: np.ndarray) -> None:
         words = read_screen_words(frame)

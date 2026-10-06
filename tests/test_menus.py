@@ -588,3 +588,26 @@ def test_pilot_quits_busy_final_game_over():
             pilot.step(frame, None)
     assert pilot._quit_pressed
     assert pilot.clicks and abs(pilot.clicks[0][0] - 480) < 40
+
+
+
+def test_level_up_with_an_unread_card_saves_the_frame(monkeypatch, tmp_path):
+    # Oct 4-6 logs: 63 of 485 level-ups had an unmatched card ('P', 'wr', 'or')
+    # and no frame showed what it was. Keep one screenshot per such screen.
+    frame = load("levelup_4cards_sel4.png")
+
+    def fake_read(f, s, unread=True):
+        for c in s.cards:
+            c.name, c.raw = "Garlic", "Garlic"
+        if unread:
+            s.cards[1].name, s.cards[1].raw = "", "wr"
+        return s
+
+    for unread, expect in ((True, 1), (False, 0)):
+        out = tmp_path / str(unread)
+        monkeypatch.setattr(menus, "read_cards", lambda f, s: fake_read(f, s, unread))
+        pilot = _pilot(NullBackend(), FakeClock(), results_dir=str(out))
+        for _ in range(4):
+            pilot.step(frame, detect_level_up(frame))
+        assert len(list(out.glob("levelup_unread_*.png"))) == expect
+        assert not list(out.glob("results_*.png"))
