@@ -31,6 +31,7 @@ import numpy as np
 # BGR colours measured on the real 960x540 Level Up screen.
 PANEL_BGR = np.array([116, 79, 75], dtype=np.int16)
 CARD_GRAY = 139
+CARD_ROW_FRAC = 0.12  # min gray fraction of a panel row that belongs to a card
 
 # Pick priority (user's play-a-vampire-survivors-run skill, Level-up section).
 PRIORITY: list[str] = [
@@ -103,6 +104,7 @@ OTHER: list[str] = [
     "Heart of Fire",
     "Glass Fandango",
     "Parm Aegis",
+    "Candybox",
 ]
 VOCAB: list[str] = PRIORITY + AVOID + OTHER
 
@@ -191,7 +193,10 @@ def find_cards(frame: np.ndarray, panel: tuple[int, int, int, int]) -> list[Card
     px, py, pw, ph = panel
     sub = _gray_mask(frame[py : py + ph, px : px + pw])
     row_frac = sub.mean(axis=1)
-    on = row_frac > 0.3
+    # Rows between cards are ~0 gray; a two-line description drops a card row to ~0.27,
+    # which used to split the card (short top half, icon-shifted x0, name crop cut "Armor"
+    # to "or"). A low threshold keeps the card whole; the gap rows stay well below it.
+    on = row_frac > CARD_ROW_FRAC
     cards: list[Card] = []
     start = None
     min_h = max(12, int(0.06 * h))

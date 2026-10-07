@@ -611,3 +611,40 @@ def test_level_up_with_an_unread_card_saves_the_frame(monkeypatch, tmp_path):
             pilot.step(frame, detect_level_up(frame))
         assert len(list(out.glob("levelup_unread_*.png"))) == expect
         assert not list(out.glob("results_*.png"))
+
+
+def test_two_line_description_card_is_not_split():
+    """A two-line description ("Reduces incoming Damage ... retaliatory") dropped the card's
+    gray row fraction to ~0.27, which split the card and shifted its name crop: Armor read as
+    "wr"/"or" in 20 saved live frames (Oct 6)."""
+    frame = load("levelup_two_line_armor.png")
+    screen = detect_level_up(frame)
+    assert screen is not None
+    assert len(screen.cards) == 3
+    for c in screen.cards:
+        assert c.x0 == screen.cards[0].x0
+        assert c.y1 - c.y0 >= 60
+    assert [c.y0 for c in screen.cards] == [137, 215, 293]
+
+
+@needs_tesseract
+def test_two_line_armor_card_is_read():
+    frame = load("levelup_two_line_armor.png")
+    screen = menus.read_cards(frame, detect_level_up(frame))
+    assert [c.name for c in screen.cards] == ["King Bible", "Armor", "Duplicator"]
+
+
+@needs_tesseract
+def test_candybox_is_in_vocab():
+    frame = load("levelup_candybox.png")
+    screen = menus.read_cards(frame, detect_level_up(frame))
+    assert [c.name for c in screen.cards] == ["Garlic", "Wings", "Candybox"]
+    assert match_name("Candybox") == "Candybox"
+
+
+def test_card_split_still_separates_adjacent_cards():
+    frame = load("levelup_4cards_sel4.png")
+    screen = detect_level_up(frame)
+    assert len(screen.cards) == 4
+    ys = [(c.y0, c.y1) for c in screen.cards]
+    assert all(a[1] < b[0] for a, b in zip(ys, ys[1:]))
