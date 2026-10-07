@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 
 import numpy as np
 
@@ -161,6 +161,37 @@ class Tuning:
     enemy_speed: float = 70.0
     rollout_s: float = 1.2         # per leg; two legs (turn allowed after the first)
     rollout_steps: int = 4
+
+
+def tuning_from_env(raw: str | None, base: Tuning | None = None, log=print) -> Tuning:
+    """Parse ``VS_TUNE`` ("ring_commit_s=2.5,flower_noreverse_s=4") into a Tuning.
+
+    Lets a session script A/B the opt-in knobs live without editing the repo. Only
+    known numeric fields are accepted; unknown names or bad values are logged and
+    skipped, so a typo can never stop the bot.
+    """
+    base = base or Tuning()
+    if not raw or not raw.strip():
+        return base
+    types = {f.name: f.type for f in fields(Tuning)}
+    over: dict[str, float | int] = {}
+    for item in raw.replace(";", ",").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name, sep, val = item.partition("=")
+        name, val = name.strip(), val.strip()
+        kind = types.get(name)
+        if not sep or kind not in ("float", "int", float, int):
+            log(f"[nav] VS_TUNE: ignored {item!r} (unknown or non-numeric field)")
+            continue
+        try:
+            over[name] = int(val) if kind in ("int", int) else float(val)
+        except ValueError:
+            log(f"[nav] VS_TUNE: ignored {item!r} (bad value)")
+    if over:
+        log("[nav] VS_TUNE overrides: " + ", ".join(f"{k}={v}" for k, v in over.items()))
+    return replace(base, **over)
 
 
 @dataclass

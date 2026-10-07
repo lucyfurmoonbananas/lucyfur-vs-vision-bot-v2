@@ -16,7 +16,7 @@ from vs_vision_bot.debug_window import DebugWindow
 from vs_vision_bot.hotkeys import CommandBus, HotkeyService
 from vs_vision_bot.input_backend import make_backend
 from vs_vision_bot.menus import MenuPilot, detect_level_up, tesseract_available
-from vs_vision_bot.pathfind import Navigator
+from vs_vision_bot.pathfind import Navigator, tuning_from_env
 from vs_vision_bot.vision import Vision, draw_synthetic_arena
 from vs_vision_bot.watchdog import LoopHeartbeat, ProgressWatchdog, Stall
 
@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         click=click_in_capture,
         results_dir=os.environ.get("VS_RESULTS_DIR", "/workspace/vsbot-check/results"),
     )
-    nav = Navigator()
+    nav = Navigator(tune=tuning_from_env(os.environ.get("VS_TUNE")))
     # The movement game clock restarts only after a finished run (QUIT + DONE),
     # not on every manual pause.
     pilot_new_run = [False]
