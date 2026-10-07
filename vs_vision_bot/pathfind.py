@@ -144,6 +144,12 @@ class Tuning:
     # sim's rings are converging ghouls, not the static Man-eater ring; A/B it live via
     # VS_TUNE=flower_noreverse_s=4.
     flower_noreverse_s: float = 0.0
+    # Early-game XP: plain encirclement breakouts used to ignore gems (gems=None), and in
+    # the Oct 6 3 AM logs 40-50 % of game 120-280 s samples were breakouts while gems on
+    # screen piled up 5 -> 9.5 (level 6-8 at 5:00). Before this game_s a plain breakout
+    # (not a REVIVE / HP-crash flee or committed escape) keeps the normal gem pull, which
+    # still fades out with danger (gem_danger) and is off at low HP. 0 disables.
+    breakout_gem_until_s: float = 280.0
     # Man-eater flower ring (~4:40–6:00): HP can drop 1.0→0.1 in 2–3 s.
     hp_crash_delta: float = -0.3       # peak-to-now drop that counts as crashing
     hp_crash_window_s: float = 1.5     # look-back for that drop
@@ -816,9 +822,12 @@ class Navigator:
         escape = self.breakout is not None and self._escape_remaining > 0
         cone: list[tuple[int, int]] | None = None
         if self.breakout is not None:
+            t = self.tune
+            plain = not escape and self._flee_remaining <= 0
+            bgems = result.gems if plain and self.game_s < t.breakout_gem_until_s else None
             dec = score_directions(
                 pts, (px, py), self.breakout, self.tune.breakout_weight,
-                gems=None, current=self.current, hp=hp, tune=self.tune, idle_ok=False,
+                gems=bgems, current=self.current, hp=hp, tune=self.tune, idle_ok=False,
                 kite_floor=True,
             )
             dec.mode = "breakout"
