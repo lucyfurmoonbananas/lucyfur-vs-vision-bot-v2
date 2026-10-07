@@ -420,15 +420,26 @@ def _white_text(crop: np.ndarray, thr: int = 190, scale: int = 2) -> np.ndarray:
     return cv2.copyMakeBorder(b, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
 
 
-def match_name(raw: str) -> str:
+def match_name_score(raw: str) -> tuple[str, float]:
+    """Best VOCAB name for an OCR reading and its similarity (0 when nothing >= 0.6)."""
     text = re.sub(r"[^A-Za-z' ]", "", raw).strip()
     if len(text) < 3:
-        return ""
+        return "", 0.0
     lower = {v.lower(): v for v in VOCAB}
     best = difflib.get_close_matches(text.lower(), list(lower), n=1, cutoff=0.6)
     if best:
-        return lower[best[0]]
-    return ""
+        return lower[best[0]], difflib.SequenceMatcher(None, text.lower(), best[0]).ratio()
+    return "", 0.0
+
+
+def match_name(raw: str) -> str:
+    return match_name_score(raw)[0]
+
+
+# A name read below this similarity is re-OCR'd at other white thresholds (Oct 6:
+# "Armor" read as "Axrer" at 190 -> snapped to Axe, the avoid list; 200/210 read "Armor").
+NAME_RETRY_BELOW = 0.85
+NAME_RETRY_THRS = (210, 170)
 
 
 def read_card(frame: np.ndarray, card: Card) -> Card:
@@ -438,7 +449,15 @@ def read_card(frame: np.ndarray, card: Card) -> Card:
     ny1 = card.y0 + max(12, int(0.3 * chh))
     name_crop = frame[ny0:ny1, card.x0 + int(0.17 * cw) : card.x0 + int(0.63 * cw)]
     card.raw = ocr_image(_white_text(name_crop))
-    card.name = match_name(card.raw)
+    card.name, score = match_name_score(card.raw)
+    if score < NAME_RETRY_BELOW:
+        for thr in NAME_RETRY_THRS:
+            raw = ocr_image(_white_text(name_crop, thr=thr))
+            name, sc = match_name_score(raw)
+            if sc > score:
+                card.raw, card.name, score = raw, name, sc
+            if score >= NAME_RETRY_BELOW:
+                break
     # "New!" is yellow text in the right half of the title row; owned items say level:N in white.
     tag = frame[ny0:ny1, card.x0 + int(0.6 * cw) : card.x1].astype(np.int16)
     yellow = (tag[:, :, 2] > 180) & (tag[:, :, 1] > 180) & (tag[:, :, 0] < 90)

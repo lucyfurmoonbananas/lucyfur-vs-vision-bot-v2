@@ -648,3 +648,48 @@ def test_card_split_still_separates_adjacent_cards():
     assert len(screen.cards) == 4
     ys = [(c.y0, c.y1) for c in screen.cards]
     assert all(a[1] < b[0] for a, b in zip(ys, ys[1:]))
+
+
+@needs_tesseract
+def test_weak_armor_read_is_retried_not_snapped_to_axe():
+    """Oct 6 live frame: card 4 "Armor" OCRs as "Axrer" at thr 190, which snapped to Axe
+    (avoid list). A weak match is re-read at other thresholds."""
+    frame = load("levelup_armor_axe_misread.png")
+    screen = menus.read_cards(frame, detect_level_up(frame))
+    assert [c.name for c in screen.cards] == ["Lightning Ring", "Tirajisú", "Santa Water", "Armor"]
+
+
+def test_match_name_score():
+    assert menus.match_name_score("Garlic") == ("Garlic", 1.0)
+    name, sc = menus.match_name_score("Axrer")
+    assert name == "Axe" and sc < menus.NAME_RETRY_BELOW
+    assert menus.match_name_score("~ =") == ("", 0.0)
+
+
+def test_read_card_retries_weak_match_with_other_thresholds(monkeypatch):
+    frame = load("levelup_4cards_sel4.png")
+    card = detect_level_up(frame).cards[0]
+    reads = iter(["Axrer", "Armor"])
+    calls: list[int] = []
+    monkeypatch.setattr(menus, "ocr_image", lambda img, psm=7: (calls.append(1), next(reads))[1])
+    menus.read_card(frame, card)
+    assert card.name == "Armor" and card.raw == "Armor"
+    assert len(calls) == 2  # stops once a strong match is found
+
+
+def test_read_card_strong_match_needs_one_ocr(monkeypatch):
+    frame = load("levelup_4cards_sel4.png")
+    card = detect_level_up(frame).cards[0]
+    calls: list[int] = []
+    monkeypatch.setattr(menus, "ocr_image", lambda img, psm=7: (calls.append(1), "Garlic")[1])
+    menus.read_card(frame, card)
+    assert card.name == "Garlic" and len(calls) == 1
+
+
+def test_read_card_keeps_first_read_when_retries_are_worse(monkeypatch):
+    frame = load("levelup_4cards_sel4.png")
+    card = detect_level_up(frame).cards[0]
+    reads = iter(["Amor", "zz", "q"])
+    monkeypatch.setattr(menus, "ocr_image", lambda img, psm=7: next(reads))
+    menus.read_card(frame, card)
+    assert card.name == "Armor" and card.raw == "Amor"
