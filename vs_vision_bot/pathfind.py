@@ -133,6 +133,17 @@ class Tuning:
     # game 270-370 s) it did not help: damage 69 off vs 75 / 81 / 76 at 2.5 / 1.5 / 3.5 s.
     # Opt in with Tuning(ring_commit_s=2.5) for a live A/B once the revive escape is proven.
     ring_commit_s: float = 0.0        # 0 disables
+    # Flower window "no reversal" (Bob, Oct 6 3 AM logs: breakouts at game~300-340 s
+    # flipped v=(1,..) -> (-1,..) every 3 s, walking back into the ring). Inside the
+    # window a new breakout started within this many seconds of the previous one, and
+    # the 0.4 s corridor re-check, may only pick headings within 90 deg of the last
+    # breakout heading, and the per-frame vector of a flower breakout stays within
+    # 90 deg of its heading (side-steps OK, never back). 0 disables.
+    # OFF by default: scripts/sim_movement.py --horde (16 seeds, game 270-370 s) shows no
+    # gain (damage density 1.0: 30.8 off vs 32.8 at 3 s; density 1.5: 75.9 vs 79.3), but the
+    # sim's rings are converging ghouls, not the static Man-eater ring; A/B it live via
+    # VS_TUNE=flower_noreverse_s=4.
+    flower_noreverse_s: float = 0.0
     # Man-eater flower ring (~4:40–6:00): HP can drop 1.0→0.1 in 2–3 s.
     hp_crash_delta: float = -0.3       # peak-to-now drop that counts as crashing
     hp_crash_window_s: float = 1.5     # look-back for that drop
@@ -417,6 +428,8 @@ class Navigator:
         self._escape_pending = False    # escape requested, heading not picked yet
         self._escape_origin: tuple[float, float] | None = None  # heading after the early window
         self._escape_reason = "revive"  # "revive" or "ring" (flower-window commit)
+        self._last_break_dir: tuple[float, float] | None = None  # heading of the last breakout
+        self._last_break_end = -1e9     # game_s when it ended
 
     @property
     def escaping(self) -> bool:
@@ -444,7 +457,7 @@ class Navigator:
         cap = t.breakout_max_s if max_s is None else float(max_s)
         clamped = max(t.breakout_min_s, min(dur, cap))
         self._flee_remaining = max(self._flee_remaining, clamped)
-        self.breakout = None  # pre-death / stale corridor; pick fresh on next start
+        self._end_breakout()  # pre-death / stale corridor; pick fresh on next start
         # A plain flee replaces any committed escape (request_revive_escape and the
         # flower-ring commit re-arm it right after this call).
         self._escape_remaining = 0.0
@@ -476,11 +489,40 @@ class Navigator:
         self._escape_pending = True
         return dur
 
+    def _end_breakout(self) -> None:
+        """Drop the current breakout, remembering its heading for the no-reversal rule."""
+        if self.breakout is not None:
+            self._last_break_dir = self.breakout
+            self._last_break_end = self.game_s
+        self.breakout = None
+
+    def _in_flower(self) -> bool:
+        t = self.tune
+        return t.flower_phase_lo <= self.game_s <= t.flower_phase_hi
+
+    def _no_reverse(self, costs: np.ndarray, ref: tuple[float, float] | None) -> np.ndarray:
+        """Flower window: forbid headings more than 90 deg from ``ref`` (inf cost)."""
+        if ref is None or self.tune.flower_noreverse_s <= 0 or not self._in_flower():
+            return costs
+        ok = (_UNIT @ np.asarray(ref, dtype=np.float32)) >= -1e-6
+        return np.where(ok, costs, np.inf)
+
+    def _recent_break_dir(self) -> tuple[float, float] | None:
+        """Last breakout heading if it ended within ``flower_noreverse_s`` (game time)."""
+        if self._last_break_dir is None:
+            return None
+        if self.game_s - self._last_break_end > self.tune.flower_noreverse_s:
+            return None
+        return self._last_break_dir
+
     def _start_breakout(self, pts: np.ndarray, px: float, py: float) -> None:
         t = self.tune
         if self._escape_pending:
             self._escape_pending = False
-            self.breakout = tuple(float(v) for v in _UNIT[int(np.argmin(escape_costs(pts, px, py, t)))])
+            ecost = escape_costs(pts, px, py, t)
+            if self._escape_reason == "ring":
+                ecost = self._no_reverse(ecost, self._recent_break_dir())
+            self.breakout = tuple(float(v) for v in _UNIT[int(np.argmin(ecost))])
             self._escape_origin = self.breakout
             self._breakout_s = 0.0
             self._breakout_check = 0.0
@@ -495,7 +537,13 @@ class Navigator:
             cu = _UNIT[DIRS.index(self.current)]
             align = _UNIT @ cu
             costs = costs + 0.25 * (1.0 - align)
+        prev = self._recent_break_dir()
+        costs = self._no_reverse(costs, prev)
         best = int(np.argmin(costs))
+        if prev is not None and self._in_flower() and t.flower_noreverse_s > 0:
+            self.log(
+                f"[nav] flower no-reverse breakout {DIRS[best]} (last {_nearest_dir(prev)}) game~{self.game_s:.0f}s"
+            )
         self.breakout = tuple(float(v) for v in _UNIT[best])
         self._breakout_s = 0.0
         self._breakout_check = 0.0
@@ -620,7 +668,7 @@ class Navigator:
                 )
             if done:
                 self.heading = math.atan2(self.breakout[1], self.breakout[0])
-                self.breakout = None
+                self._end_breakout()
                 self._flee_remaining = 0.0
                 return
             if self._breakout_check >= 0.4:
@@ -628,7 +676,7 @@ class Navigator:
                 self._breakout_check = 0.0
                 costs = corridor_costs(pts, px, py, t.corridor_len, t.corridor_width)
                 cur = DIRS.index(_nearest_dir(self.breakout))
-                best = int(np.argmin(costs))
+                best = int(np.argmin(self._no_reverse(costs, self.breakout)))
                 if costs[cur] > 1.6 * costs[best] + 0.5:
                     self.breakout = tuple(_UNIT[best])
             return
@@ -653,7 +701,7 @@ class Navigator:
         if self._escape_remaining <= 0:
             self.heading = math.atan2(self.breakout[1], self.breakout[0])
             self.log(f"[nav] {self._escape_reason} escape done {_nearest_dir(self.breakout)} game~{self.game_s:.0f}s")
-            self.breakout = None
+            self._end_breakout()
             self._flee_remaining = 0.0
             return
         costs = escape_costs(pts, px, py, t)
@@ -756,6 +804,11 @@ class Navigator:
                 ]
                 dec.vector = max(cone, key=lambda d: dec.scores[d])
                 dec.mode = f"{self._escape_reason}-escape"
+            elif self.tune.flower_noreverse_s > 0 and self._in_flower():
+                # Flower window: the field may side-step (<= 90 deg), never walk back.
+                bx, by = self.breakout
+                cone = [d for i, d in enumerate(DIRS) if _UNIT[i, 0] * bx + _UNIT[i, 1] * by >= -1e-6]
+                dec.vector = max(cone, key=lambda d: dec.scores[d])
         else:
             dec = score_directions(
                 pts, (px, py), kite, phase.kite_weight,
