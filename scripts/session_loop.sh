@@ -4,6 +4,7 @@
 # play_run.sh exit codes: 0 finished, 1 failed, 2 cutoff (stop), 3 a watchdog ended the run and
 # the game was relaunched — rc 3 is NOT counted toward the consecutive-failure stop (a VM pause or
 # a frozen game is not the bot failing to start runs).
+# The loop itself exits 4 when preflight.sh (next to it, or VS_PREFLIGHT) reports a broken box.
 set -uo pipefail
 SESSION=${VS_SESSION:-$(dirname "$(readlink -f "$0")")}
 export VS_SESSION=$SESSION
@@ -19,6 +20,15 @@ RUN_GAP_S=${VS_RUN_GAP_S:-3}
 BOT_PIDFILE=${VS_BOT_PIDFILE:-/tmp/vsbot_3am.pid}
 cutoff_reached(){ [ "$CUTOFF_HHMM" != none ] && [ "$((10#$(date +%H%M)))" -ge "$((10#$CUTOFF_HHMM))" ]; }
 echo "PLAY session loop started $(date)" | tee -a "$SESSION/loop_outer.log" "$SESSION/session-log.md"
+# Preflight (box rebuilds wipe the 32-bit loader / venv / GUI OpenCV): stop before burning runs.
+PREFLIGHT=${VS_PREFLIGHT:-$SESSION/preflight.sh}
+if [ -z "${VS_SKIP_PREFLIGHT:-}" ] && [ -x "$PREFLIGHT" ]; then
+  if ! PF_OUT=$("$PREFLIGHT" 2>&1); then
+    { echo "[$(date)] preflight failed, no runs started:"; echo "$PF_OUT"; } | tee -a "$SESSION/loop_outer.log" "$SESSION/session-log.md"
+    exit 4
+  fi
+  echo "[$(date)] $(echo "$PF_OUT" | tail -1)" >> "$SESSION/loop_outer.log"
+fi
 RUN=1
 FAILS=0
 while true; do
