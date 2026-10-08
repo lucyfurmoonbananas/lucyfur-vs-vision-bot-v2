@@ -45,16 +45,15 @@ class Vision:
     def analyze(self, frame: np.ndarray) -> VisionResult:
         h, w = frame.shape[:2]
         player = (w // 2, h // 2)
+        menu = detect_level_up_menu(frame)
         if self._model is not None:
             try:
                 monsters = self._infer_model(frame)
-                menu = detect_level_up_menu(frame)
                 return VisionResult(player=player, monsters=monsters, menu=menu, note="torch")
             except Exception as exc:  # noqa: BLE001
                 self._model = None
                 print(f"[vision] model failed, falling back to heuristic: {exc}", file=sys.stderr)
         monsters = detect_threat_blobs(frame, player, self.cfg)
-        menu = detect_level_up_menu(frame)
         return VisionResult(player=player, monsters=monsters, menu=menu, note="heuristic")
 
     def _load_torch_model(self, path: str):
