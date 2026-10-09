@@ -693,3 +693,99 @@ def test_read_card_keeps_first_read_when_retries_are_worse(monkeypatch):
     monkeypatch.setattr(menus, "ocr_image", lambda img, psm=7: next(reads))
     menus.read_card(frame, card)
     assert card.name == "Armor" and card.raw == "Amor"
+
+
+# ---------------------------------------------------------------- early Pentagram avoid
+# Pentagram at levels 1-2 erases on-screen gems when it fires; Lucyfur: avoid it early.
+
+
+def test_early_pentagram_new_ranks_below_every_real_card():
+    early = 120.0
+    # Below other new weapons, passives and owned levels.
+    assert choose_card(_cards(("Pentagram", True), ("Spinach", True)), game_s=early) == 1
+    assert choose_card(_cards(("Pentagram", True), ("Magic Wand", True)), game_s=early) == 1
+    assert choose_card(_cards(("Pentagram", True), ("Garlic", False)), game_s=early) == 1
+    assert choose_card(_cards(("Pentagram", True), ("Attractorb", True)), game_s=early) == 1
+    # Even below the skill's avoid list (Whip/Axe/Knife as new picks).
+    assert choose_card(_cards(("Pentagram", True), ("Whip", True)), game_s=early) == 1
+    assert choose_card(_cards(("Axe", True), ("Knife", True), ("Pentagram", True)), game_s=early) in (0, 1)
+    # Also at low HP and with full weapon slots.
+    assert choose_card(_cards(("Pentagram", True), ("Clover", True)), hp=0.3, game_s=early) == 1
+    six = {"Garlic", "Whip", "Axe", "Knife", "Cross", "Magic Wand"}
+    assert choose_card(_cards(("Pentagram", True), ("Spinach", True)), owned=six, game_s=early) == 1
+    # Just before the cutoff still counts as early.
+    assert choose_card(_cards(("Pentagram", True), ("Whip", True)), game_s=599.0) == 1
+
+
+def test_early_pentagram_still_picks_a_card_never_skip():
+    """Only Pentagram offered (or Pentagram + unreadable junk): a card index is still
+    returned. Reroll / Banish / Skip are never cards, so they cannot be chosen."""
+    assert choose_card(_cards(("Pentagram", True),), game_s=60.0) == 0
+    # Real-but-avoided Pentagram still beats OCR garbage (42 < 45).
+    assert choose_card(_cards(("", True), ("Pentagram", True)), game_s=60.0) == 1
+
+
+def test_late_pentagram_keeps_its_normal_rank():
+    late = 600.0
+    assert choose_card(_cards(("Pentagram", True), ("Spinach", True)), game_s=late) == 0
+    assert choose_card(_cards(("Whip", True), ("Pentagram", True)), game_s=late) == 1
+    assert choose_card(_cards(("Pentagram", True), ("Magic Wand", True)), game_s=900.0) == 1  # list order
+    assert choose_card(_cards(("Santa Water", True), ("Pentagram", True)), game_s=late) == 0
+
+
+def test_owned_pentagram_levels_are_not_affected_early():
+    # Level 2+ of an owned Pentagram ranks like any owned weapon level (tier 6).
+    assert choose_card(_cards(("Pentagram", False), ("Spinach", True)), game_s=60.0) == 0
+    assert choose_card(_cards(("Whip", True), ("Pentagram", False)), game_s=60.0) == 1
+
+
+def test_early_pentagram_falls_back_to_weapon_count_without_game_time():
+    few = {"Garlic", "Magic Wand"}
+    assert choose_card(_cards(("Pentagram", True), ("Spinach", True)), owned=few) == 1
+    four = {"Garlic", "Magic Wand", "Cross", "King Bible"}
+    assert choose_card(_cards(("Pentagram", True), ("Spinach", True)), owned=four) == 0
+    assert menus.is_early_run(None, 3) and not menus.is_early_run(None, 4)
+    assert menus.is_early_run(0.0, 6) and not menus.is_early_run(600.0, 0)
+
+
+def _fake_read(names: list[tuple[str, bool]]):
+    def read(frame, screen):
+        for c, (n, new) in zip(screen.cards, names):
+            c.name, c.raw, c.new = n, n, new
+        return screen
+
+    return read
+
+
+@pytest.mark.parametrize("game_s, expected", [(200.0, "Spinach"), (700.0, "Pentagram"), (None, "Spinach")])
+def test_pilot_passes_game_time_to_the_pick(monkeypatch, game_s, expected):
+    frame = load("levelup_4cards_sel4.png")
+    screen = detect_level_up(frame)
+    assert screen is not None and len(screen.cards) == 4
+    monkeypatch.setattr(
+        menus,
+        "read_cards",
+        _fake_read([("Pentagram", True), ("Spinach", True), ("Whip", True), ("Axe", True)]),
+    )
+    logs: list[str] = []
+    pilot = MenuPilot(
+        tap=lambda k: None,
+        clock=FakeClock(),
+        async_chest=False,
+        click=lambda x, y: None,
+        log=logs.append,
+        game_clock=lambda: game_s,
+    )
+    for _ in range(3):
+        pilot.step(frame, screen)
+    assert pilot._chosen == expected
+    assert any("game~=" in m for m in logs)
+
+
+def test_pilot_game_clock_errors_are_treated_as_unknown():
+    def boom() -> float:
+        raise RuntimeError("no nav")
+
+    pilot = MenuPilot(tap=lambda k: None, async_chest=False, log=lambda m: None, game_clock=boom)
+    assert pilot._game_s() is None
+    assert MenuPilot(tap=lambda k: None, async_chest=False, log=lambda m: None)._game_s() is None

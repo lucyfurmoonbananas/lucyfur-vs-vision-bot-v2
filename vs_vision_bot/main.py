@@ -172,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         refocus=release_before_menu_key,
         click=click_in_capture,
         results_dir=os.environ.get("VS_RESULTS_DIR", "/workspace/vsbot-check/results"),
+        game_clock=lambda: nav.game_s,  # nav is created just below; only called on a level-up
     )
     nav = Navigator(tune=tuning_from_env(os.environ.get("VS_TUNE")))
     # The movement game clock restarts only after a finished run (QUIT + DONE),

@@ -512,11 +512,31 @@ LUXURY: frozenset[str] = frozenset(
 )
 
 
+# New weapons that hurt early in a run. Pentagram at levels 1-2 erases every gem and
+# pickup on screen when it fires (VS wiki); Oct 9 runs that took it early died at
+# level 6-8 while the run that skipped it reached level 11. Lucyfur: avoid it early.
+# Ranked below every real weapon / passive (avoid list included) as a NEW pick, but a
+# card is still always chosen: Reroll / Banish / Skip are never pressed. Leveling an
+# already-owned Pentagram is unaffected, and after the cutoff it keeps its normal rank.
+EARLY_AVOID_NEW: frozenset[str] = frozenset({"Pentagram"})
+EARLY_AVOID_UNTIL_S = 600.0     # game time (nav game~, s) before which the rule applies
+EARLY_AVOID_MIN_WEAPONS = 4     # fallback when game time is unknown: early = fewer weapons
+EARLY_AVOID_RANK = 42           # below AVOID-new (40), above OCR garbage (45) / filler (50)
+
+
+def is_early_run(game_s: float | None, weapons: int) -> bool:
+    """Early in a run: game time before EARLY_AVOID_UNTIL_S, or (no game time)
+    fewer than EARLY_AVOID_MIN_WEAPONS weapons owned."""
+    if game_s is not None:
+        return game_s < EARLY_AVOID_UNTIL_S
+    return weapons < EARLY_AVOID_MIN_WEAPONS
+
+
 def owned_weapon_count(owned: set[str] | frozenset[str]) -> int:
     return sum(1 for n in owned if n in WEAPONS)
 
 
-def _card_rank(c: Card, idx: int, hp: float | None, weapons: int) -> tuple[int, int]:
+def _card_rank(c: Card, idx: int, hp: float | None, weapons: int, early: bool = False) -> tuple[int, int]:
     name = c.name
     # OCR garbage (empty / unmatched after match_name): worse than AVOID-new (40)
     # so a real named card always wins. If every card is junk, choose_card still
@@ -529,6 +549,8 @@ def _card_rank(c: Card, idx: int, hp: float | None, weapons: int) -> tuple[int, 
         return (0, EVOLUTIONS.index(name))
     if low and name in DEFENSE:
         return (1, DEFENSE.index(name))
+    if early and c.new and name in EARLY_AVOID_NEW:
+        return (EARLY_AVOID_RANK, idx)
     if name in AVOID:
         return (40 if c.new else 30, idx)
     if name == CHICKEN or name in COINS:
@@ -558,7 +580,12 @@ def _card_rank(c: Card, idx: int, hp: float | None, weapons: int) -> tuple[int, 
     return (15, idx)
 
 
-def choose_card(cards: list[Card], hp: float | None = None, owned: set[str] | None = None) -> int:
+def choose_card(
+    cards: list[Card],
+    hp: float | None = None,
+    owned: set[str] | None = None,
+    game_s: float | None = None,
+) -> int:
     """Index of the card to take.
 
     * Maxed-out build (only Floor Chicken / coin bag offered): chicken when HP is
@@ -570,6 +597,10 @@ def choose_card(cards: list[Card], hp: float | None = None, owned: set[str] | No
       Lightning Ring), then Garlic levels, then other good new weapons, then
       Pummarola / Armor, owned weapon levels, passives by priority.
     * The skill's avoid list (Whip, Axe, Knife, ...) and filler come last.
+    * Early in a run (``game_s`` < 10:00, or fewer than 4 weapons when the game
+      time is unknown) a NEW Pentagram ranks below every other real card, the
+      avoid list included: it wipes on-screen gems at low level. Owned Pentagram
+      levels and later runs are unaffected.
     Reroll / Banish / Skip are not cards and are never selected.
     """
     if not cards:
@@ -587,7 +618,8 @@ def choose_card(cards: list[Card], hp: float | None = None, owned: set[str] | No
     known = set(owned or ())
     known |= {c.name for c in cards if c.name and not c.new}
     weapons = owned_weapon_count(known)
-    return min(range(len(cards)), key=lambda i: _card_rank(cards[i], i, hp, weapons))
+    early = is_early_run(game_s, weapons)
+    return min(range(len(cards)), key=lambda i: _card_rank(cards[i], i, hp, weapons, early))
 
 
 # After REVIVE the bar refills while the death screen fades; readings in this window
@@ -720,7 +752,10 @@ class MenuPilot:
         results_dir: str | None = None,
         start_items: tuple[str, ...] = ("Garlic",),
         levelup_click: bool = True,
+        game_clock: Callable[[], float | None] | None = None,
     ) -> None:
+        # Current game time (s) for time-dependent picks (early Pentagram avoid); None = unknown.
+        self.game_clock = game_clock
         self.levelup_click = levelup_click
         self.results_dir = results_dir
         self.start_items = tuple(start_items)
@@ -778,6 +813,15 @@ class MenuPilot:
         self.picks = []
 
     # -- helpers
+    def _game_s(self) -> float | None:
+        if self.game_clock is None:
+            return None
+        try:
+            v = self.game_clock()
+        except Exception:
+            return None
+        return None if v is None else float(v)
+
     def _press(self, key: str, cooldown: float) -> None:
         self.refocus()
         self.tap(key)
@@ -833,14 +877,16 @@ class MenuPilot:
             read_cards(frame, screen)
             self._names = [c.name or c.raw or "?" for c in screen.cards]
             self.owned |= {c.name for c in screen.cards if c.name and not c.new}
-            self._target = choose_card(screen.cards, hp=self.hp, owned=self.owned)
+            game_s = self._game_s()
+            self._target = choose_card(screen.cards, hp=self.hp, owned=self.owned, game_s=game_s)
             self._chosen = screen.cards[self._target].name
             self._presses = 0
             self._unknown_sel = 0
             self.log(
                 f"[levelup] cards={self._names} new={[c.new for c in screen.cards]} "
                 f"-> pick #{self._target + 1} {self._names[self._target]} "
-                f"(hp={self.hp if self.hp is None else round(self.hp, 2)}, weapons={owned_weapon_count(self.owned)})"
+                f"(hp={self.hp if self.hp is None else round(self.hp, 2)}, weapons={owned_weapon_count(self.owned)}, "
+                f"game~={'?' if game_s is None else f'{game_s:.0f}s'})"
             )
             if any(not c.name for c in screen.cards):
                 # Unmatched OCR ('P', 'wr', 'or'): keep the frame to learn what the card is.
