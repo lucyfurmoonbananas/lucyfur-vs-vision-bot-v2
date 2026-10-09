@@ -32,8 +32,9 @@ early or when its corridor is clearly shut, and it never turns back.
 A fast HP crash (e.g. Man-eater flower ring ~5:00) also forces that flee, and
 during the mid-run flower window the cover trigger is lowered so breakouts
 start earlier and last longer; there a ring-closing breakout is also run as the
-same committed escape when ``ring_commit_s`` > 0 (reason "ring"; off by
-default, opt-in) so it is not dropped when cover dips and never turns back.
+same committed escape when ``ring_commit_s`` > 0 (reason "ring"; default 2.5 s)
+so it is not dropped when cover dips and never turns back, and
+``flower_noreverse_s`` (default 4 s) blocks walking back into the ring.
 
 Behaviour switches by game phase (tight weaving for the ~7:00 skeleton swarm,
 slow circles later, near-still after ~21:00) and by HP (more defensive when low).
@@ -129,21 +130,21 @@ class Tuning:
     # Flower window: a ring-closing breakout becomes the same committed escape, so it
     # is not abandoned after 1.1 s when cover dips and never reverses into the ring
     # (Oct 5: cells 150 -> 400-600 at game~315-335 s, HP-crash flee fired too late).
-    # OFF by default: in scripts/sim_movement.py --horde style runs (density 1.5, 6 seeds,
-    # game 270-370 s) it did not help: damage 69 off vs 75 / 81 / 76 at 2.5 / 1.5 / 3.5 s.
-    # Opt in with Tuning(ring_commit_s=2.5) for a live A/B once the revive escape is proven.
-    ring_commit_s: float = 0.0        # 0 disables
+    # Sim --horde (density 1.5) did not help vs off (damage ~69 off vs ~75 at 2.5 s) because
+    # sim rings are converging ghouls, not the static Man-eater. Oct 8 live A/B with
+    # flower_noreverse_s=4 alone still died ~5:36–5:42 in the real ring; enable both
+    # as defaults (ring_commit_s=2.5, flower_noreverse_s=4). 0 disables either knob.
+    ring_commit_s: float = 2.5        # 0 disables
     # Flower window "no reversal" (Bob, Oct 6 3 AM logs: breakouts at game~300-340 s
     # flipped v=(1,..) -> (-1,..) every 3 s, walking back into the ring). Inside the
     # window a new breakout started within this many seconds of the previous one, and
     # the 0.4 s corridor re-check, may only pick headings within 90 deg of the last
     # breakout heading, and the per-frame vector of a flower breakout stays within
     # 90 deg of its heading (side-steps OK, never back). 0 disables.
-    # OFF by default: scripts/sim_movement.py --horde (16 seeds, game 270-370 s) shows no
-    # gain (damage density 1.0: 30.8 off vs 32.8 at 3 s; density 1.5: 75.9 vs 79.3), but the
-    # sim's rings are converging ghouls, not the static Man-eater ring; A/B it live via
-    # VS_TUNE=flower_noreverse_s=4.
-    flower_noreverse_s: float = 0.0
+    # Sim --horde showed no gain (density 1.0: 30.8 off vs 32.8 at 3 s; 1.5: 75.9 vs 79.3);
+    # Oct 8 live: noreverse alone was not enough (~5:36–5:42 deaths). Default on with
+    # ring_commit_s for the real Man-eater ring; override via VS_TUNE if A/B needed.
+    flower_noreverse_s: float = 4.0
     # Early-game XP: plain encirclement breakouts used to ignore gems (gems=None), and in
     # the Oct 6 3 AM logs 40-50 % of game 120-280 s samples were breakouts while gems on
     # screen piled up 5 -> 9.5 (level 6-8 at 5:00). Before this game_s a plain breakout
@@ -172,7 +173,7 @@ class Tuning:
 def tuning_from_env(raw: str | None, base: Tuning | None = None, log=print) -> Tuning:
     """Parse ``VS_TUNE`` ("ring_commit_s=2.5,flower_noreverse_s=4") into a Tuning.
 
-    Lets a session script A/B the opt-in knobs live without editing the repo. Only
+    Lets a session script A/B these knobs live without editing the repo. Only
     known numeric fields are accepted; unknown names or bad values are logged and
     skipped, so a typo can never stop the bot.
     """

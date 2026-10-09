@@ -1,4 +1,4 @@
-"""VS_TUNE env override for live A/B of opt-in movement knobs (pathfind.tuning_from_env)."""
+"""VS_TUNE env override for live A/B of movement knobs (pathfind.tuning_from_env)."""
 
 from __future__ import annotations
 
@@ -22,7 +22,8 @@ def test_overrides_known_fields_and_logs():
 def test_typos_and_bad_values_are_skipped_not_fatal():
     logs: list[str] = []
     t = tuning_from_env("ring_comit_s=2.5,flower_noreverse_s=abc,ring_commit_s,cover_trigger=0.5", log=logs.append)
-    assert t.ring_commit_s == 0.0 and t.flower_noreverse_s == 0.0
+    # Bad overrides skipped: untouched fields keep Tuning defaults (now on for flower ring).
+    assert t.ring_commit_s == 2.5 and t.flower_noreverse_s == 4.0
     assert t.cover_trigger == 0.5
     assert sum("ignored" in line for line in logs) == 3
 

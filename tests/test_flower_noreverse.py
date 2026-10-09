@@ -19,7 +19,7 @@ GAP_LEFT = (160, 200)
 def _nav(game_s: float, **kw):
     clock = Clock()
     logs: list[str] = []
-    tune = Tuning(**{"flower_noreverse_s": 4.0, **kw})
+    tune = Tuning(**{"flower_noreverse_s": 4.0, "ring_commit_s": 0.0, **kw})
     nav = Navigator(tune=tune, clock=clock, log=logs.append)
     nav.game_s = game_s
     return nav, clock, logs

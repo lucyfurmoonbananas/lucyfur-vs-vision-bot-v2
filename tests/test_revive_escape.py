@@ -201,7 +201,7 @@ def test_gate_needs_agreeing_frames_during_escape():
 def _ring_nav(game_s, tune=None):
     clock = Clock()
     logs: list[str] = []
-    tune = tune or Tuning(ring_commit_s=2.5)  # opt-in (default off)
+    tune = tune or Tuning(ring_commit_s=2.5)  # explicit so off-by-zero tests can override
     nav = Navigator(tune=tune, clock=clock, log=logs.append)
     nav.game_s = game_s
     return nav, clock, logs
@@ -238,9 +238,10 @@ def test_outside_flower_window_plain_breakout_unchanged():
     assert not any("ring escape" in line for line in logs)
 
 
-def test_ring_commit_is_off_by_default():
-    assert Tuning().ring_commit_s == 0.0
-    nav, clock, logs = _ring_nav(318.0, tune=Tuning())
+def test_ring_commit_defaults_on_and_explicit_zero_disables():
+    assert Tuning().ring_commit_s == 2.5
+    assert Tuning().flower_noreverse_s == 4.0
+    nav, clock, logs = _ring_nav(318.0, tune=Tuning(ring_commit_s=0.0))
     run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 10, hp=1.0)
     assert nav.breakouts >= 1 and not nav.escaping
     assert nav.last.mode.startswith("breakout")

@@ -237,7 +237,8 @@ def test_closing_ring_triggers_breakout_through_the_gap():
     pts = ring(480, 256, 170, 40, gap_deg=(-1, 25))  # gap to the right
     out = run(nav, clock, result(pts), 10, hp=1.0)
     assert nav.breakouts >= 1
-    assert nav.last.mode.startswith("breakout")
+    # Default ring_commit_s promotes this to a committed ring-escape in the flower window.
+    assert nav.last.mode.startswith("breakout") or nav.last.mode.startswith("ring-escape")
     assert sum(1 for v in out[-6:] if v[0] == 1) >= 4
 
 

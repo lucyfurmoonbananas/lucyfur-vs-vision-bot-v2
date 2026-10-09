@@ -29,7 +29,9 @@ def test_early_plain_breakout_is_pulled_toward_gems():
 
 
 def test_flower_window_breakout_ignores_gems():
-    assert _scores_in_breakout(318.0, GEMS_UP_RIGHT) == _scores_in_breakout(318.0, None)
+    # Plain breakout (ring_commit off): gems stay ignored inside the flower window.
+    plain = Tuning(ring_commit_s=0.0)
+    assert _scores_in_breakout(318.0, GEMS_UP_RIGHT, plain) == _scores_in_breakout(318.0, None, plain)
 
 
 def test_flee_breakout_ignores_gems_even_early():
