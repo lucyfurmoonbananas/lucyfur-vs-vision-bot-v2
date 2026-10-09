@@ -263,3 +263,52 @@ def test_plain_flee_cancels_committed_escape():
     assert nav.escaping
     nav.request_flee(2.0)
     assert not nav.escaping and nav._flee_remaining >= 2.0  # extends, never shortens
+
+
+# -- ring escapes: no early (stale-frame) re-pick; that window is REVIVE-only
+
+
+def _start_ring_escape_right():
+    nav, clock, logs = _ring_nav(318.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 1, hp=1.0)  # gap right
+    assert nav.escaping and nav._escape_reason == "ring"
+    assert _nearest(nav.breakout) == (1, 0)
+    assert nav._escape_s <= nav.tune.escape_repick_s
+    return nav, clock, logs
+
+
+def test_ring_escape_never_reverses_inside_early_window():
+    """run1.log L141/L156-157: a ring escape flipped 180 deg at +0.3-0.5 s."""
+    nav, clock, logs = _start_ring_escape_right()
+    h0 = nav.breakout
+    # Crowd piles up ahead (right); left is empty. Old early re-pick turned to (-1, 0).
+    crowd = result(blob(620, 256, n=40, spread=40) + blob(600, 150, n=20, spread=30) + blob(600, 360, n=20, spread=30))
+    costs = escape_costs(crowd.threats, 480, 256, nav.tune)
+    assert DIRS[int(np.argmin(costs))][0] == -1  # unconstrained pick would be a reversal
+    out = run(nav, clock, crowd, 4, hp=1.0)  # still within escape_repick_s
+    assert nav._escape_s <= nav.tune.escape_repick_s
+    assert _dot(nav.breakout, h0) >= -1e-6
+    assert all(_dot(v, h0) >= -1e-6 for v in out)
+    assert not any("re-aim (1, 0)->(-1" in line for line in logs)
+
+
+def test_ring_escape_early_window_does_not_reset_origin():
+    nav, clock, _ = _start_ring_escape_right()
+    origin = nav._escape_origin
+    crowd = result(blob(620, 256, n=40, spread=40) + blob(600, 150, n=20, spread=30) + blob(600, 360, n=20, spread=30))
+    run(nav, clock, crowd, 4, hp=1.0)
+    assert nav._escape_origin == origin
+
+
+def test_revive_escape_early_window_still_allows_reversal():
+    """REVIVE behaviour unchanged: stale first frame may be fully re-picked."""
+    clock = Clock()
+    nav, logs = _quiet_nav(clock)
+    nav.request_revive_escape()
+    run(nav, clock, result(blob(340, 256, n=30, spread=40)), 1, hp=0.5)  # crowd left -> go right
+    h0 = nav.breakout
+    assert h0[0] > 0.5
+    crowd = result(blob(620, 256, n=40, spread=40) + blob(600, 150, n=20, spread=30) + blob(600, 360, n=20, spread=30))
+    run(nav, clock, crowd, 3, hp=0.5)
+    assert nav.breakout[0] < -0.5
+    assert nav._escape_origin == nav.breakout

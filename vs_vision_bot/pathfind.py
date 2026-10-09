@@ -123,7 +123,7 @@ class Tuning:
     escape_len: float = 420.0         # corridor length when picking the escape heading
     escape_wedge_radius: float = 480.0  # crowd within this radius counts for the wedge term
     escape_wedge_gain: float = 0.5    # weight of whole-screen wedge density vs. corridor
-    escape_repick_s: float = 0.5      # early window: the first frames after REVIVE may be stale
+    escape_repick_s: float = 0.5      # early window (REVIVE escapes only): first frames may be stale
     escape_repick_ratio: float = 1.25  # early re-pick only when clearly better
     escape_switch_ratio: float = 3.0  # later: switch only when the corridor is clearly shut
     escape_cone_dot: float = 0.70     # steer only within ~45 deg of the escape heading
@@ -745,7 +745,11 @@ class Navigator:
         costs = escape_costs(pts, px, py, t)
         cur_d = _nearest_dir(self.breakout)
         cur = DIRS.index(cur_d)
-        if self._escape_s <= t.escape_repick_s:
+        # The free early re-pick exists for stale frames right after REVIVE only;
+        # ring (flower-window) escapes start from a live frame, so they are locked
+        # from the first frame (no reversal, origin kept).
+        early = self._escape_reason == "revive" and self._escape_s <= t.escape_repick_s
+        if early:
             best = int(np.argmin(costs))
             switch = best != cur and costs[cur] > t.escape_repick_ratio * costs[best] + 0.3
         else:
@@ -757,7 +761,7 @@ class Navigator:
             switch = best != cur and costs[cur] > t.escape_switch_ratio * costs[best] + 1.5
         if switch:
             self.breakout = tuple(float(v) for v in _UNIT[best])
-            if self._escape_s <= t.escape_repick_s:
+            if early:
                 self._escape_origin = self.breakout
             self.log(f"[nav] {self._escape_reason} escape re-aim {cur_d}->{DIRS[best]} at +{self._escape_s:.1f}s")
 
