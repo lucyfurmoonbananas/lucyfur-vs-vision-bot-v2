@@ -8,8 +8,12 @@ Only screens that are positively recognized are acted on:
   Found) and none of the main-menu, pause, game-over or results words.
 
 Anything else (main menu, pause menu, results, game over) is never pressed.
-Reroll / Banish / Skip are never selected: menu navigation only moves up and
-down through the card column and confirms with Enter.
+Reroll and Skip are never selected: menu navigation only moves up and down
+through the card column and confirms with Enter. Banish has exactly one
+exception (Lucyfur, Oct 10): on Mad Forest a NEW Pentagram card is banished by
+clicking the BANISH button and then that Pentagram card (see ``BANISH_ALLOWED``,
+``banish_candidate`` and ``MenuPilot._banish_step``). Banish is never used for
+any other card or stage.
 """
 
 from __future__ import annotations
@@ -138,6 +142,7 @@ class Card:
     name: str = ""
     raw: str = ""
     new: bool = False
+    score: float = 0.0  # similarity of ``raw`` to ``name`` (match_name_score)
 
     @property
     def cy(self) -> int:
@@ -458,6 +463,7 @@ def read_card(frame: np.ndarray, card: Card) -> Card:
                 card.raw, card.name, score = raw, name, sc
             if score >= NAME_RETRY_BELOW:
                 break
+    card.score = score
     # "New!" is yellow text in the right half of the title row; owned items say level:N in white.
     tag = frame[ny0:ny1, card.x0 + int(0.6 * cw) : card.x1].astype(np.int16)
     yellow = (tag[:, :, 2] > 180) & (tag[:, :, 1] > 180) & (tag[:, :, 0] < 90)
@@ -516,8 +522,10 @@ LUXURY: frozenset[str] = frozenset(
 # pickup on screen when it fires (VS wiki); Oct 9 runs that took it early died at
 # level 6-8 while the run that skipped it reached level 11. Lucyfur: avoid it early.
 # Ranked below every real weapon / passive (avoid list included) as a NEW pick, but a
-# card is still always chosen: Reroll / Banish / Skip are never pressed. Leveling an
+# card is still always chosen: Reroll / Skip are never pressed. Leveling an
 # already-owned Pentagram is unaffected, and after the cutoff it keeps its normal rank.
+# On Mad Forest the pilot first tries to BANISH a new Pentagram (below); this rank is
+# the fallback when that is not possible (no uses left, button not seen, failed).
 EARLY_AVOID_NEW: frozenset[str] = frozenset({"Pentagram"})
 EARLY_AVOID_UNTIL_S = 600.0     # game time (nav game~, s) before which the rule applies
 EARLY_AVOID_MIN_WEAPONS = 4     # fallback when game time is unknown: early = fewer weapons
@@ -601,7 +609,8 @@ def choose_card(
       time is unknown) a NEW Pentagram ranks below every other real card, the
       avoid list included: it wipes on-screen gems at low level. Owned Pentagram
       levels and later runs are unaffected.
-    Reroll / Banish / Skip are not cards and are never selected.
+    Reroll / Banish / Skip are not cards and are never selected here; the one
+    Banish exception (new Pentagram on Mad Forest) is handled by MenuPilot first.
     """
     if not cards:
         return 0
@@ -620,6 +629,83 @@ def choose_card(
     weapons = owned_weapon_count(known)
     early = is_early_run(game_s, weapons)
     return min(range(len(cards)), key=lambda i: _card_rank(cards[i], i, hp, weapons, early))
+
+
+# ---------------------------------------------------------------- banish (one exception)
+
+# Lucyfur (Oct 10): on Mad Forest press BANISH on a NEW Pentagram card. This is the
+# only Banish use: every other card, an owned Pentagram's level and every other
+# stage keep the old rule (never Banish). Hard guard: both clicks of a banish go
+# through banish_allowed(), and nothing else ever clicks the BANISH button.
+BANISH_ALLOWED: frozenset[str] = frozenset({"Pentagram"})
+BANISH_STAGES: frozenset[str] = frozenset({"mad_forest"})
+DEFAULT_STAGE = "mad_forest"
+# Red BANISH button ("BANISH / 10 left") right of the panel on every saved level-up
+# frame (45 Oct 6-7 frames + 4 fixtures): x 707..845, y 299..330 on 960x540.
+BANISH_BUTTON_960 = (707, 299, 139, 32)
+BANISH_RED_FRAC = 0.6        # measured 0.73-0.75 of the rect is button red
+BANISH_MIN_NAME_SCORE = 0.85  # the Pentagram card name must be a confident read
+BANISH_MAX_CARD_CLICKS = 2    # clicks on the Pentagram card before giving up
+BANISH_MAX_FAILS_PER_RUN = 2  # failed banishes before the run stops trying
+BANISH_COOLDOWN_S = 0.8
+
+
+def normalize_stage(stage: str | None) -> str:
+    s = re.sub(r"[^a-z0-9]+", "_", (stage or "").strip().lower()).strip("_")
+    return s or DEFAULT_STAGE
+
+
+def banish_allowed(card: Card, stage: str) -> bool:
+    """The ONLY cards Banish may ever be used on: a confidently read NEW Pentagram on Mad Forest."""
+    return (
+        normalize_stage(stage) in BANISH_STAGES
+        and card.name in BANISH_ALLOWED
+        and card.new
+        and card.score >= BANISH_MIN_NAME_SCORE
+    )
+
+
+def banish_candidate(cards: list[Card], stage: str) -> int | None:
+    """Index of the card to banish, or None. Needs at least one other card to pick after."""
+    if len(cards) < 2:
+        return None
+    for i, c in enumerate(cards):
+        if banish_allowed(c, stage):
+            return i
+    return None
+
+
+@dataclass
+class BanishButton:
+    center: tuple[int, int]
+    left: int | None  # remaining uses read from "N left"; None when unreadable
+
+
+def read_banish_button(frame: np.ndarray) -> BanishButton | None:
+    """The red BANISH button on a level-up screen, with its remaining-uses count.
+
+    None unless the rect is mostly button red and OCR reads BANISH on it."""
+    h, w = frame.shape[:2]
+    sx, sy = w / 960.0, h / 540.0
+    bx, by, bw, bh = BANISH_BUTTON_960
+    x0, y0 = int(round(bx * sx)), int(round(by * sy))
+    x1, y1 = int(round((bx + bw) * sx)), int(round((by + bh) * sy))
+    box = frame[y0:y1, x0:x1].astype(np.int16)
+    if box.size == 0:
+        return None
+    red = (box[:, :, 2] > 180) & (box[:, :, 1] < 90) & (box[:, :, 0] < 70)
+    if float(red.mean()) < BANISH_RED_FRAC:
+        return None
+    ym = y0 + int(round(17 * sy))
+    title = ocr_image(_white_text(frame[y0:ym, x0:x1], thr=190))
+    word = re.sub(r"[^a-z]", "", title.lower())
+    if difflib.SequenceMatcher(None, word, "banish").ratio() < 0.8:
+        return None
+    # The pale-pink "10 left" line only binarizes cleanly at 150 / 3x (45 of 45 frames).
+    sub = ocr_image(_white_text(frame[ym:y1, x0:x1], thr=150, scale=3))
+    m = re.search(r"(\d+)\s*[l1I|]", sub)
+    left = int(m.group(1)) if m else None
+    return BanishButton(center=((x0 + x1) // 2, (y0 + y1) // 2), left=left)
 
 
 # After REVIVE the bar refills while the death screen fades; readings in this window
@@ -753,7 +839,15 @@ class MenuPilot:
         start_items: tuple[str, ...] = ("Garlic",),
         levelup_click: bool = True,
         game_clock: Callable[[], float | None] | None = None,
+        stage: str = DEFAULT_STAGE,
     ) -> None:
+        # Stage being played (session sets VS_STAGE; play_run.sh only starts Mad Forest).
+        # Banish is only ever used on BANISH_STAGES.
+        self.stage = normalize_stage(stage)
+        self.banished: set[str] = set()
+        self._banish: dict | None = None  # in-progress banish of the current level-up
+        self._banish_fails = 0
+        self._banish_skip_screen = False  # gave up on this level-up screen: pick normally
         # Current game time (s) for time-dependent picks (early Pentagram avoid); None = unknown.
         self.game_clock = game_clock
         self.levelup_click = levelup_click
@@ -811,6 +905,10 @@ class MenuPilot:
         self.owned = set(self.start_items)
         self._hp.reset()
         self.picks = []
+        self.banished = set()
+        self._banish = None
+        self._banish_fails = 0
+        self._banish_skip_screen = False
 
     # -- helpers
     def _game_s(self) -> float | None:
@@ -858,12 +956,24 @@ class MenuPilot:
             return "levelup"
         self._sig = None
         self._target = None
+        self._banish_skip_screen = False
+        if self._banish is not None:
+            phase = self._banish["phase"]
+            self.log(
+                "[levelup] BANISH Pentagram: level-up closed after "
+                + ("the BANISH click" if phase == "armed" else "the Pentagram click")
+                + " (game closes the menu on a banish in older versions; if BANISH was not armed it was a pick)"
+            )
+            self._banish = None
         if now >= self._hp_ignore_until:
             self._hp.add(read_hp_fraction(frame))
         return self._handle_chest(frame, now)
 
     def _handle_level_up(self, frame: np.ndarray, screen: LevelUpScreen, now: float) -> None:
         sig = self._signature(frame, screen)
+        if self._banish is not None:
+            self._banish_step(frame, screen, now, sig)
+            return
         if self._target is None:
             # Cards slide in: wait until the card column is stable before reading names.
             if sig != self._sig:
@@ -877,6 +987,8 @@ class MenuPilot:
             read_cards(frame, screen)
             self._names = [c.name or c.raw or "?" for c in screen.cards]
             self.owned |= {c.name for c in screen.cards if c.name and not c.new}
+            if self._try_start_banish(frame, screen):
+                return
             game_s = self._game_s()
             self._target = choose_card(screen.cards, hp=self.hp, owned=self.owned, game_s=game_s)
             self._chosen = screen.cards[self._target].name
@@ -901,6 +1013,7 @@ class MenuPilot:
             # Click the card itself: one click picks it. Keyboard navigation could
             # wander off the card column onto REROLL / BANISH (live run8), so the
             # mouse is the default; the click point is the card's own center.
+            # (The only deliberate BANISH click is _try_start_banish, above.)
             card = screen.cards[target]
             x = (card.x0 + card.x1) // 2
             y = card.cy
@@ -915,7 +1028,8 @@ class MenuPilot:
             self._unknown_sel += 1
             if self._unknown_sel < 4 or self._presses >= 12:
                 # Wait: arrows animate. After many presses stop pressing at all rather
-                # than confirm something that might be REROLL / BANISH.
+                # than confirm something that might be REROLL / BANISH (keyboard mode
+                # never banishes, not even Pentagram).
                 return
             self._press("down", self.nav_cooldown_s)
             self._presses += 1
@@ -932,6 +1046,118 @@ class MenuPilot:
             self._press("enter", self.confirm_cooldown_s)
             self._record_pick(target)
         self.status = f"LEVEL UP -> {self._names[target] if target < len(self._names) else '?'}"
+
+    # -- banish (Mad Forest, NEW Pentagram only)
+    def _try_start_banish(self, frame: np.ndarray, screen: LevelUpScreen) -> bool:
+        """Click BANISH when this settled level-up offers a NEW Pentagram on Mad Forest.
+
+        False (normal pick) when it does not apply or cannot be done safely."""
+        if self._banish_skip_screen:
+            return False
+        idx = banish_candidate(screen.cards, self.stage)
+        if idx is None:
+            return False
+        names = [c.name or c.raw or "?" for c in screen.cards]
+        if self.click is None or not self.levelup_click:
+            self.log("[levelup] BANISH Pentagram skipped: keyboard mode never banishes; normal pick")
+            return False
+        if self._banish_fails >= BANISH_MAX_FAILS_PER_RUN:
+            self.log(f"[levelup] BANISH Pentagram skipped: {self._banish_fails} failed tries this run; normal pick")
+            return False
+        btn = read_banish_button(frame)
+        if btn is None:
+            self.log("[levelup] BANISH Pentagram skipped: no BANISH button seen; normal pick")
+            return False
+        if btn.left is None or btn.left < 1:
+            self.log(f"[levelup] BANISH Pentagram skipped: uses left={btn.left}; normal pick")
+            return False
+        card = screen.cards[idx]
+        if not banish_allowed(card, self.stage):  # hard guard (never reached otherwise)
+            return False
+        self._save_banish_frame(frame, "offer")
+        self.refocus()
+        self.click(*btn.center)
+        self._next_action = self.clock() + BANISH_COOLDOWN_S
+        self._banish = {"phase": "armed", "name": card.name, "left_before": btn.left, "card_clicks": 0}
+        self._sig = None
+        self._stable = 0
+        self.status = "LEVEL UP -> BANISH Pentagram"
+        self.log(
+            f"[levelup] BANISH Pentagram: cards={names} -> clicked BANISH at {btn.center} "
+            f"({btn.left} left), next: click card #{idx + 1}"
+        )
+        return True
+
+    def _banish_step(self, frame: np.ndarray, screen: LevelUpScreen, now: float, sig: bytes) -> None:
+        """After the BANISH click: click the Pentagram card (and nothing else), then verify it is gone.
+
+        While a banish may be armed the ONLY card ever clicked is the Pentagram one, so a
+        mis-detected state can never banish another card."""
+        state = self._banish
+        assert state is not None
+        if now < self._next_action:
+            return
+        if sig != self._sig:
+            self._sig = sig
+            self._stable = 0
+            return
+        self._stable += 1
+        if self._stable < self.settle_frames:
+            return
+        read_cards(frame, screen)
+        names = [c.name or c.raw or "?" for c in screen.cards]
+        idx = next((i for i, c in enumerate(screen.cards) if c.name in BANISH_ALLOWED), None)
+        # Keep what the screen looks like with BANISH armed / after the banish (no
+        # frames of either exist yet), for checking the flow after the first live run.
+        self._save_banish_frame(frame, "armed" if state["phase"] == "armed" else f"after{state['card_clicks']}")
+        if state["phase"] == "armed" or idx is not None:
+            if idx is None:
+                # Cards changed after the BANISH click alone (should not happen).
+                self.log(f"[levelup] BANISH Pentagram: no Pentagram after the BANISH click, cards={names}; normal pick")
+                self._end_banish(failed=True)
+                return
+            card = screen.cards[idx]
+            if state["card_clicks"] >= BANISH_MAX_CARD_CLICKS or not banish_allowed(card, self.stage):
+                self.log(
+                    f"[levelup] BANISH Pentagram failed: still offered after {state['card_clicks']} clicks, "
+                    f"cards={names}; normal pick"
+                )
+                self._end_banish(failed=True)
+                return
+            self.refocus()
+            self.click((card.x0 + card.x1) // 2, card.cy)
+            state["phase"] = "clicked"
+            state["card_clicks"] += 1
+            self._next_action = self.clock() + BANISH_COOLDOWN_S
+            self._sig = None
+            self.log(f"[levelup] BANISH Pentagram: clicked the Pentagram card #{idx + 1} (click {state['card_clicks']})")
+            return
+        # Clicked, the level-up is still open and Pentagram is gone: banished (the
+        # Jul 2026 game keeps the menu open after a banish). Pick from the rest.
+        btn = read_banish_button(frame)
+        left = None if btn is None else btn.left
+        self.banished.add(state["name"])
+        self.log(
+            f"[levelup] BANISH Pentagram verified: card gone, cards={names}, "
+            f"BANISH {state['left_before']} -> {left if left is not None else '?'} left; picking from the rest"
+        )
+        if left is not None and left != state["left_before"] - 1:
+            self.log("[levelup] BANISH Pentagram note: uses count did not drop by exactly 1")
+        self._end_banish(failed=False)
+
+    def _save_banish_frame(self, frame: np.ndarray, tag: str) -> None:
+        path = self._save_frame(frame, f"levelup_banish_{tag}")
+        if path:
+            self.log(f"[levelup] BANISH Pentagram: saved {path}")
+
+    def _end_banish(self, failed: bool) -> None:
+        if failed:
+            self._banish_fails += 1
+            self._banish_skip_screen = True
+        self._banish = None
+        self._target = None
+        self._sig = None
+        self._stable = 0
 
     def _record_pick(self, target: int) -> None:
         name = self._names[target] if target < len(self._names) else "?"

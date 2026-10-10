@@ -556,6 +556,8 @@ start_bot(){
   export TESSDATA_PREFIX=/home/box/micromamba/envs/vstools/share/tessdata
   export VS_CAPTURE_X=$WX VS_CAPTURE_Y=$WY VS_CAPTURE_W=960 VS_CAPTURE_H=540
   export VS_DEBUG_X=0 VS_DEBUG_Y=560 VS_DEBUG_W=190 VS_DEBUG_H=107
+  # Stage verified above (Mad Forest only): enables the bot's one Banish exception (new Pentagram).
+  export VS_STAGE=mad_forest
   rm -f "$BOT_FIFO"
   mkfifo "$BOT_FIFO"
   exec 9<>"$BOT_FIFO"

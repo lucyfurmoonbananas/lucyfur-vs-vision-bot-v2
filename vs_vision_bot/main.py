@@ -173,6 +173,8 @@ def main(argv: list[str] | None = None) -> int:
         click=click_in_capture,
         results_dir=os.environ.get("VS_RESULTS_DIR", "/workspace/vsbot-check/results"),
         game_clock=lambda: nav.game_s,  # nav is created just below; only called on a level-up
+        # Stage for the Mad-Forest-only Pentagram banish; play_run.sh only starts Mad Forest.
+        stage=os.environ.get("VS_STAGE", "mad_forest"),
     )
     nav = Navigator(tune=tuning_from_env(os.environ.get("VS_TUNE")))
     # The movement game clock restarts only after a finished run (QUIT + DONE),
