@@ -14,7 +14,7 @@ Per frame, every one of the 8 WASD directions is scored:
   (Lucyfur's "wide circles": herd the swarm behind you instead of running into
   one side). With no crowd the heading keeps rotating, so the character walks
   big loops and never stands idle in the open.
-* gems    - small pull toward blue XP gems when nothing is close.
+* gems    - pull toward blue XP gems when nothing is close (stronger / farther before the flower).
 * inertia - hysteresis: the current direction gets a bonus and a minimum
   dwell time so the chord does not jitter frame to frame.
 
@@ -151,6 +151,13 @@ class Tuning:
     # (not a REVIVE / HP-crash flee or committed escape) keeps the normal gem pull, which
     # still fades out with danger (gem_danger) and is off at low HP. 0 disables.
     breakout_gem_until_s: float = 280.0
+    # Stronger / longer-range gem pull before the flower (Oct 9 live: gems piled to avg
+    # ~8-13 on screen at 2-4 min while runs entered the ring at Lv6-8). While game_s is
+    # below this, score_directions uses early_gem_gain / early_gem_radius instead of the
+    # base knobs (still gated by gem_danger and low-HP). 0 disables the boost.
+    early_gem_until_s: float = 280.0
+    early_gem_gain: float = 2.8       # vs gem_gain 1.6
+    early_gem_radius: float = 420.0   # vs gem_radius 300; reach gems left in the wake
     # Man-eater flower ring (~4:40–6:00): HP can drop 1.0→0.1 in 2–3 s.
     hp_crash_delta: float = -0.3       # peak-to-now drop that counts as crashing
     hp_crash_window_s: float = 1.5     # look-back for that drop
@@ -168,6 +175,18 @@ class Tuning:
     enemy_speed: float = 70.0
     rollout_s: float = 1.2         # per leg; two legs (turn allowed after the first)
     rollout_steps: int = 4
+
+
+
+def gem_tune_for(tune: Tuning, game_s: float) -> Tuning:
+    """Return ``tune`` with early gem_gain/radius applied when still before the flower.
+
+    No-op when ``early_gem_until_s`` is 0 or ``game_s`` is already past it, so late-game
+    and VS_TUNE=early_gem_until_s=0 keep the base gem knobs unchanged.
+    """
+    if tune.early_gem_until_s <= 0 or game_s >= tune.early_gem_until_s:
+        return tune
+    return replace(tune, gem_gain=tune.early_gem_gain, gem_radius=tune.early_gem_radius)
 
 
 def tuning_from_env(raw: str | None, base: Tuning | None = None, log=print) -> Tuning:
@@ -825,6 +844,8 @@ class Navigator:
         kite = self._kite_direction(pts, px, py, dt)
         self._update_breakout(pts, px, py, dt, hp)
         escape = self.breakout is not None and self._escape_remaining > 0
+        # Denser early XP: boost gem pull before the flower without changing late knobs.
+        score_tune = gem_tune_for(self.tune, self.game_s)
         cone: list[tuple[int, int]] | None = None
         if self.breakout is not None:
             t = self.tune
@@ -832,7 +853,7 @@ class Navigator:
             bgems = result.gems if plain and self.game_s < t.breakout_gem_until_s else None
             dec = score_directions(
                 pts, (px, py), self.breakout, self.tune.breakout_weight,
-                gems=bgems, current=self.current, hp=hp, tune=self.tune, idle_ok=False,
+                gems=bgems, current=self.current, hp=hp, tune=score_tune, idle_ok=False,
                 kite_floor=True,
             )
             dec.mode = "breakout"
@@ -858,7 +879,7 @@ class Navigator:
             dec = score_directions(
                 pts, (px, py), kite, phase.kite_weight,
                 gems=result.gems, current=self.current, hp=hp,
-                tune=self.tune, idle_ok=phase.idle_ok,
+                tune=score_tune, idle_ok=phase.idle_ok,
             )
 
         # Flip the orbit when the field keeps overruling it (the loop runs into
