@@ -95,3 +95,34 @@ def test_reset_clears_last_breakout():
     assert nav._last_break_dir is not None
     nav.reset()
     assert nav._last_break_dir is None
+    assert nav._breakout_origin is None
+
+
+def test_running_breakout_recheck_anchors_to_origin_not_latest():
+    """Successive ~90° re-aims must not gradually flip 180° (Bob Oct 8).
+
+    Start right, pretend a re-check already turned us up, then open the left
+    corridor. Without origin-anchor, no-reverse vs current (0,1) allows left;
+    with origin at +x, heading must stay x>=0.
+    """
+    nav, clock, _ = _nav(318.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_RIGHT)), 4, hp=1.0)
+    assert nav.breakout is not None and nav.breakout[0] > 0.5
+    assert nav._breakout_origin is not None and nav._breakout_origin[0] > 0.5
+    # Simulate a 90° re-aim already happened; force the next 0.4 s re-check.
+    nav.breakout = (0.0, 1.0)
+    nav._breakout_check = 0.4
+    out = run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 12, hp=1.0)
+    if nav.breakout is not None:
+        assert nav.breakout[0] >= -1e-6
+        assert nav._breakout_origin is not None and nav._breakout_origin[0] > 0.5
+    assert all(v[0] >= 0 for v in out)
+
+
+def test_end_breakout_clears_origin_keeps_last_dir():
+    nav, clock, _ = _nav(318.0)
+    first = _break_then_end(nav, clock, GAP_RIGHT)
+    assert first[0] > 0.5
+    assert nav.breakout is None
+    assert nav._breakout_origin is None
+    assert nav._last_break_dir is not None and nav._last_break_dir[0] > 0.5

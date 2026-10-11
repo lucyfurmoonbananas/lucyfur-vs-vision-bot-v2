@@ -470,6 +470,7 @@ class Navigator:
         self._near_slow = 0.0
         self._near_init = False
         self.breakout: tuple[float, float] | None = None
+        self._breakout_origin: tuple[float, float] | None = None  # heading at breakout start (flower no-reverse)
         self._breakout_s = 0.0
         self._breakout_check = 0.0
         self.breakouts = 0
@@ -552,6 +553,7 @@ class Navigator:
             self._last_break_dir = self.breakout
             self._last_break_end = self.game_s
         self.breakout = None
+        self._breakout_origin = None
 
     def _in_flower(self) -> bool:
         t = self.tune
@@ -581,6 +583,7 @@ class Navigator:
                 ecost = self._no_reverse(ecost, self._recent_break_dir())
             self.breakout = tuple(float(v) for v in _UNIT[int(np.argmin(ecost))])
             self._escape_origin = self.breakout
+            self._breakout_origin = self.breakout
             self._breakout_s = 0.0
             self._breakout_check = 0.0
             self.breakouts += 1
@@ -602,6 +605,7 @@ class Navigator:
                 f"[nav] flower no-reverse breakout {DIRS[best]} (last {_nearest_dir(prev)}) game~{self.game_s:.0f}s"
             )
         self.breakout = tuple(float(v) for v in _UNIT[best])
+        self._breakout_origin = self.breakout
         self._breakout_s = 0.0
         self._breakout_check = 0.0
         self.breakouts += 1
@@ -733,7 +737,7 @@ class Navigator:
                 self._breakout_check = 0.0
                 costs = corridor_costs(pts, px, py, t.corridor_len, t.corridor_width)
                 cur = DIRS.index(_nearest_dir(self.breakout))
-                best = int(np.argmin(self._no_reverse(costs, self.breakout)))
+                best = int(np.argmin(self._no_reverse(costs, self._breakout_origin or self.breakout)))
                 if costs[cur] > 1.6 * costs[best] + 0.5:
                     self.breakout = tuple(_UNIT[best])
             return
@@ -871,9 +875,10 @@ class Navigator:
                 dec.vector = max(cone, key=lambda d: dec.scores[d])
                 dec.mode = f"{self._escape_reason}-escape"
             elif self.tune.flower_noreverse_s > 0 and self._in_flower():
-                # Flower window: the field may side-step (<= 90 deg), never walk back.
-                bx, by = self.breakout
-                cone = [d for i, d in enumerate(DIRS) if _UNIT[i, 0] * bx + _UNIT[i, 1] * by >= -1e-6]
+                # Flower window: the field may side-step (<= 90 deg of the *start*
+                # heading), never gradually flip 180 via successive re-aims.
+                ox, oy = self._breakout_origin or self.breakout
+                cone = [d for i, d in enumerate(DIRS) if _UNIT[i, 0] * ox + _UNIT[i, 1] * oy >= -1e-6]
                 dec.vector = max(cone, key=lambda d: dec.scores[d])
         else:
             dec = score_directions(
