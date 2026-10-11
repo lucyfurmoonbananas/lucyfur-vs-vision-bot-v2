@@ -106,7 +106,7 @@ function Get-TaskFrameworkHelp {
     # Use the taskAction to generate a temporary function that we can call Get-Help on to generate the
     # help info. We use a unique name to aid in regex replacements later.
     $functionName = "_$([Guid]::NewGuid().ToString('N'))"
-    $tempModule = New-Module -ScriptBlock ([scriptblock]::Create("function $functionName {$taskAction.Ast.ParamBlock}"))
+    $tempModule = New-Module -ScriptBlock ([scriptblock]::Create("function $functionName { $($taskAction.ToString()) }"))
     $taskHelp = Get-Help $functionName @GetHelpArgs
     $tempModule | Remove-Module
 
