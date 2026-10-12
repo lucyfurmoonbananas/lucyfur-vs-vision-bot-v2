@@ -9,7 +9,7 @@ from vs_vision_bot.pathfind import Navigator, Tuning, gem_tune_for, score_direct
 from tests.test_movement import Clock, P, result, run
 
 
-FAR_LEFT_GEM = [(100.0, 256.0)]  # ~380 px; outside base gem_radius 300, inside early 420
+FAR_LEFT_GEM = [(100.0, 256.0)]  # ~380 px; outside base gem_radius 300, inside early 460
 NEAR_LEFT_GEM = [(280.0, 256.0)]  # ~200 px; inside both radii
 
 

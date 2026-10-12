@@ -53,10 +53,24 @@ def test_outside_flower_window_reversal_is_allowed():
     assert not any("no-reverse" in line for line in logs)
 
 
-def test_reversal_allowed_once_the_last_breakout_is_old():
+def test_flower_window_keeps_noreverse_past_ttl():
+    """Oct 11: ring escapes ~6 s apart flipped 180 after flower_noreverse_s=4 expired."""
+    nav, clock, _ = _nav(318.0)
+    first = _break_then_end(nav, clock, GAP_RIGHT)
+    assert first[0] > 0.5
+    nav.game_s += 5.0  # still inside flower (280-360); old TTL would forget the heading
+    assert nav._in_flower()
+    out = run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=1.0)
+    assert nav.breakout is not None
+    assert nav.breakout[0] >= -1e-6  # still anchored to last rightward breakout
+    assert all(v[0] >= 0 for v in out)
+
+
+def test_noreverse_expires_after_flower_window_ends():
     nav, clock, _ = _nav(318.0)
     _break_then_end(nav, clock, GAP_RIGHT)
-    nav.game_s += 5.0  # > flower_noreverse_s since the last breakout ended
+    nav.game_s = 370.0  # past flower_phase_hi; TTL has also elapsed
+    assert not nav._in_flower()
     run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=1.0)
     assert nav.breakout is not None and nav.breakout[0] < -0.5
 
@@ -126,3 +140,28 @@ def test_end_breakout_clears_origin_keeps_last_dir():
     assert nav.breakout is None
     assert nav._breakout_origin is None
     assert nav._last_break_dir is not None and nav._last_break_dir[0] > 0.5
+
+
+def test_consecutive_ring_escapes_do_not_flip_after_ttl():
+    """Oct 11 1 AM run1: (-1,-1) at ~281 then (1,1) at ~289 after 4 s TTL forgot heading."""
+    clock = Clock()
+    logs: list[str] = []
+    # ring_commit on so closing flower ring uses committed escapes
+    tune = Tuning(flower_noreverse_s=4.0, ring_commit_s=2.5)
+    nav = Navigator(tune=tune, clock=clock, log=logs.append)
+    nav.game_s = 281.0
+    # First ring escape through right gap
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_RIGHT)), 4, hp=1.0)
+    assert nav.escaping or nav.breakout is not None
+    first = nav.breakout or nav._last_break_dir
+    assert first is not None and first[0] > 0.5
+    # Let the escape finish and age past the old 4 s TTL while still in flower
+    run(nav, clock, result([]), 40, hp=1.0)  # clear field, end escape/breakout
+    nav.game_s = 289.0
+    assert nav._in_flower()
+    assert nav._recent_break_dir() is not None
+    assert nav._recent_break_dir()[0] > 0.5
+    # New closing ring with gap on the LEFT — must NOT reverse into (-1, ...)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=1.0)
+    assert nav.breakout is not None
+    assert nav.breakout[0] >= -1e-6

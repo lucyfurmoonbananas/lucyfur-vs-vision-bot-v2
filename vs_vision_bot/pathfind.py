@@ -137,10 +137,11 @@ class Tuning:
     ring_commit_s: float = 2.5        # 0 disables
     # Flower window "no reversal" (Bob, Oct 6 3 AM logs: breakouts at game~300-340 s
     # flipped v=(1,..) -> (-1,..) every 3 s, walking back into the ring). Inside the
-    # window a new breakout started within this many seconds of the previous one, and
-    # the 0.4 s corridor re-check, may only pick headings within 90 deg of the last
-    # breakout heading, and the per-frame vector of a flower breakout stays within
-    # 90 deg of its heading (side-steps OK, never back). 0 disables.
+    # window a new breakout / ring escape, the 0.4 s corridor re-check, and the
+    # per-frame vector may only pick headings within 90 deg of the last breakout
+    # heading (side-steps OK, never back). While still in the flower phase the last
+    # heading does not expire (Oct 11: ring escapes ~6 s apart flipped 180 after the
+    # old 4 s TTL); outside the phase the TTL below still applies. 0 disables.
     # Sim --horde showed no gain (density 1.0: 30.8 off vs 32.8 at 3 s; 1.5: 75.9 vs 79.3);
     # Oct 8 live: noreverse alone was not enough (~5:36–5:42 deaths). Default on with
     # ring_commit_s for the real Man-eater ring; override via VS_TUNE if A/B needed.
@@ -156,8 +157,8 @@ class Tuning:
     # below this, score_directions uses early_gem_gain / early_gem_radius instead of the
     # base knobs (still gated by gem_danger and low-HP). 0 disables the boost.
     early_gem_until_s: float = 280.0
-    early_gem_gain: float = 2.8       # vs gem_gain 1.6
-    early_gem_radius: float = 420.0   # vs gem_radius 300; reach gems left in the wake
+    early_gem_gain: float = 3.2       # vs gem_gain 1.6 (was 2.8; Oct 11 still under-leveled into flower)
+    early_gem_radius: float = 460.0   # vs gem_radius 300; was 420 — reach gems left in the wake
     # Man-eater flower ring (~4:40–6:00): HP can drop 1.0→0.1 in 2–3 s.
     hp_crash_delta: float = -0.3       # peak-to-now drop that counts as crashing
     hp_crash_window_s: float = 1.5     # look-back for that drop
@@ -567,9 +568,17 @@ class Navigator:
         return np.where(ok, costs, np.inf)
 
     def _recent_break_dir(self) -> tuple[float, float] | None:
-        """Last breakout heading if it ended within ``flower_noreverse_s`` (game time)."""
-        if self._last_break_dir is None:
+        """Last breakout heading remembered for flower no-reverse.
+
+        Inside the Man-eater flower window the heading stays for the whole phase so
+        consecutive ring escapes cannot flip 180 after ``flower_noreverse_s`` expires
+        (Oct 11 1 AM run1: (-1,-1) at ~281 then (1,1) at ~289). Outside the window the
+        ``flower_noreverse_s`` TTL still applies.
+        """
+        if self._last_break_dir is None or self.tune.flower_noreverse_s <= 0:
             return None
+        if self._in_flower():
+            return self._last_break_dir
         if self.game_s - self._last_break_end > self.tune.flower_noreverse_s:
             return None
         return self._last_break_dir
