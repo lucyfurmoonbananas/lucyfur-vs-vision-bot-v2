@@ -789,3 +789,11 @@ def test_pilot_game_clock_errors_are_treated_as_unknown():
     pilot = MenuPilot(tap=lambda k: None, async_chest=False, log=lambda m: None, game_clock=boom)
     assert pilot._game_s() is None
     assert MenuPilot(tap=lambda k: None, async_chest=False, log=lambda m: None)._game_s() is None
+
+
+def test_laurel_damage_toggle(monkeypatch):
+    offer = _cards(("Laurel", True), ("Clock Lancet", True), ("Spinach", True))
+    assert choose_card(offer, hp=1.0, owned={"Garlic"}) == 0  # default: Laurel ranks as a weapon
+    monkeypatch.setenv("VS_LAUREL_DAMAGE", "0")
+    assert choose_card(offer, hp=1.0, owned={"Garlic"}) == 2  # Spinach (8) over Laurel / Clock Lancet (20)
+    assert choose_card(offer, hp=0.3, owned={"Garlic"}) == 0  # low HP: still the defensive pick

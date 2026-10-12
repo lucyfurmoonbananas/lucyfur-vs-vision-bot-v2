@@ -568,8 +568,10 @@ def _card_rank(c: Card, idx: int, hp: float | None, weapons: int, early: bool = 
             return (35, idx)
         if name in CROWD_WEAPONS:
             return (2, CROWD_WEAPONS.index(name))
-        if name in OTHER_WEAPONS:
-            return (4, OTHER_WEAPONS.index(name))
+        # A/B (VS_LAUREL_DAMAGE=0): a new Laurel is no kill weapon; low HP still takes it via DEFENSE.
+        other = tuple(w for w in OTHER_WEAPONS if w != "Laurel") if os.environ.get("VS_LAUREL_DAMAGE") == "0" else OTHER_WEAPONS
+        if name in other:
+            return (4, other.index(name))
         return (20, idx)  # unknown / unranked new weapon
     if name == "Garlic":
         return (3, 0)
