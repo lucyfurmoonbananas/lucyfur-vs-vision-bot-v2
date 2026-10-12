@@ -638,11 +638,13 @@ def choose_card(
 # stage keep the old rule (never Banish). Hard guard: both clicks of a banish go
 # through banish_allowed(), and nothing else ever clicks the BANISH button.
 BANISH_ALLOWED: frozenset[str] = frozenset({"Pentagram"})
-BANISH_STAGES: frozenset[str] = frozenset({"mad_forest"})
-DEFAULT_STAGE = "mad_forest"
+BANISH_STAGES: frozenset[str] = frozenset({"mad_forest"})  # only when VS_STAGE says so
 # Red BANISH button ("BANISH / 10 left") right of the panel on every saved level-up
 # frame (45 Oct 6-7 frames + 4 fixtures): x 707..845, y 299..330 on 960x540.
 BANISH_BUTTON_960 = (707, 299, 139, 32)
+# Red CANCEL button that replaces it while BANISH is armed (both Oct 11 levelup_banish_armed_*
+# frames: red 0.81 of the rect; <= 0.005 on every other saved level-up / fixture).
+CANCEL_BUTTON_960 = (707, 331, 139, 32)
 BANISH_RED_FRAC = 0.6        # measured 0.73-0.75 of the rect is button red
 BANISH_MIN_NAME_SCORE = 0.85  # the Pentagram card name must be a confident read
 BANISH_MAX_CARD_CLICKS = 2    # clicks on the Pentagram card before giving up
@@ -652,7 +654,7 @@ BANISH_COOLDOWN_S = 0.8
 
 def normalize_stage(stage: str | None) -> str:
     s = re.sub(r"[^a-z0-9]+", "_", (stage or "").strip().lower()).strip("_")
-    return s or DEFAULT_STAGE
+    return s
 
 
 def banish_allowed(card: Card, stage: str) -> bool:
@@ -681,13 +683,11 @@ class BanishButton:
     left: int | None  # remaining uses read from "N left"; None when unreadable
 
 
-def read_banish_button(frame: np.ndarray) -> BanishButton | None:
-    """The red BANISH button on a level-up screen, with its remaining-uses count.
-
-    None unless the rect is mostly button red and OCR reads BANISH on it."""
+def _red_button(frame: np.ndarray, rect_960: tuple[int, int, int, int], label: str):
+    """(x0, y0, x1, y1, ym) of a red button whose title OCRs as ``label``, else None."""
     h, w = frame.shape[:2]
     sx, sy = w / 960.0, h / 540.0
-    bx, by, bw, bh = BANISH_BUTTON_960
+    bx, by, bw, bh = rect_960
     x0, y0 = int(round(bx * sx)), int(round(by * sy))
     x1, y1 = int(round((bx + bw) * sx)), int(round((by + bh) * sy))
     box = frame[y0:y1, x0:x1].astype(np.int16)
@@ -699,8 +699,25 @@ def read_banish_button(frame: np.ndarray) -> BanishButton | None:
     ym = y0 + int(round(17 * sy))
     title = ocr_image(_white_text(frame[y0:ym, x0:x1], thr=190))
     word = re.sub(r"[^a-z]", "", title.lower())
-    if difflib.SequenceMatcher(None, word, "banish").ratio() < 0.8:
+    if difflib.SequenceMatcher(None, word, label).ratio() < 0.8:
         return None
+    return x0, y0, x1, y1, ym
+
+
+def read_cancel_button(frame: np.ndarray) -> tuple[int, int] | None:
+    """Center of the CANCEL button, i.e. BANISH is armed; None otherwise."""
+    b = _red_button(frame, CANCEL_BUTTON_960, "cancel")
+    return None if b is None else ((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
+
+
+def read_banish_button(frame: np.ndarray) -> BanishButton | None:
+    """The red BANISH button on a level-up screen, with its remaining-uses count.
+
+    None unless the rect is mostly button red and OCR reads BANISH on it."""
+    b = _red_button(frame, BANISH_BUTTON_960, "banish")
+    if b is None:
+        return None
+    x0, y0, x1, y1, ym = b
     # The pale-pink "10 left" line only binarizes cleanly at 150 / 3x (45 of 45 frames).
     sub = ocr_image(_white_text(frame[ym:y1, x0:x1], thr=150, scale=3))
     m = re.search(r"(\d+)\s*[l1I|]", sub)
@@ -839,7 +856,7 @@ class MenuPilot:
         start_items: tuple[str, ...] = ("Garlic",),
         levelup_click: bool = True,
         game_clock: Callable[[], float | None] | None = None,
-        stage: str = DEFAULT_STAGE,
+        stage: str = "",
     ) -> None:
         # Stage being played (session sets VS_STAGE; play_run.sh only starts Mad Forest).
         # Banish is only ever used on BANISH_STAGES.
@@ -1110,20 +1127,30 @@ class MenuPilot:
         # Keep what the screen looks like with BANISH armed / after the banish (no
         # frames of either exist yet), for checking the flow after the first live run.
         self._save_banish_frame(frame, "armed" if state["phase"] == "armed" else f"after{state['card_clicks']}")
-        if state["phase"] == "armed" or idx is not None:
-            if idx is None:
-                # Cards changed after the BANISH click alone (should not happen).
-                self.log(f"[levelup] BANISH Pentagram: no Pentagram after the BANISH click, cards={names}; normal pick")
+        cancel = read_cancel_button(frame)
+        if state["phase"] == "cancel":
+            if cancel is not None or read_banish_button(frame) is None:
+                self.log(f"[levelup] BANISH Pentagram: still armed after CANCEL, cards={names}; stopping the run")
+                self._banish = None
+                self.finished = True
+                return
+            self.log("[levelup] BANISH Pentagram: backed out with CANCEL; normal pick")
+            self._end_banish(failed=True)
+            return
+        if state["phase"] == "armed" or idx is not None or cancel is not None:
+            if cancel is None:
+                self.log(f"[levelup] BANISH Pentagram: banish mode not seen (no CANCEL), cards={names}; normal pick")
                 self._end_banish(failed=True)
+                return
+            if idx is None or state["card_clicks"] >= BANISH_MAX_CARD_CLICKS:
+                self.log(f"[levelup] BANISH Pentagram failed after {state['card_clicks']} clicks, cards={names}; CANCEL")
+                self.refocus()
+                self.click(*cancel)
+                state["phase"] = "cancel"
+                self._next_action = self.clock() + BANISH_COOLDOWN_S
+                self._sig = None
                 return
             card = screen.cards[idx]
-            if state["card_clicks"] >= BANISH_MAX_CARD_CLICKS:
-                self.log(
-                    f"[levelup] BANISH Pentagram failed: still offered after {state['card_clicks']} clicks, "
-                    f"cards={names}; normal pick"
-                )
-                self._end_banish(failed=True)
-                return
             self.refocus()
             self.click((card.x0 + card.x1) // 2, card.cy)
             state["phase"] = "clicked"

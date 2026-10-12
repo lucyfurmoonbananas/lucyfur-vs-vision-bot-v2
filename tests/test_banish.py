@@ -21,6 +21,7 @@ from vs_vision_bot.menus import (
     detect_level_up,
     normalize_stage,
     read_banish_button,
+    read_cancel_button,
 )
 
 FIX = Path(__file__).parent / "fixtures"
@@ -30,6 +31,7 @@ LEVELUPS = ("levelup_4cards_sel4.png", "levelup_armor_axe_misread.png", "levelup
 NOT_LEVELUPS = ("main_menu.png", "results_screen.png", "game_over_revive.png", "game_over_quit.png",
                 "gameplay_full_hp.png", "gameplay_skeleton_swarm.png", "gameplay_flower_ring_menu_fp.png")
 BTN_CENTER = (776, 315)
+CANCEL_CENTER = (776, 347)
 
 
 def load(name: str) -> np.ndarray:
@@ -105,8 +107,26 @@ def test_banish_candidate_needs_another_card_to_pick():
 
 def test_stage_names_normalize():
     assert normalize_stage("Mad Forest") == "mad_forest"
-    assert normalize_stage(None) == "mad_forest"
-    assert MenuPilot(tap=lambda k: None, log=lambda m: None).stage == "mad_forest"
+    assert normalize_stage(None) == ""
+
+
+def test_banish_needs_vs_stage_set_explicitly(monkeypatch):
+    # No VS_STAGE: not Mad Forest for Banish purposes (normal avoid-rule pick).
+    frame = load("levelup_4cards_sel4.png")
+    screen = detect_level_up(frame)
+    Game(monkeypatch, ["Knife", "Pentagram", "Lightning Ring", "Stone Mask"])
+    clock, logs = FakeClock(), []
+    pilot, clicks, _ = make_pilot(clock, logs, stage="")
+    run(pilot, clock, frame, screen, n=4)
+    assert not any(in_banish_button(*c) for c in clicks)
+    assert pilot.picks == ["Lightning Ring"]
+
+
+@needs_tesseract
+def test_cancel_button_marks_banish_mode_on_real_frames():
+    assert read_cancel_button(load("levelup_banish_armed.png")) == CANCEL_CENTER
+    for name in ("levelup_banish_offer.png",) + LEVELUPS + NOT_LEVELUPS:
+        assert read_cancel_button(load(name)) is None, name
 
 
 # ---------------------------------------------------------------- pilot flow
@@ -115,13 +135,15 @@ def test_stage_names_normalize():
 class Game:
     """Fake OCR: the names on the fixture's 4 cards, editable between steps."""
 
-    def __init__(self, monkeypatch, names, new=None, left=10, button=True):
+    def __init__(self, monkeypatch, names, new=None, left=10, button=True, armed=True):
         self.names = list(names)
+        self.armed = armed  # CANCEL shown (banish mode) whenever the pilot looks
         self.new = list(new) if new is not None else [True] * len(names)
         self.left = left
         self.button = button
         monkeypatch.setattr(menus, "read_cards", self.read_cards)
         monkeypatch.setattr(menus, "read_banish_button", self.read_button)
+        monkeypatch.setattr(menus, "read_cancel_button", lambda f: CANCEL_CENTER if self.armed else None)
 
     def read_cards(self, frame, screen):
         for c, n, nw in zip(screen.cards, self.names, self.new):
@@ -137,7 +159,7 @@ def make_pilot(clock, logs, **kw):
     taps: list[str] = []
     pilot = MenuPilot(
         tap=taps.append, clock=clock, async_chest=False, click=lambda x, y: clicks.append((x, y)),
-        log=logs.append, game_clock=lambda: 120.0, **kw,
+        log=logs.append, game_clock=lambda: 120.0, **{"stage": "mad_forest", **kw},
     )
     return pilot, clicks, taps
 
@@ -164,7 +186,7 @@ def test_new_pentagram_on_mad_forest_is_banished_then_normal_pick(monkeypatch):
     assert clicks[1] == center(screen.cards[1])  # the Pentagram card, nothing else
     assert len(clicks) == 2
     # The game removes Pentagram and keeps the menu open (Jul 2026 update).
-    game.names[1], game.left = "Clover", 9
+    game.names[1], game.left, game.armed = "Clover", 9, False
     run(pilot, clock, frame, screen, n=8)
     assert pilot.banished == {"Pentagram"}
     assert any(m.startswith("[levelup] BANISH Pentagram verified") and "10 -> 9" in m for m in logs)
@@ -203,20 +225,65 @@ def test_no_uses_or_no_button_falls_back_to_a_normal_pick(monkeypatch, left, but
     assert taps == []
 
 
-def test_failed_banish_only_ever_clicks_pentagram_then_picks_normally(monkeypatch):
+def test_failed_banish_cancels_then_picks_normally(monkeypatch):
     frame = load("levelup_4cards_sel4.png")
     screen = detect_level_up(frame)
-    Game(monkeypatch, ["Knife", "Pentagram", "Lightning Ring", "Stone Mask"])  # never goes away
+    game = Game(monkeypatch, ["Knife", "Pentagram", "Lightning Ring", "Stone Mask"])  # never goes away
     clock, logs = FakeClock(), []
     pilot, clicks, _ = make_pilot(clock, logs)
-    run(pilot, clock, frame, screen, n=25)
+    while len(clicks) < 4:
+        run(pilot, clock, frame, screen, n=1)
     pent = center(screen.cards[1])
-    assert clicks[:3] == [BTN_CENTER, pent, pent]
-    assert any("BANISH Pentagram failed" in m for m in logs)
-    assert pilot._banish_fails == 1
-    # Then only normal picks (the fake screen never closes, so the pick repeats), no 2nd banish.
-    assert len(clicks) > 3 and set(clicks[3:]) == {center(screen.cards[2])}
+    assert clicks == [BTN_CENTER, pent, pent, CANCEL_CENTER]  # never a card while armed
+    game.armed = False  # CANCEL worked: back on the normal level-up
+    run(pilot, clock, frame, screen, n=12)
+    assert pilot._banish_fails == 1 and not pilot.finished
+    assert len(clicks) > 4 and set(clicks[4:]) == {center(screen.cards[2])}
     assert sum(in_banish_button(*c) for c in clicks) == 1
+
+
+def test_armed_without_pentagram_cancels_and_never_picks(monkeypatch):
+    frame = load("levelup_4cards_sel4.png")
+    screen = detect_level_up(frame)
+    game = Game(monkeypatch, ["Knife", "Pentagram", "Lightning Ring", "Stone Mask"])
+    clock, logs = FakeClock(), []
+    pilot, clicks, _ = make_pilot(clock, logs)
+    while not clicks:
+        run(pilot, clock, frame, screen, n=1)
+    game.names[1] = ""  # armed screen, Pentagram not read
+    while len(clicks) < 2:
+        run(pilot, clock, frame, screen, n=1)
+    assert clicks == [BTN_CENTER, CANCEL_CENTER]
+    game.armed = False
+    run(pilot, clock, frame, screen, n=12)
+    assert set(clicks[2:]) == {center(screen.cards[2])} and not pilot.finished
+
+
+def test_cancel_not_confirmed_stops_the_run(monkeypatch):
+    frame = load("levelup_4cards_sel4.png")
+    screen = detect_level_up(frame)
+    game = Game(monkeypatch, ["Knife", "Pentagram", "Lightning Ring", "Stone Mask"])
+    clock, logs = FakeClock(), []
+    pilot, clicks, _ = make_pilot(clock, logs)
+    while not clicks:
+        run(pilot, clock, frame, screen, n=1)
+    game.names[1] = ""
+    run(pilot, clock, frame, screen, n=12)  # CANCEL never takes effect
+    assert clicks == [BTN_CENTER, CANCEL_CENTER]
+    assert pilot.finished and any("stopping the run" in m for m in logs)
+
+
+def test_banish_click_that_did_not_arm_never_clicks_pentagram(monkeypatch):
+    frame = load("levelup_4cards_sel4.png")
+    screen = detect_level_up(frame)
+    Game(monkeypatch, ["Knife", "Pentagram", "Lightning Ring", "Stone Mask"], armed=False)
+    clock, logs = FakeClock(), []
+    pilot, clicks, _ = make_pilot(clock, logs)
+    run(pilot, clock, frame, screen, n=12)
+    assert clicks[0] == BTN_CENTER
+    assert center(screen.cards[1]) not in clicks
+    assert set(clicks[1:]) == {center(screen.cards[2])}  # normal avoid-rule pick
+    assert any("banish mode not seen" in m for m in logs)
 
 
 @pytest.mark.parametrize("name", [n for n in menus.VOCAB if n != "Pentagram"])

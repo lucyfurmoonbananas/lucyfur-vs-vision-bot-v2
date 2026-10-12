@@ -102,7 +102,7 @@ and press `q`.
   Peachone, Ebony Wings, Lightning Ring, Duplicator, Cross, Armor, Clover,
   Spinach, ...), moves the selection with Up/Down and confirms with Enter.
   Reroll / Skip are never pressed, and Banish only for one exception: on Mad
-  Forest (`VS_STAGE`, default `mad_forest`) a NEW Pentagram card is banished
+  Forest (only when `VS_STAGE=mad_forest`) a NEW Pentagram card is banished
   (mouse: BANISH button, then the Pentagram card; verified by OCR; falls back
   to a normal pick when no uses are left or it fails). Maxed builds: Floor Chicken when HP
   is under ~60%, else the coin bag. Without tesseract it takes the first card.
