@@ -1117,7 +1117,7 @@ class MenuPilot:
                 self._end_banish(failed=True)
                 return
             card = screen.cards[idx]
-            if state["card_clicks"] >= BANISH_MAX_CARD_CLICKS or not banish_allowed(card, self.stage):
+            if state["card_clicks"] >= BANISH_MAX_CARD_CLICKS:
                 self.log(
                     f"[levelup] BANISH Pentagram failed: still offered after {state['card_clicks']} clicks, "
                     f"cards={names}; normal pick"

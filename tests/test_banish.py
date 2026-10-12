@@ -259,3 +259,20 @@ def test_new_run_forgets_banishes(monkeypatch):
     pilot._banish_fails = 2
     pilot.new_run()
     assert not pilot.banished and pilot._banish_fails == 0
+
+
+def test_armed_banish_still_clicks_pentagram_when_its_reread_is_less_confident(monkeypatch):
+    # Oct 11 live read Pentagram at 0.89 (min 0.85). A dip on the armed re-read must not fall
+    # back to a normal pick: with BANISH armed, that click banishes the other card.
+    frame = load("levelup_4cards_sel4.png")
+    screen = detect_level_up(frame)
+    Game(monkeypatch, ["Knife", "Pentagram", "Lightning Ring", "Stone Mask"])
+    clock, logs = FakeClock(), []
+    pilot, clicks, _ = make_pilot(clock, logs)
+    while not clicks:
+        run(pilot, clock, frame, screen, n=1)
+    assert clicks == [BTN_CENTER]
+    read = menus.read_cards
+    monkeypatch.setattr(menus, "read_cards", lambda f, s: [setattr(c, "score", 0.84) for c in read(f, s).cards] and s)
+    run(pilot, clock, frame, screen, n=8)
+    assert clicks[1] == center(screen.cards[1])
