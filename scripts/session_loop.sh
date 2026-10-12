@@ -36,13 +36,21 @@ while true; do
     echo "[$(date)] cutoff (no new runs at/after $CUTOFF_HHMM)" | tee -a "$SESSION/loop_outer.log"
     break
   fi
-  echo "[$(date)] launching run $RUN" | tee -a "$SESSION/loop_outer.log"
+  # Laurel A/B (bd85a14): odd runs VS_LAUREL_DAMAGE=0 (new Laurel out of the damage tier),
+  # even runs unset (current behaviour). VS_LAUREL_AB=off disables the alternation.
+  if [ "${VS_LAUREL_AB:-on}" != off ] && [ $((RUN % 2)) -eq 1 ]; then
+    export VS_LAUREL_DAMAGE=0; LAUREL_VARIANT="B (VS_LAUREL_DAMAGE=0)"
+  else
+    unset VS_LAUREL_DAMAGE; LAUREL_VARIANT="A (VS_LAUREL_DAMAGE unset)"
+  fi
+  echo "[$(date)] launching run $RUN laurel=$LAUREL_VARIANT" | tee -a "$SESSION/loop_outer.log"
   "$SESSION/play_run.sh" "$RUN" >> "$SESSION/loop_outer.log" 2>&1
   RC=$?
   echo "[$(date)] run $RUN rc=$RC" | tee -a "$SESSION/loop_outer.log"
   {
     echo ""
     echo "### Run $RUN — $(date '+%H:%M CT') rc=$RC"
+    echo "- Laurel variant: $LAUREL_VARIANT"
     [ "$RC" -eq 3 ] && echo "- Watchdog ended the run; game relaunched$( [ -f "$SESSION/run${RUN}_guard.txt" ] && echo " (guard: $(cat "$SESSION/run${RUN}_guard.txt"))")"
     [ -f "$SESSION/run${RUN}_char.txt" ] && echo "- Character: $(cat "$SESSION/run${RUN}_char.txt")"
     [ -f "$SESSION/run${RUN}_revives.txt" ] && echo "- Revives: $(cat "$SESSION/run${RUN}_revives.txt")"
