@@ -45,10 +45,10 @@ def test_engage_pull_points_at_enemy_and_gates():
     pull = engage_pull(LEFT_ARR, *P, here=0.1, hp=1.0, tune=t)
     assert DIRS[int(np.argmax(pull))] == (-1, 0)
     assert pull[DIRS.index((1, 0))] < 0
-    # Gates: unknown / low HP, danger at/above engage_danger, gain 0, nothing in range.
+    # Gates: unknown / low HP, danger at/above safe_danger, gain 0, nothing in range.
     assert not engage_pull(LEFT_ARR, *P, here=0.1, hp=None, tune=t).any()
     assert not engage_pull(LEFT_ARR, *P, here=0.1, hp=t.early_engage_hp - 0.01, tune=t).any()
-    assert not engage_pull(LEFT_ARR, *P, here=t.engage_danger, hp=1.0, tune=t).any()
+    assert not engage_pull(LEFT_ARR, *P, here=t.safe_danger, hp=1.0, tune=t).any()
     assert not engage_pull(LEFT_ARR, *P, here=0.1, hp=1.0, tune=replace(t, engage_gain=0.0)).any()
     touching = np.array([(P[0] - 20.0, P[1], 0.22)], dtype=np.float32)  # inside standoff
     far = np.array([(P[0] - 400.0, P[1], 0.22)], dtype=np.float32)  # beyond engage_radius
@@ -56,7 +56,7 @@ def test_engage_pull_points_at_enemy_and_gates():
     assert not engage_pull(far, *P, here=0.1, hp=1.0, tune=t).any()
     # Fades with danger.
     lo = engage_pull(LEFT_ARR, *P, here=0.1, hp=1.0, tune=t).max()
-    hi = engage_pull(LEFT_ARR, *P, here=1.2, hp=1.0, tune=t).max()
+    hi = engage_pull(LEFT_ARR, *P, here=0.4, hp=1.0, tune=t).max()
     assert 0 < hi < lo
 
 
@@ -101,3 +101,17 @@ def test_navigator_engages_early_not_later_and_not_in_breakout():
     ref_b = boff.step(result(LEFT), hp=1.0)
     assert bon.mode.startswith("breakout")
     assert bon.scores == ref_b.scores
+
+
+def test_engage_gated_below_safe_danger():
+    t = replace(Tuning(), engage_gain=1.2)
+    assert engage_pull(LEFT_ARR, *P, here=t.safe_danger * 0.5, hp=1.0, tune=t).any()
+    assert not engage_pull(LEFT_ARR, *P, here=t.safe_danger + 0.5, hp=1.0, tune=t).any()
+
+
+def test_direct_engage_gain_respects_time_limit():
+    t = tuning_from_env("engage_gain=1.0", log=lambda *_: None)
+    assert gem_tune_for(t, 30.0).engage_gain > 0
+    assert gem_tune_for(t, t.early_engage_until_s).engage_gain == 0.0
+    off = tuning_from_env("engage_gain=1.0,early_engage_until_s=0", log=lambda *_: None)
+    assert gem_tune_for(off, 30.0).engage_gain == 0.0

@@ -159,23 +159,13 @@ class Tuning:
     early_gem_until_s: float = 280.0
     early_gem_gain: float = 3.2       # vs gem_gain 1.6 (was 2.8; Oct 11 still under-leveled into flower)
     early_gem_radius: float = 460.0   # vs gem_radius 300; was 420 — reach gems left in the wake
-    # Early Garlic engagement (Oct 12 day+day2 logs, 13 runs): in game 0-120 s HP read
-    # 1.00 in 97 % of samples, gems on screen averaged ~0.1 and the first level-up came
-    # at 60-130 s (median ~79 s), Lv2-3 at 2:00. Poe's only early weapon is Garlic, and
-    # wide-circle kiting kept every enemy outside its aura, so nothing died and no XP
-    # dropped. Before early_engage_until_s, while HP >= early_engage_hp and danger here
-    # is below safe_danger, score_directions adds a pull toward on-screen enemies
-    # (between engage_standoff and engage_radius px) that fades to 0 as danger rises;
-    # contact/danger terms still veto walking into bodies. engage_gain is the live knob
-    # (0 = off); gem_tune_for sets it from early_engage_gain. VS_TUNE=early_engage_until_s=0
-    # (or early_engage_gain=0) disables.
+    # Early Garlic engage: before early_engage_until_s, HP >= early_engage_hp and danger < safe_danger, pull toward enemies.
     engage_gain: float = 0.0
     early_engage_until_s: float = 150.0
     early_engage_gain: float = 1.2
     early_engage_hp: float = 0.8
     engage_radius: float = 260.0
     engage_standoff: float = 34.0
-    engage_danger: float = 1.6        # pull fades to 0 at this danger-here (= gem_danger; sim: 0.6 gave +0 kills, 1.6 +19 %)
     # Man-eater flower ring (~4:40–6:00): HP can drop 1.0→0.1 in 2–3 s.
     hp_crash_delta: float = -0.3       # peak-to-now drop that counts as crashing
     hp_crash_window_s: float = 1.5     # look-back for that drop
@@ -205,8 +195,10 @@ def gem_tune_for(tune: Tuning, game_s: float) -> Tuning:
     over: dict[str, float] = {}
     if tune.early_gem_until_s > 0 and game_s < tune.early_gem_until_s:
         over.update(gem_gain=tune.early_gem_gain, gem_radius=tune.early_gem_radius)
-    if tune.early_engage_until_s > 0 and game_s < tune.early_engage_until_s and tune.early_engage_gain > 0:
-        over["engage_gain"] = tune.early_engage_gain
+    if tune.early_engage_until_s > 0 and game_s < tune.early_engage_until_s:
+        over["engage_gain"] = tune.early_engage_gain or tune.engage_gain
+    elif tune.engage_gain:
+        over["engage_gain"] = 0.0
     return replace(tune, **over) if over else tune
 
 
@@ -394,14 +386,14 @@ def engage_pull(
     """Early Garlic engagement: per-direction bonus toward nearby enemies.
 
     Zero unless ``tune.engage_gain`` > 0, HP is known and >= ``early_engage_hp``, and
-    the danger here is below ``engage_danger`` (fades linearly to 0 at it). Only points
+    the danger here is below ``safe_danger`` (fades linearly to 0 at it). Only points
     between ``engage_standoff`` and ``engage_radius`` px pull, closer ones more, so the
     player lets weak early enemies into the aura instead of out-running them.
     """
     out = np.zeros(len(DIRS), dtype=np.float32)
-    if tune.engage_gain <= 0 or hp is None or hp < tune.early_engage_hp or tune.engage_danger <= 0:
+    if tune.engage_gain <= 0 or hp is None or hp < tune.early_engage_hp or tune.safe_danger <= 0:
         return out
-    fade = 1.0 - here / tune.engage_danger
+    fade = 1.0 - here / tune.safe_danger
     if fade <= 0 or pts.shape[0] == 0:
         return out
     rel = pts[:, :2] - np.array([px, py], dtype=np.float32)
