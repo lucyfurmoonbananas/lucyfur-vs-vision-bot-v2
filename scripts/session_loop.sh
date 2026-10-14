@@ -31,6 +31,8 @@ if [ -z "${VS_SKIP_PREFLIGHT:-}" ] && [ -x "$PREFLIGHT" ]; then
 fi
 RUN=1
 FAILS=0
+BASE_TUNE=${VS_TUNE:-}
+METRICS=${VS_METRICS:-$SESSION/run_metrics.py}
 while true; do
   if cutoff_reached; then
     echo "[$(date)] cutoff (no new runs at/after $CUTOFF_HHMM)" | tee -a "$SESSION/loop_outer.log"
@@ -43,7 +45,16 @@ while true; do
   else
     unset VS_LAUREL_DAMAGE; LAUREL_VARIANT="A (VS_LAUREL_DAMAGE unset)"
   fi
-  echo "[$(date)] launching run $RUN laurel=$LAUREL_VARIANT" | tee -a "$SESSION/loop_outer.log"
+  # Early-engage A/B (171d133, Bob's Oct 13 plan), crossed with Laurel so both stay balanced:
+  # runs 1,2 engage ON, runs 3,4 OFF (VS_TUNE early_engage_until_s=0), repeat. Any VS_TUNE the
+  # caller set is kept. VS_ENGAGE_AB=off disables it.
+  if [ "${VS_ENGAGE_AB:-on}" != off ] && [ $(( ((RUN - 1) / 2) % 2 )) -eq 1 ]; then
+    export VS_TUNE="${BASE_TUNE:+$BASE_TUNE,}early_engage_until_s=0"; ENGAGE_VARIANT="OFF (early_engage_until_s=0)"
+  else
+    if [ -n "$BASE_TUNE" ]; then export VS_TUNE="$BASE_TUNE"; else unset VS_TUNE; fi
+    ENGAGE_VARIANT="ON (default)"
+  fi
+  echo "[$(date)] launching run $RUN laurel=$LAUREL_VARIANT engage=$ENGAGE_VARIANT" | tee -a "$SESSION/loop_outer.log"
   "$SESSION/play_run.sh" "$RUN" >> "$SESSION/loop_outer.log" 2>&1
   RC=$?
   echo "[$(date)] run $RUN rc=$RC" | tee -a "$SESSION/loop_outer.log"
@@ -51,6 +62,10 @@ while true; do
     echo ""
     echo "### Run $RUN — $(date '+%H:%M CT') rc=$RC"
     echo "- Laurel variant: $LAUREL_VARIANT"
+    echo "- Early engage: $ENGAGE_VARIANT"
+    if [ -f "$METRICS" ] && [ -f "$SESSION/run${RUN}.log" ]; then
+      echo "- Early levelling: $(python3 "$METRICS" "$SESSION/run${RUN}.log" 2>/dev/null | tr '\n' ' ')"
+    fi
     [ "$RC" -eq 3 ] && echo "- Watchdog ended the run; game relaunched$( [ -f "$SESSION/run${RUN}_guard.txt" ] && echo " (guard: $(cat "$SESSION/run${RUN}_guard.txt"))")"
     [ -f "$SESSION/run${RUN}_char.txt" ] && echo "- Character: $(cat "$SESSION/run${RUN}_char.txt")"
     [ -f "$SESSION/run${RUN}_revives.txt" ] && echo "- Revives: $(cat "$SESSION/run${RUN}_revives.txt")"

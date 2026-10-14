@@ -561,7 +561,7 @@ start_bot(){
   rm -f "$BOT_FIFO"
   mkfifo "$BOT_FIFO"
   exec 9<>"$BOT_FIFO"
-  log "bot env VS_STAGE=${VS_STAGE:-} VS_LAUREL_DAMAGE=${VS_LAUREL_DAMAGE-<unset>}"
+  log "bot env VS_STAGE=${VS_STAGE:-} VS_LAUREL_DAMAGE=${VS_LAUREL_DAMAGE-<unset>} VS_TUNE=${VS_TUNE-<unset>}"
   nohup ./run.sh < "$BOT_FIFO" > "$LOG" 2>&1 &
   echo $! > "$BOT_PIDFILE"
   for i in $(seq 1 50); do grep -q 'STARTED PAUSED' "$LOG" 2>/dev/null && break; sleep 0.3; done

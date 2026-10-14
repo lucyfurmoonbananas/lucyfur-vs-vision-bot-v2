@@ -167,3 +167,29 @@ def test_session_loop_still_stops_after_8_real_failures(box):
     md = _loop(env, session)
     assert "too many consecutive failures (8)" in md
     assert "### Run 9" in md and "### Run 10" not in md
+
+
+def test_session_loop_crosses_early_engage_ab_with_laurel(box):
+    _tmp, session, env = box
+    (session / "play_run.sh").write_text(
+        "#!/bin/bash\n"
+        '[ "$1" -le 4 ] || exit 2\n'
+        'echo "$1 tune=${VS_TUNE-<unset>} laurel=${VS_LAUREL_DAMAGE-<unset>}" >> "$VS_SESSION/envs.txt"\n'
+        'echo "[levelup] cards=[\'Whip\'] new=[True] -> pick #1 Whip (hp=1.0, weapons=1, game~=50s)" > "$VS_SESSION/run$1.log"\n'
+        'echo "[levelup] picked #1 Whip (total picks 1)" >> "$VS_SESSION/run$1.log"\n'
+        "exit 0\n"
+    )
+    (session / "play_run.sh").chmod(0o755)
+    shutil.copy(SESSION_LOOP, session / "session_loop.sh")
+    shutil.copy(ROOT / "scripts" / "run_metrics.py", session / "run_metrics.py")
+    md = _loop(dict(env, VS_TUNE="ring_commit_s=2.5"), session)
+    envs = (session / "envs.txt").read_text().splitlines()
+    assert envs == [
+        "1 tune=ring_commit_s=2.5 laurel=0",
+        "2 tune=ring_commit_s=2.5 laurel=<unset>",
+        "3 tune=ring_commit_s=2.5,early_engage_until_s=0 laurel=0",
+        "4 tune=ring_commit_s=2.5,early_engage_until_s=0 laurel=<unset>",
+    ]
+    # run 5 (rc 2, the stub cutoff) is logged too, as ON
+    assert md.count("- Early engage: ON") == 3 and md.count("- Early engage: OFF") == 2
+    assert "first_levelup_s=50" in md and "lv_at_120=2" in md
