@@ -75,7 +75,6 @@ function Invoke-TaskAsAdministrator {
         )
         Write-Verbose "Executing: '$BuildScriptPath' $TaskName -TaskArgs $(ConvertTo-PSString $TaskArgs) -SkipDependencies @$(ConvertTo-PSString $ExtraScriptArgs)"
         try {
-            $LastTaskContext = $null
             & $BuildScriptPath -TaskName $TaskName -TaskArgs $TaskArgs -SkipDependencies @ExtraScriptArgs
         }
         finally {
