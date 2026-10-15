@@ -159,11 +159,19 @@ class Tuning:
     early_gem_until_s: float = 280.0
     early_gem_gain: float = 3.2       # vs gem_gain 1.6 (was 2.8; Oct 11 still under-leveled into flower)
     early_gem_radius: float = 460.0   # vs gem_radius 300; was 420 — reach gems left in the wake
-    # Early Garlic engage: before early_engage_until_s, HP >= early_engage_hp and danger < safe_danger, pull toward enemies.
+    # Early Garlic engage: before early_engage_until_s, HP >= early_engage_hp, danger < safe_danger
+    # and no gems waiting to be collected (early_engage_max_gems), pull toward enemies.
     engage_gain: float = 0.0
     early_engage_until_s: float = 150.0
     early_engage_gain: float = 1.2
     early_engage_hp: float = 0.8
+    # Gems first, then hunt: the engage pull is off while more than this many gems are
+    # within gem_radius (early_gem_radius before 280 s). Oct 14 live A/B (10 runs): engage
+    # ON first level-up median ~81 s, lv@2:00 = 2 and only 0.3-0.9 gems on screen on
+    # average vs OFF ~56 s, lv@2:00 = 3-5, 2-7 gems. Hypothesis: walking at the crowd
+    # overrules the gem pull and leaves drops behind, so gems take priority here.
+    # -1 disables the gate (engage regardless of gems).
+    early_engage_max_gems: int = 0
     engage_radius: float = 260.0
     engage_standoff: float = 34.0
     # Man-eater flower ring (~4:40–6:00): HP can drop 1.0→0.1 in 2–3 s.
@@ -380,8 +388,17 @@ def rollout_costs(
     return (c1 + c2.min(axis=1)) / tune.rollout_steps
 
 
+def gems_in_range(gems, px: float, py: float, radius: float) -> int:
+    """Number of gem positions within ``radius`` px of the player (None / empty -> 0)."""
+    if not gems:
+        return 0
+    g = np.asarray(gems, dtype=np.float32).reshape(-1, 2)
+    return int((np.hypot(g[:, 0] - px, g[:, 1] - py) < radius).sum())
+
+
 def engage_pull(
     pts: np.ndarray, px: float, py: float, here: float, hp: float | None, tune: Tuning,
+    gems=None,
 ) -> np.ndarray:
     """Early Garlic engagement: per-direction bonus toward nearby enemies.
 
@@ -389,9 +406,13 @@ def engage_pull(
     the danger here is below ``safe_danger`` (fades linearly to 0 at it). Only points
     between ``engage_standoff`` and ``engage_radius`` px pull, closer ones more, so the
     player lets weak early enemies into the aura instead of out-running them.
+    Gems first: also zero while more than ``early_engage_max_gems`` gems are within
+    ``gem_radius`` (the gem pull collects them; engage resumes once they are picked up).
     """
     out = np.zeros(len(DIRS), dtype=np.float32)
     if tune.engage_gain <= 0 or hp is None or hp < tune.early_engage_hp or tune.safe_danger <= 0:
+        return out
+    if tune.early_engage_max_gems >= 0 and gems_in_range(gems, px, py, tune.gem_radius) > tune.early_engage_max_gems:
         return out
     fade = 1.0 - here / tune.safe_danger
     if fade <= 0 or pts.shape[0] == 0:
@@ -470,7 +491,7 @@ def score_directions(
             scores = scores + tune.gem_gain * gem_scale * np.clip(pull, -1.5, 1.5)
 
     if tune.engage_gain > 0 and pts.shape[0]:
-        scores = scores + engage_pull(pts, px, py, here, hp, tune)
+        scores = scores + engage_pull(pts, px, py, here, hp, tune, gems=gems)
 
     if current in DIRS:
         scores[DIRS.index(current)] += tune.hysteresis * (1.0 - 0.6 * panic)
