@@ -194,17 +194,37 @@ launch_vs(){
   fi
 }
 
+# restart_steam: shut the (wedged) Steam client down so the next launch_vs starts a fresh one.
+# Oct 15 3 AM runs 4-7: a network blip made Steam Cloud sync fail at launch and Steam sat on
+# "LaunchApp waiting for user response to SynchronizingCloud 'syncfailed'" (a modal dialog).
+# The client process stayed up, so ensure_steam never restarted it and every -applaunch
+# queued behind the dialog: 4 runs x 3 min NO_WINDOW (rc=1) until Steam was restarted.
+restart_steam(){
+  local i
+  log "STEAM_RESTART: no game window after $1 tries with Steam up (wedged client / cloud-sync dialog?)"
+  timeout -k 2 20 "$STEAM_SH" -shutdown >/tmp/steam_shutdown.log 2>&1 || true
+  for i in $(seq 1 10); do steam_up || break; sleep "$WAIT_SLEEP_S"; done
+  steam_up && { $PKILL -KILL -f 'ubuntu12_32/steam' 2>/dev/null || true; sleep 1; }
+  return 0
+}
+
 # wait_window TRIES [URI]: poll ~2 s per try for the game window, re-issuing the launch every ~20 s.
+# After STEAM_RESTART_AT tries (~80 s) without a window, restart the Steam client once.
+WAIT_SLEEP_S=${VS_WAIT_SLEEP_S:-2}
+STEAM_RESTART_AT=${VS_STEAM_RESTART_AT:-40}   # 0 disables
 wait_window(){
   local i W
   for i in $(seq 1 "$1"); do
     W=$(get_win || true)
     [ -n "${W:-}" ] && return 0
-    if [ $((i % 10)) -eq 0 ]; then
+    if [ "$STEAM_RESTART_AT" -gt 0 ] && [ "$i" -eq "$STEAM_RESTART_AT" ]; then
+      restart_steam "$i"
+      launch_vs "${2:-}" || true
+    elif [ $((i % 10)) -eq 0 ]; then
       log "relaunch steam attempt $i"
       launch_vs "${2:-}" || true
     fi
-    sleep 2
+    sleep "$WAIT_SLEEP_S"
   done
   return 1
 }

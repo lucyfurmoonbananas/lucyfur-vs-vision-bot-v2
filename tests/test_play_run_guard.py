@@ -38,7 +38,12 @@ STUBS = {
         printf '  Width: 960\\n  Height: 540\\n'
     """,
     "scrot": 'echo "scrot $*" >> "$STUB_LOG"; exit 1',
-    "steam.sh": 'echo "steam.sh $*" >> "$STUB_LOG"; touch "$STUB_DIR/win_up"',
+    # STUB_WEDGED=1: launches do nothing until "steam.sh -shutdown" (a wedged client).
+    "steam.sh": """
+        echo "steam.sh $*" >> "$STUB_LOG"
+        if [ "$1" = -shutdown ]; then touch "$STUB_DIR/restarted"; exit 0; fi
+        if [ -z "${STUB_WEDGED:-}" ] || [ -f "$STUB_DIR/restarted" ]; then touch "$STUB_DIR/win_up"; fi
+    """,
     "pkill": 'echo "pkill $*" >> "$STUB_LOG"; exit 0',
     "pgrep": "exit 1",
     # Pretend the Steam client is up; everything else is the real ps.
@@ -123,6 +128,34 @@ def test_silent_run_is_killed_and_the_game_relaunched(box):
     pid = int((tmp_path / "inner.pid").read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)  # the hung run (and its process group) is gone
+
+
+def test_wedged_steam_is_restarted_when_no_window_appears(box):
+    """Oct 15 3 AM: Steam up but stuck on a cloud-sync dialog -> restart it, then the game comes up."""
+    tmp_path, session, env = box
+    inner = 'echo "[x] r$1 boot" >> "$VS_SESSION/loop.log"; sleep 1000'
+    res = _play(
+        env, inner=inner, VS_LOG_SILENCE_LIMIT_S="3", VS_RUN_WALL_LIMIT_S="300",
+        STUB_WEDGED="1", VS_WAIT_SLEEP_S="0.1", VS_STEAM_RESTART_AT="5",
+    )
+    assert res.returncode == 3, res.stdout + res.stderr
+    log = (session / "loop.log").read_text()
+    assert "STEAM_RESTART" in log
+    assert "RECOVER done" in log
+    calls = _calls(tmp_path)
+    assert "steam.sh -shutdown" in calls
+    assert "pkill -KILL -f ubuntu12_32/steam" in calls  # stub ps keeps "Steam up" -> forced kill
+    assert calls.index("steam.sh -shutdown") < calls.rindex("steam.sh steam://rungameid/1794680")
+
+
+def test_no_steam_restart_when_window_comes_up(box):
+    tmp_path, session, env = box
+    inner = 'echo "[x] r$1 boot" >> "$VS_SESSION/loop.log"; sleep 1000'
+    res = _play(env, inner=inner, VS_LOG_SILENCE_LIMIT_S="3", VS_RUN_WALL_LIMIT_S="300",
+                VS_WAIT_SLEEP_S="0.1", VS_STEAM_RESTART_AT="5")
+    assert res.returncode == 3
+    assert "STEAM_RESTART" not in (session / "loop.log").read_text()
+    assert "-shutdown" not in _calls(tmp_path)
 
 
 def test_chatty_run_over_the_wall_limit_is_killed(box):
