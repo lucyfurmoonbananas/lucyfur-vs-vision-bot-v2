@@ -14,7 +14,8 @@ Per frame, every one of the 8 WASD directions is scored:
   (Lucyfur's "wide circles": herd the swarm behind you instead of running into
   one side). With no crowd the heading keeps rotating, so the character walks
   big loops and never stands idle in the open.
-* gems    - pull toward blue XP gems when nothing is close (stronger / farther before the flower).
+* gems    - pull toward blue XP gems when nothing is close (stronger / farther before the flower),
+  plus, early, a non-cancelling pull at one target gem (densest clump per distance).
 * inertia - hysteresis: the current direction gets a bonus and a minimum
   dwell time so the chord does not jitter frame to frame.
 
@@ -159,6 +160,18 @@ class Tuning:
     early_gem_until_s: float = 280.0
     early_gem_gain: float = 3.2       # vs gem_gain 1.6 (was 2.8; Oct 11 still under-leveled into flower)
     early_gem_radius: float = 460.0   # vs gem_radius 300; was 420 — reach gems left in the wake
+    # Gem target (Oct 16, from Oct 14-15 logs, 19 runs): at game 200-280 s 4-25 gems sat on
+    # screen on average even in samples with danger < 0.8, so the summed gem pull is not
+    # collecting them. That pull is a sum of unit vectors weighted 1/(1+d/80): a gem 300 px
+    # away adds ~0.2, and gems scattered around the wide-circle trail cancel out, so the
+    # kite bias (1.0) + hysteresis (0.35) win. On top of it, aim at ONE gem: the one with
+    # the most gems within gem_cluster_r per distance (score count / (1 + d/150)), with a
+    # pull that does not decay with distance or cancel. Same gates as the gem pull (inside
+    # gem_radius, fades with gem_danger, off at low HP / in flee-escapes). Only before
+    # early_gem_until_s via gem_tune_for (late game unchanged). 0 disables.
+    early_gem_target_gain: float = 1.4
+    gem_target_gain: float = 0.0      # base (late) value; gem_tune_for swaps in the early one
+    gem_cluster_r: float = 70.0
     # Early Garlic engage: before early_engage_until_s, HP >= early_engage_hp, danger < safe_danger
     # and no gems waiting to be collected (early_engage_max_gems), pull toward enemies.
     engage_gain: float = 0.0
@@ -202,7 +215,10 @@ def gem_tune_for(tune: Tuning, game_s: float) -> Tuning:
     """
     over: dict[str, float] = {}
     if tune.early_gem_until_s > 0 and game_s < tune.early_gem_until_s:
-        over.update(gem_gain=tune.early_gem_gain, gem_radius=tune.early_gem_radius)
+        over.update(
+            gem_gain=tune.early_gem_gain, gem_radius=tune.early_gem_radius,
+            gem_target_gain=tune.early_gem_target_gain,
+        )
     if tune.early_engage_until_s > 0 and game_s < tune.early_engage_until_s:
         over["engage_gain"] = tune.early_engage_gain or tune.engage_gain
     elif tune.engage_gain:
@@ -396,6 +412,25 @@ def gems_in_range(gems, px: float, py: float, radius: float) -> int:
     return int((np.hypot(g[:, 0] - px, g[:, 1] - py) < radius).sum())
 
 
+def gem_target(gems, px: float, py: float, radius: float, cluster_r: float) -> tuple[float, float] | None:
+    """Gem to walk to: most gems within ``cluster_r`` of it per distance, inside ``radius``.
+
+    Score = cluster count / (1 + d / 150): a near single gem beats a far one, a clump of
+    gems a bit farther beats a lone near one. None when no gem is within ``radius``.
+    """
+    if gems is None or len(gems) == 0:
+        return None
+    g = np.asarray(gems, dtype=np.float32).reshape(-1, 2)
+    d = np.hypot(g[:, 0] - px, g[:, 1] - py)
+    g, d = g[d < radius], d[d < radius]
+    if g.shape[0] == 0:
+        return None
+    pair = np.hypot(g[:, None, 0] - g[None, :, 0], g[:, None, 1] - g[None, :, 1])
+    count = (pair < cluster_r).sum(axis=1).astype(np.float32)
+    i = int(np.argmax(count / (1.0 + d / 150.0)))
+    return float(g[i, 0]), float(g[i, 1])
+
+
 def engage_pull(
     pts: np.ndarray, px: float, py: float, here: float, hp: float | None, tune: Tuning,
     gems=None,
@@ -489,6 +524,15 @@ def score_directions(
                 d = math.hypot(vx, vy) or 1.0
                 pull += (_UNIT[:, 0] * vx / d + _UNIT[:, 1] * vy / d) / (1.0 + d / 80.0)
             scores = scores + tune.gem_gain * gem_scale * np.clip(pull, -1.5, 1.5)
+            if tune.gem_target_gain > 0:
+                tgt = gem_target(close, px, py, tune.gem_radius, tune.gem_cluster_r)
+                if tgt is not None:
+                    vx, vy = tgt[0] - px, tgt[1] - py
+                    d = math.hypot(vx, vy)
+                    if d > 1e-3:
+                        scores = scores + tune.gem_target_gain * gem_scale * (
+                            _UNIT[:, 0] * vx / d + _UNIT[:, 1] * vy / d
+                        )
 
     if tune.engage_gain > 0 and pts.shape[0]:
         scores = scores + engage_pull(pts, px, py, here, hp, tune, gems=gems)

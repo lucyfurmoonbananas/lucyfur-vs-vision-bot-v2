@@ -19,11 +19,13 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from vs_vision_bot.pathfind import Navigator, choose_vector  # noqa: E402
+from vs_vision_bot.pathfind import Navigator, Tuning, choose_vector, tuning_from_env  # noqa: E402
 from vs_vision_bot.vision import Detection, VisionResult  # noqa: E402
 
 W, H = 960, 540
 PX, PY = 480, 256
+PICKUP = 30.0   # gem pickup radius (reference px)
+WAND_S = 1.0    # wand-like weapon period once the first level-up proxy is reached
 
 
 def legacy_vector(dets: list[Detection], last: tuple[int, int]) -> tuple[int, int]:
@@ -44,22 +46,36 @@ def legacy_vector(dets: list[Detection], last: tuple[int, int]) -> tuple[int, in
     return best
 
 
-def simulate(policy: str, seconds: float, seed: int, fps: float = 12.0) -> dict:
+def simulate(policy: str, seconds: float, seed: int, fps: float = 12.0, tune: Tuning | None = None) -> dict:
     rng = random.Random(seed)
     t = 0.0
     dt = 1.0 / fps
     player = np.array([0.0, 0.0])
     enemies: list[list[float]] = []  # x, y, speed, hp
     clock = [0.0]
-    nav = Navigator(clock=lambda: clock[0])
+    nav = Navigator(tune=tune, clock=lambda: clock[0])
     vec = (0, 0)
     damage = 0.0
     kills = 0
     pspeed = 105.0
     death_t = None
+    first5 = None   # early XP proxy: time of the 5th garlic kill (Lv 2 needs ~5 small gems)
+    kills_120 = None
+    # XP gems: every kill drops one where the enemy died; walking within PICKUP px collects
+    # it. After the 5th kill (first level-up proxy) a wand-like weapon kills the nearest
+    # on-screen enemy every WAND_S s, so gems land away from the player (the live pile-up).
+    gems: list[tuple[float, float]] = []
+    xp = 0
+    xp_at: dict[int, int] = {}
+    gems_seen: list[int] = []
+    wand_acc = 0.0
     while t < seconds:
         if death_t is None and damage >= 140.0:
             death_t = t
+        if first5 is None and kills >= 5:
+            first5 = t
+        if kills_120 is None and t >= 120.0:
+            kills_120 = kills
         # Spawn: rate grows over time; bursts every 60 s (bat swarms).
         rate = 2.0 + t / 40.0 + (12.0 if int(t) % 60 < 4 and t > 20 else 0.0)
         for _ in range(np.random.default_rng(rng.randrange(1 << 30)).poisson(rate * dt)):
@@ -79,7 +95,13 @@ def simulate(policy: str, seconds: float, seed: int, fps: float = 12.0) -> dict:
         pts = np.array(
             [(d.cx + ox, d.cy + oy, 0.22) for d in dets for ox in (-6, 6) for oy in (-6, 6)], dtype=np.float32
         ).reshape(-1, 3)
-        res = VisionResult(player=(PX, PY), monsters=dets, threats=pts)
+        vis_gems = [
+            (gx - player[0] + PX, gy - player[1] + PY) for gx, gy in gems
+            if 0 <= gx - player[0] + PX < W and 0 <= gy - player[1] + PY < H
+        ]
+        if 120.0 <= t < 280.0:
+            gems_seen.append(len(vis_gems))
+        res = VisionResult(player=(PX, PY), monsters=dets, threats=pts, gems=vis_gems)
         hp = max(0.0, 1.0 - damage / 70.0)
         if policy == "new":
             vec = nav.step(res, hp=hp).vector
@@ -91,6 +113,13 @@ def simulate(policy: str, seconds: float, seed: int, fps: float = 12.0) -> dict:
             vec = (0, 0)
         n = math.hypot(*vec) or 1.0
         player += np.array(vec) / n * pspeed * dt
+        if first5 is not None and enemies:
+            wand_acc += dt
+            if wand_acc >= WAND_S:
+                wand_acc -= WAND_S
+                on = [e for e in enemies if abs(e[0] - player[0]) < 430 and abs(e[1] - player[1]) < 250]
+                if on:
+                    min(on, key=lambda e: math.hypot(e[0] - player[0], e[1] - player[1]))[3] -= 10.0
         # Enemies chase with a little jitter; overlap resolution.
         alive = []
         for e in enemies:
@@ -105,14 +134,31 @@ def simulate(policy: str, seconds: float, seed: int, fps: float = 12.0) -> dict:
                 e[3] -= 1.6 * dt  # garlic
             if e[3] <= 0:
                 kills += 1
+                gems.append((e[0], e[1]))
                 continue
             if d > 1400:
                 continue
             alive.append(e)
         enemies = alive
+        keep = []
+        for gx, gy in gems:
+            if math.hypot(gx - player[0], gy - player[1]) < PICKUP:
+                xp += 1
+            else:
+                keep.append((gx, gy))
+        gems = keep
+        for mark in (120, 240):
+            if mark not in xp_at and t >= mark:
+                xp_at[mark] = xp
         t += dt
         clock[0] = t
-    return {"damage": damage, "kills": kills, "death": death_t if death_t is not None else seconds}
+    return {
+        "xp": xp, "xp_120": xp_at.get(120, xp), "xp_240": xp_at.get(240, xp),
+        "gems_on_screen": float(np.mean(gems_seen)) if gems_seen else 0.0,
+        "damage": damage, "kills": kills, "death": death_t if death_t is not None else seconds,
+        "first5": first5 if first5 is not None else seconds,
+        "kills_120": kills_120 if kills_120 is not None else kills,
+    }
 
 
 def _observe(rel: np.ndarray) -> tuple[list[Detection], np.ndarray]:
@@ -276,7 +322,9 @@ def main() -> None:
     ap.add_argument("--policies", default="still,old,field,new")
     ap.add_argument("--horde", action="store_true", help="dense ~5:00 Mad Forest waves (rings, flocks)")
     ap.add_argument("--density", type=float, default=1.0)
+    ap.add_argument("--tune", default="", help="VS_TUNE-style overrides for the 'new' policy")
     a = ap.parse_args()
+    tune = tuning_from_env(a.tune) if a.tune else None
     if a.horde:
         for pol in a.policies.split(","):
             res = [simulate_horde(pol, a.seconds, s, density=a.density) for s in range(a.seeds)]
@@ -289,9 +337,13 @@ def main() -> None:
             )
         return
     for pol in a.policies.split(","):
-        res = [simulate(pol, a.seconds, s) for s in range(a.seeds)]
+        res = [simulate(pol, a.seconds, s, tune=tune if pol == "new" else None) for s in range(a.seeds)]
         dmg = [r["damage"] for r in res]
-        print(f"{pol:6s} damage mean {np.mean(dmg):8.1f}  per-seed {[round(x) for x in dmg]}  kills {np.mean([r['kills'] for r in res]):.0f}  death(140dmg) {[round(r['death']) for r in res]}")
+        print(f"{pol:6s} damage mean {np.mean(dmg):8.1f}  per-seed {[round(x) for x in dmg]}  kills {np.mean([r['kills'] for r in res]):.0f}  death(140dmg) {[round(r['death']) for r in res]}"
+              f"  5th-kill median {np.median([r['first5'] for r in res]):.0f}s  kills@120 {np.mean([r['kills_120'] for r in res]):.1f}"
+              f"  xp@120 {np.mean([r['xp_120'] for r in res]):.1f} xp@240 {np.mean([r['xp_240'] for r in res]):.1f}"
+              f"  gems on screen 2-4.7min {np.mean([r['gems_on_screen'] for r in res]):.1f}"
+              f"  xp/kills {np.sum([r['xp'] for r in res]) / max(1, np.sum([r['kills'] for r in res])):.0%}")
 
 
 if __name__ == "__main__":
