@@ -17,14 +17,18 @@ LEFT = [(360.0 + ox, 256.0 + oy, 0.22) for ox in (-6, 6) for oy in (-6, 6)]
 LEFT_ARR = np.array(LEFT, dtype=np.float32)
 
 
+ON = replace(Tuning(), early_engage_until_s=150.0)  # engage is off by default; tests opt in
+
+
 def _left_score(dec) -> float:
     return max(dec.scores[(-1, 0)], dec.scores[(-1, -1)], dec.scores[(-1, 1)])
 
 
 def test_defaults_and_gem_tune_for_window():
-    t = Tuning()
+    assert Tuning().early_engage_until_s == 0.0 and gem_tune_for(Tuning(), 30.0).engage_gain == 0.0
+    t = ON
     assert t.engage_gain == 0.0  # base knob off; only the early window turns it on
-    assert t.early_engage_until_s == 150.0 and t.early_engage_gain == 1.2
+    assert t.early_engage_gain == 1.2
     assert gem_tune_for(t, 60.0).engage_gain == t.early_engage_gain
     assert gem_tune_for(t, 149.0).engage_gain == t.early_engage_gain
     assert gem_tune_for(t, 150.0).engage_gain == 0.0
@@ -61,7 +65,7 @@ def test_engage_pull_points_at_enemy_and_gates():
 
 
 def test_score_directions_lets_enemy_close_only_when_engaged():
-    t = gem_tune_for(Tuning(), 60.0)
+    t = gem_tune_for(ON, 60.0)
     off = score_directions(LEFT, P, None, 1.0, hp=1.0, tune=replace(t, engage_gain=0.0))
     on = score_directions(LEFT, P, None, 1.0, hp=1.0, tune=t)
     assert off.vector[0] >= 0  # without engage: drifts away from the lone enemy
@@ -72,7 +76,7 @@ def test_score_directions_lets_enemy_close_only_when_engaged():
 
 def test_navigator_engages_early_not_later_and_not_in_breakout():
     clock = Clock()
-    nav = Navigator(clock=clock, log=lambda *_: None)
+    nav = Navigator(tune=ON, clock=clock, log=lambda *_: None)
     nav.game_s = 30.0
     res = result(LEFT)
     on = nav.step(res, hp=1.0)
@@ -80,7 +84,7 @@ def test_navigator_engages_early_not_later_and_not_in_breakout():
     assert _left_score(on) > max(on.scores[(1, 0)], on.scores[(1, -1)], on.scores[(1, 1)])
 
     clock2 = Clock()
-    late = Navigator(clock=clock2, log=lambda *_: None)
+    late = Navigator(tune=ON, clock=clock2, log=lambda *_: None)
     late.game_s = 200.0
     dec = late.step(result(LEFT), hp=1.0)
     off_nav = Navigator(tune=replace(Tuning(), early_engage_until_s=0), clock=Clock(), log=lambda *_: None)
@@ -89,7 +93,7 @@ def test_navigator_engages_early_not_later_and_not_in_breakout():
     assert dec.scores == ref.scores  # identical once the window has passed
 
     # During a breakout the engage pull is never applied.
-    b = Navigator(clock=Clock(), log=lambda *_: None)
+    b = Navigator(tune=ON, clock=Clock(), log=lambda *_: None)
     b.game_s = 30.0
     b.breakout = (1.0, 0.0)
     b._breakout_origin = (1.0, 0.0)
@@ -110,7 +114,7 @@ def test_engage_gated_below_safe_danger():
 
 
 def test_direct_engage_gain_respects_time_limit():
-    t = tuning_from_env("engage_gain=1.0", log=lambda *_: None)
+    t = tuning_from_env("engage_gain=1.0,early_engage_until_s=150", log=lambda *_: None)
     assert gem_tune_for(t, 30.0).engage_gain > 0
     assert gem_tune_for(t, t.early_engage_until_s).engage_gain == 0.0
     off = tuning_from_env("engage_gain=1.0,early_engage_until_s=0", log=lambda *_: None)
@@ -145,7 +149,7 @@ def test_engage_pull_off_while_gems_wait():
 
 
 def test_score_directions_gem_beats_engage():
-    t = gem_tune_for(Tuning(), 60.0)
+    t = gem_tune_for(ON, 60.0)
     gated = score_directions(LEFT, P, None, 1.0, gems=GEM_RIGHT, hp=1.0, tune=t)
     no_engage = score_directions(LEFT, P, None, 1.0, gems=GEM_RIGHT, hp=1.0, tune=replace(t, engage_gain=0.0))
     assert gated.scores == no_engage.scores  # engage contributes nothing while a gem waits
@@ -159,7 +163,7 @@ def test_score_directions_gem_beats_engage():
 
 
 def test_navigator_early_engage_waits_for_gems():
-    nav = Navigator(clock=Clock(), log=lambda *_: None)
+    nav = Navigator(tune=ON, clock=Clock(), log=lambda *_: None)
     nav.game_s = 30.0
     on = nav.step(result(LEFT, gems=GEM_RIGHT), hp=1.0)
     off_nav = Navigator(tune=replace(Tuning(), early_engage_until_s=0), clock=Clock(), log=lambda *_: None)

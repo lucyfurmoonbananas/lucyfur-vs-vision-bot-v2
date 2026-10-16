@@ -175,7 +175,7 @@ class Tuning:
     # Early Garlic engage: before early_engage_until_s, HP >= early_engage_hp, danger < safe_danger
     # and no gems waiting to be collected (early_engage_max_gems), pull toward enemies.
     engage_gain: float = 0.0
-    early_engage_until_s: float = 150.0
+    early_engage_until_s: float = 0.0     # off: Oct 14-16 A/B ON lv@2:00 2 vs OFF 3; VS_TUNE=early_engage_until_s=150 to test
     early_engage_gain: float = 1.2
     early_engage_hp: float = 0.8
     # Gems first, then hunt: the engage pull is off while more than this many gems are
