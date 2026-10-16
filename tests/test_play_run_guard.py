@@ -202,7 +202,7 @@ def test_session_loop_still_stops_after_8_real_failures(box):
     assert "### Run 9" in md and "### Run 10" not in md
 
 
-def test_session_loop_crosses_early_engage_ab_with_laurel(box):
+def test_session_loop_ab_early_gem_target_with_laurel(box):
     _tmp, session, env = box
     (session / "play_run.sh").write_text(
         "#!/bin/bash\n"
@@ -218,11 +218,11 @@ def test_session_loop_crosses_early_engage_ab_with_laurel(box):
     md = _loop(dict(env, VS_TUNE="ring_commit_s=2.5"), session)
     envs = (session / "envs.txt").read_text().splitlines()
     assert envs == [
-        "1 tune=ring_commit_s=2.5 laurel=0",
+        "1 tune=ring_commit_s=2.5,early_gem_target_gain=0 laurel=0",
         "2 tune=ring_commit_s=2.5 laurel=<unset>",
-        "3 tune=ring_commit_s=2.5,early_engage_until_s=0 laurel=0",
-        "4 tune=ring_commit_s=2.5,early_engage_until_s=0 laurel=<unset>",
+        "3 tune=ring_commit_s=2.5,early_gem_target_gain=0 laurel=0",
+        "4 tune=ring_commit_s=2.5 laurel=<unset>",
     ]
-    # run 5 (rc 2, the stub cutoff) is logged too, as ON
-    assert md.count("- Early engage: ON") == 3 and md.count("- Early engage: OFF") == 2
+    # run 5 (rc 2, the stub cutoff) is logged too, as OFF (odd run)
+    assert md.count("- Early gem target: OFF") == 3 and md.count("- Early gem target: ON") == 2
     assert "first_levelup_s=50" in md and "lv_at_120=2" in md
