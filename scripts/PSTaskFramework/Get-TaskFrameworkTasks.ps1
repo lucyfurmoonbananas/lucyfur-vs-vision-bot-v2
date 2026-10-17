@@ -117,6 +117,6 @@ function Get-TaskFrameworkTasks {
         return (getAllOrderedTasks @PSBoundParameters).Values
     }
     catch {
-        Write-Error -Exception $_ -CategoryActivity $MyInvocation.MyCommand.Name
+        Write-Error -ErrorRecord $_ -CategoryActivity $MyInvocation.MyCommand.Name
     }
 }
