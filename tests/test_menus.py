@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import time
 from pathlib import Path
 
 import cv2
@@ -675,6 +678,64 @@ def test_read_card_retries_weak_match_with_other_thresholds(monkeypatch):
     menus.read_card(frame, card)
     assert card.name == "Armor" and card.raw == "Armor"
     assert len(calls) == 2  # stops once a strong match is found
+
+
+def _hanging_tesseract(tmp_path, monkeypatch) -> Path:
+    """tesseract stub: the shell sleeps in a child so a direct-child kill leaks it."""
+    pids = tmp_path / "pids"
+    script = tmp_path / "tesseract"
+    script.write_text(
+        "#!/bin/sh\n"
+        "sleep 60 &\n"
+        'echo "$!" >> "$OCR_HANG_PIDS"\n'
+        'echo "$$" >> "$OCR_HANG_PIDS"\n'
+        "wait\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("OCR_HANG_PIDS", str(pids))
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+    return pids
+
+
+def _pids_still_alive(pidfile: Path) -> list[int]:
+    if not pidfile.exists():
+        return []
+    alive = []
+    for line in pidfile.read_text().split():
+        try:
+            pid = int(line)
+        except ValueError:
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        else:
+            alive.append(pid)
+    return alive
+
+
+def test_hung_tesseract_does_not_block_the_menu_read(tmp_path, monkeypatch):
+    """One stuck menu OCR must return within a few seconds and not leave tesseract running."""
+    pidfile = _hanging_tesseract(tmp_path, monkeypatch)
+    frame = load("levelup_4cards_sel4.png")
+    screen = detect_level_up(frame)
+    assert screen is not None and len(screen.cards) == 4
+    t0 = time.monotonic()
+    try:
+        menus.read_cards(frame, screen)
+        elapsed = time.monotonic() - t0
+    finally:
+        alive = _pids_still_alive(pidfile)
+        for pid in alive:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    assert elapsed < 6.0
+    assert alive == []
+    assert [c.raw for c in screen.cards] == ["", "", "", ""]
+    assert [c.name for c in screen.cards] == ["", "", "", ""]
 
 
 def test_read_card_strong_match_needs_one_ocr(monkeypatch):
