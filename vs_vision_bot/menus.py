@@ -22,12 +22,14 @@ import difflib
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Iterator
 
 import cv2
 import numpy as np
@@ -368,23 +370,125 @@ def tesseract_available() -> bool:
     return shutil.which("tesseract") is not None
 
 
+# One budget for a whole level-up read. Each call used to have its own 5s
+# timeout, and a miss is a weak match so every card retried twice; running those
+# at once also made a healthy read slower than the budget. subprocess.run then
+# wait()ed with no deadline after killing only the direct child.
+MENU_OCR_DEADLINE_S = 3.0
+_ocr_deadline_at: float | None = None
+
+
+def _arm_ocr_deadline() -> bool:
+    global _ocr_deadline_at
+    now = time.monotonic()
+    if _ocr_deadline_at is not None and now < _ocr_deadline_at:
+        return False
+    _ocr_deadline_at = now + MENU_OCR_DEADLINE_S
+    return True
+
+
+def _disarm_ocr_deadline(armed: bool) -> None:
+    global _ocr_deadline_at
+    if armed:
+        _ocr_deadline_at = None
+
+
+@contextmanager
+def _menu_ocr_budget() -> Iterator[None]:
+    armed = _arm_ocr_deadline()
+    try:
+        yield
+    finally:
+        _disarm_ocr_deadline(armed)
+
+
+def _ocr_timeout() -> float | None:
+    if _ocr_deadline_at is None:
+        return MENU_OCR_DEADLINE_S
+    left = _ocr_deadline_at - time.monotonic()
+    if left < 0.05:
+        return None
+    return left
+
+
+def _kill_tesseract(proc: subprocess.Popen) -> None:
+    """SIGKILL the tesseract process group. Do not wait without a deadline."""
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=0.2)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _drop_pipes(proc: subprocess.Popen) -> None:
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is None:
+            continue
+        try:
+            os.close(stream.fileno())
+        except (OSError, ValueError):
+            pass
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _run_tesseract(args: list[str], data: bytes) -> bytes | None:
+    """Run one tesseract. None when it misses the menu-OCR deadline."""
+    timeout = _ocr_timeout()
+    if timeout is None:
+        return None
+    argv = ["tesseract", *args]
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        print(f"[menus] tesseract failed: {exc}", file=sys.stderr)
+        return None
+    try:
+        try:
+            out, _err = proc.communicate(input=data, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            print(
+                f"[menus] tesseract failed: Command {argv!r} timed out after {timeout:.0f}s",
+                file=sys.stderr,
+            )
+            return None
+        except OSError as exc:
+            print(f"[menus] tesseract failed: {exc}", file=sys.stderr)
+            return None
+        return out
+    finally:
+        _kill_tesseract(proc)
+        _drop_pipes(proc)
+
+
 def ocr_image(img: np.ndarray, psm: int = 7) -> str:
     if img is None or img.size == 0 or not tesseract_available():
         return ""
     ok, buf = cv2.imencode(".png", img)
     if not ok:
         return ""
-    try:
-        out = subprocess.run(
-            ["tesseract", "stdin", "stdout", "--psm", str(psm)],
-            input=buf.tobytes(),
-            capture_output=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        print(f"[menus] tesseract failed: {exc}", file=sys.stderr)
+    out = _run_tesseract(["stdin", "stdout", "--psm", str(psm)], buf.tobytes())
+    if out is None:
         return ""
-    return out.stdout.decode("utf-8", "replace").strip()
+    return out.decode("utf-8", "replace").strip()
 
 
 def ocr_words(img: np.ndarray, psm: int = 11) -> list[tuple[str, int, int, int, int]]:
@@ -394,18 +498,11 @@ def ocr_words(img: np.ndarray, psm: int = 11) -> list[tuple[str, int, int, int, 
     ok, buf = cv2.imencode(".png", img)
     if not ok:
         return []
-    try:
-        out = subprocess.run(
-            ["tesseract", "stdin", "stdout", "--psm", str(psm), "tsv"],
-            input=buf.tobytes(),
-            capture_output=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        print(f"[menus] tesseract failed: {exc}", file=sys.stderr)
+    out = _run_tesseract(["stdin", "stdout", "--psm", str(psm), "tsv"], buf.tobytes())
+    if out is None:
         return []
     words = []
-    for line in out.stdout.decode("utf-8", "replace").splitlines()[1:]:
+    for line in out.decode("utf-8", "replace").splitlines()[1:]:
         parts = line.split("\t")
         if len(parts) < 12 or not parts[11].strip():
             continue
@@ -472,11 +569,12 @@ def read_card(frame: np.ndarray, card: Card) -> Card:
 
 
 def read_cards(frame: np.ndarray, screen: LevelUpScreen) -> LevelUpScreen:
-    threads = [threading.Thread(target=read_card, args=(frame, c)) for c in screen.cards]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    # One tesseract at a time. Four at once (OpenMP) took longer on a 4-core
+    # machine than the same crops in series, and a shared deadline would then
+    # cut off a read that is fine on its own.
+    with _menu_ocr_budget():
+        for card in screen.cards:
+            read_card(frame, card)
     return screen
 
 
@@ -1003,27 +1101,28 @@ class MenuPilot:
             self._stable += 1
             if self._stable < self.settle_frames:
                 return
-            read_cards(frame, screen)
-            self._names = [c.name or c.raw or "?" for c in screen.cards]
-            self.owned |= {c.name for c in screen.cards if c.name and not c.new}
-            if self._try_start_banish(frame, screen):
-                return
-            game_s = self._game_s()
-            self._target = choose_card(screen.cards, hp=self.hp, owned=self.owned, game_s=game_s)
-            self._chosen = screen.cards[self._target].name
-            self._presses = 0
-            self._unknown_sel = 0
-            self.log(
-                f"[levelup] cards={self._names} new={[c.new for c in screen.cards]} "
-                f"-> pick #{self._target + 1} {self._names[self._target]} "
-                f"(hp={self.hp if self.hp is None else round(self.hp, 2)}, weapons={owned_weapon_count(self.owned)}, "
-                f"game~={'?' if game_s is None else f'{game_s:.0f}s'})"
-            )
-            if any(not c.name for c in screen.cards):
-                # Unmatched OCR ('P', 'wr', 'or'): keep the frame to learn what the card is.
-                path = self._save_frame(frame, "levelup_unread")
-                if path:
-                    self.log(f"[levelup] unread card, saved {path}")
+            with _menu_ocr_budget():
+                read_cards(frame, screen)
+                self._names = [c.name or c.raw or "?" for c in screen.cards]
+                self.owned |= {c.name for c in screen.cards if c.name and not c.new}
+                if self._try_start_banish(frame, screen):
+                    return
+                game_s = self._game_s()
+                self._target = choose_card(screen.cards, hp=self.hp, owned=self.owned, game_s=game_s)
+                self._chosen = screen.cards[self._target].name
+                self._presses = 0
+                self._unknown_sel = 0
+                self.log(
+                    f"[levelup] cards={self._names} new={[c.new for c in screen.cards]} "
+                    f"-> pick #{self._target + 1} {self._names[self._target]} "
+                    f"(hp={self.hp if self.hp is None else round(self.hp, 2)}, weapons={owned_weapon_count(self.owned)}, "
+                    f"game~={'?' if game_s is None else f'{game_s:.0f}s'})"
+                )
+                if any(not c.name for c in screen.cards):
+                    # Unmatched OCR ('P', 'wr', 'or'): keep the frame to learn what the card is.
+                    path = self._save_frame(frame, "levelup_unread")
+                    if path:
+                        self.log(f"[levelup] unread card, saved {path}")
         if now < self._next_action:
             self.status = f"LEVEL UP -> {self._names[self._target]}"
             return
@@ -1123,56 +1222,57 @@ class MenuPilot:
         self._stable += 1
         if self._stable < self.settle_frames:
             return
-        read_cards(frame, screen)
-        names = [c.name or c.raw or "?" for c in screen.cards]
-        idx = next((i for i, c in enumerate(screen.cards) if c.name in BANISH_ALLOWED), None)
-        # Keep what the screen looks like with BANISH armed / after the banish (no
-        # frames of either exist yet), for checking the flow after the first live run.
-        self._save_banish_frame(frame, "armed" if state["phase"] == "armed" else f"after{state['card_clicks']}")
-        cancel = read_cancel_button(frame)
-        if state["phase"] == "cancel":
-            if cancel is not None or read_banish_button(frame) is None:
-                self.log(f"[levelup] BANISH Pentagram: still armed after CANCEL, cards={names}; stopping the run")
-                self._banish = None
-                self.finished = True
-                return
-            self.log("[levelup] BANISH Pentagram: backed out with CANCEL; normal pick")
-            self._end_banish(failed=True)
-            return
-        if state["phase"] == "armed" or idx is not None or cancel is not None:
-            if cancel is None:
-                self.log(f"[levelup] BANISH Pentagram: banish mode not seen (no CANCEL), cards={names}; normal pick")
+        with _menu_ocr_budget():
+            read_cards(frame, screen)
+            names = [c.name or c.raw or "?" for c in screen.cards]
+            idx = next((i for i, c in enumerate(screen.cards) if c.name in BANISH_ALLOWED), None)
+            # Keep what the screen looks like with BANISH armed / after the banish (no
+            # frames of either exist yet), for checking the flow after the first live run.
+            self._save_banish_frame(frame, "armed" if state["phase"] == "armed" else f"after{state['card_clicks']}")
+            cancel = read_cancel_button(frame)
+            if state["phase"] == "cancel":
+                if cancel is not None or read_banish_button(frame) is None:
+                    self.log(f"[levelup] BANISH Pentagram: still armed after CANCEL, cards={names}; stopping the run")
+                    self._banish = None
+                    self.finished = True
+                    return
+                self.log("[levelup] BANISH Pentagram: backed out with CANCEL; normal pick")
                 self._end_banish(failed=True)
                 return
-            if idx is None or state["card_clicks"] >= BANISH_MAX_CARD_CLICKS:
-                self.log(f"[levelup] BANISH Pentagram failed after {state['card_clicks']} clicks, cards={names}; CANCEL")
+            if state["phase"] == "armed" or idx is not None or cancel is not None:
+                if cancel is None:
+                    self.log(f"[levelup] BANISH Pentagram: banish mode not seen (no CANCEL), cards={names}; normal pick")
+                    self._end_banish(failed=True)
+                    return
+                if idx is None or state["card_clicks"] >= BANISH_MAX_CARD_CLICKS:
+                    self.log(f"[levelup] BANISH Pentagram failed after {state['card_clicks']} clicks, cards={names}; CANCEL")
+                    self.refocus()
+                    self.click(*cancel)
+                    state["phase"] = "cancel"
+                    self._next_action = self.clock() + BANISH_COOLDOWN_S
+                    self._sig = None
+                    return
+                card = screen.cards[idx]
                 self.refocus()
-                self.click(*cancel)
-                state["phase"] = "cancel"
+                self.click((card.x0 + card.x1) // 2, card.cy)
+                state["phase"] = "clicked"
+                state["card_clicks"] += 1
                 self._next_action = self.clock() + BANISH_COOLDOWN_S
                 self._sig = None
+                self.log(f"[levelup] BANISH Pentagram: clicked the Pentagram card #{idx + 1} (click {state['card_clicks']})")
                 return
-            card = screen.cards[idx]
-            self.refocus()
-            self.click((card.x0 + card.x1) // 2, card.cy)
-            state["phase"] = "clicked"
-            state["card_clicks"] += 1
-            self._next_action = self.clock() + BANISH_COOLDOWN_S
-            self._sig = None
-            self.log(f"[levelup] BANISH Pentagram: clicked the Pentagram card #{idx + 1} (click {state['card_clicks']})")
-            return
-        # Clicked, the level-up is still open and Pentagram is gone: banished (the
-        # Jul 2026 game keeps the menu open after a banish). Pick from the rest.
-        btn = read_banish_button(frame)
-        left = None if btn is None else btn.left
-        self.banished.add(state["name"])
-        self.log(
-            f"[levelup] BANISH Pentagram verified: card gone, cards={names}, "
-            f"BANISH {state['left_before']} -> {left if left is not None else '?'} left; picking from the rest"
-        )
-        if left is not None and left != state["left_before"] - 1:
-            self.log("[levelup] BANISH Pentagram note: uses count did not drop by exactly 1")
-        self._end_banish(failed=False)
+            # Clicked, the level-up is still open and Pentagram is gone: banished (the
+            # Jul 2026 game keeps the menu open after a banish). Pick from the rest.
+            btn = read_banish_button(frame)
+            left = None if btn is None else btn.left
+            self.banished.add(state["name"])
+            self.log(
+                f"[levelup] BANISH Pentagram verified: card gone, cards={names}, "
+                f"BANISH {state['left_before']} -> {left if left is not None else '?'} left; picking from the rest"
+            )
+            if left is not None and left != state["left_before"] - 1:
+                self.log("[levelup] BANISH Pentagram note: uses count did not drop by exactly 1")
+            self._end_banish(failed=False)
 
     def _save_banish_frame(self, frame: np.ndarray, tag: str) -> None:
         path = self._save_frame(frame, f"levelup_banish_{tag}")
