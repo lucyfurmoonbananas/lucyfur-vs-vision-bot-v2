@@ -101,5 +101,8 @@ class DebugWindow:
 
     def close(self) -> None:
         if self._created:
-            cv2.destroyWindow(WINDOW_NAME)
+            try:
+                cv2.destroyWindow(WINDOW_NAME)
+            except cv2.error:
+                pass
             self._created = False
