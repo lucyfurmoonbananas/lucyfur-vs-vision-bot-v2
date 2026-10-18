@@ -231,9 +231,9 @@ def test_chest_seek_logs_transitions_with_position_and_danger():
 def test_firewand_fireball_is_not_a_chest():
     """Fire Wand false positive: detect_chest returned (421, 163) at game 191s.
 
-    The projectile is a round yellow core inside an orange halo. On the
-    pre-change detector this frame returns (420, 162). A chest is a brown
-    body with a gold band across it.
+    The projectile is a yellow core inside an orange halo. On the pre-change
+    detector this frame returns (421, 163). A chest is a brown body with a
+    gold band across it.
     """
     frame = cv2.imread(str(FIX / "gameplay_firewand_false_chest.png"))
     assert frame is not None and frame.shape[:2] == (540, 960)
