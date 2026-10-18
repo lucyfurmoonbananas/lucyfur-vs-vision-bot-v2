@@ -17,6 +17,8 @@ Per frame, every one of the 8 WASD directions is scored:
 * gems    - pull toward blue XP gems when nothing is close (stronger / farther before the flower),
   plus a non-cancelling pull at one target gem (densest clump per distance). While
   roaming with no chest, ``gem_seek_gain`` keeps that clump ahead of the kite heading.
+  Each time that boost turns on is a gem-seek activation. Gem pickups are counted
+  from rises in the XP bar (a level-up resets the bar and is not a pickup).
 * chests  - walk toward an on-screen treasure chest, or the yellow edge arrow that
   points at an off-screen one. Outranks gems and roaming, including a plain
   breakout; fades out as danger rises and is skipped during flees and committed
@@ -668,6 +670,21 @@ def chest_status(result: VisionResult) -> str:
     return f"{label}=({spot[0]:.0f},{spot[1]:.0f})"
 
 
+def gem_status(nav: Navigator) -> str:
+    """Running gem-seek activations and XP-bar pickup proxy for the ``[nav]`` line."""
+    return f"gem_seek={nav.gem_seeks} gem_pickups={nav.gem_pickups}"
+
+
+def format_gem_summary(nav: Navigator) -> str:
+    """One line for the end of a run: counts plus pickups per minute of game time."""
+    minutes = nav.game_s / 60.0
+    rate = nav.gem_pickups / minutes if minutes >= 1.0 / 60.0 else 0.0
+    return (
+        f"[gems] seeks={nav.gem_seeks} pickups={nav.gem_pickups} "
+        f"game~{nav.game_s:.0f}s {rate:.1f}/min"
+    )
+
+
 # HUD timer OCR plausibility (see Navigator._sync_timer).
 TIMER_JUMP_TOL_S = 8.0       # accept readings this close to the wall-clock estimate
 TIMER_RESYNC_N = 3           # consecutive agreeing out-of-range readings to resync
@@ -717,6 +734,11 @@ class Navigator:
         self._last_break_dir: tuple[float, float] | None = None  # heading of the last breakout
         self._last_break_end = -1e9     # game_s when it ended
         self._seek: tuple[str, tuple[float, float]] | None = None  # ("chest"|"arrow", xy) while seeking
+        self.gem_seeks = 0          # times the roam gem-seek boost turned on
+        self.gem_pickups = 0        # XP-bar rises (pickup proxy; a level-up drop does not count)
+        self._gem_seeking = False
+        self._xp: float | None = None
+        self._gem_summary_logged = False
         self._tie_bias = 0.0  # orbit radians kept across breakout-heading snaps
         self._spun = 0.0      # orbit radians since the last snap
 
@@ -894,6 +916,25 @@ class Navigator:
             self.log(f"[chest] clear {k} ({p[0]:.0f},{p[1]:.0f}) danger={danger:.2f}")
         self.log(f"[chest] seek {kind} ({spot[0]:.0f},{spot[1]:.0f}) danger={danger:.2f}")
         self._seek = (kind, spot)
+
+    def _note_xp(self, xp: float | None) -> None:
+        """Count an XP-bar rise as one pickup. A drop (level-up) only resets the baseline."""
+        if xp is None:
+            return
+        prev = self._xp
+        self._xp = xp
+        if prev is None:
+            return
+        # ~2 px on the 818 px track. A 1 px flicker is not a gem.
+        if xp > prev + (1.5 / 818.0):
+            self.gem_pickups += 1
+
+    def log_gem_summary(self) -> None:
+        """Print the per-run gem line once. ``reset`` arms it again for the next run."""
+        if self._gem_summary_logged:
+            return
+        self._gem_summary_logged = True
+        self.log(format_gem_summary(self))
 
     def _kite_direction(self, pts: np.ndarray, px: float, py: float, dt: float) -> tuple[float, float]:
 
@@ -1175,6 +1216,7 @@ class Navigator:
             self.current = (0, 0)
             self.last = Decision((0, 0), {}, 0.0, "menu")
             return self.last
+        self._note_xp(result.xp)
         self._since_change += dt
 
         pts = result.threats
@@ -1190,6 +1232,7 @@ class Navigator:
         score_tune = gem_tune_for(self.tune, self.game_s)
         cone: list[tuple[int, int]] | None = None
         chest_at: tuple[float, float] | None = None
+        gem_seek_on = False
         if self.tune.chest_gain > 0 and not escape and self._flee_remaining <= 0:
             chest_at = result.chest or result.chest_arrow
         if self.breakout is not None:
@@ -1233,6 +1276,7 @@ class Navigator:
                 and self.tune.gem_seek_gain > score_tune.gem_target_gain
             ):
                 roam_tune = replace(score_tune, gem_target_gain=self.tune.gem_seek_gain)
+                gem_seek_on = True
             dec = score_directions(
                 pts, (px, py), kite, phase.kite_weight,
                 gems=result.gems, current=self.current, hp=hp,
@@ -1269,6 +1313,9 @@ class Navigator:
             self._note_chest(kind, armed, dec.danger_here)
         else:
             self._note_chest(None, None, dec.danger_here)
+        if gem_seek_on and not self._gem_seeking:
+            self.gem_seeks += 1
+        self._gem_seeking = gem_seek_on
         dec = Decision(choice, dec.scores, dec.danger_here, f"{dec.mode}/{phase.name}")
         self.last = dec
         return dec

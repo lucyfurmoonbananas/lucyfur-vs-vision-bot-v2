@@ -17,7 +17,7 @@ from vs_vision_bot.debug_window import DebugWindow
 from vs_vision_bot.hotkeys import CommandBus, HotkeyService
 from vs_vision_bot.input_backend import make_backend
 from vs_vision_bot.menus import MenuPilot, detect_level_up, hp_for_nav, read_hp_fraction, tesseract_available
-from vs_vision_bot.pathfind import Navigator, chest_status, tuning_from_env
+from vs_vision_bot.pathfind import Navigator, chest_status, gem_status, tuning_from_env
 from vs_vision_bot.vision import Vision, draw_synthetic_arena
 from vs_vision_bot.watchdog import (
     FRAME_CHANGE_MIN,
@@ -438,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
                         f"[nav] game~{nav.game_s:5.0f}s {decision.mode} v={decision.vector} "
                         f"danger={decision.danger_here:.2f} cover={nav.cover:.2f} "
                         f"cells={n_thr} gems={len(result.gems)} hp={hp_txt} breakouts={nav.breakouts} "
-                        f"{chest_status(result)}"
+                        f"{chest_status(result)} {gem_status(nav)}"
                     )
                 trace.observe(
                     now_obs, read_hp_fraction(frame), pilot.hp,
@@ -450,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
                     trace.dump(menu_kind, frame, now_obs, nav.game_s)
             last_vector = vector
             if pilot.finished and not bus.paused:
+                nav.log_gem_summary()
                 pilot_new_run[0] = True
                 dumped_for[0] = 0
                 trace_dumped[0] = 0
@@ -461,6 +462,7 @@ def main(argv: list[str] | None = None) -> int:
 
             stall = watchdog.update(frame, paused=bus.paused)
             if stall is not None:
+                nav.log_gem_summary()
                 print(f"[watchdog] STALL {stall.describe()} game~{nav.game_s:.0f}s -> ending run (exit {EXIT_WATCHDOG})")
                 exit_code = EXIT_WATCHDOG
                 break
@@ -503,6 +505,7 @@ def main(argv: list[str] | None = None) -> int:
                     continue
         return exit_code
     finally:
+        nav.log_gem_summary()
         heartbeat.stop()
         mover.shutdown()
         debug.close()

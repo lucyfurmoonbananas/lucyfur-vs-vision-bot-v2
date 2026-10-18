@@ -50,6 +50,9 @@ class VisionResult:
     chest_arrow: tuple[float, float] | None = None
     # On-screen stage timer in seconds, when OCR is confident; else None.
     timer_s: float | None = None
+    # Filled fraction of the top XP bar, 0..1. None when the bar is not visible.
+    # Rises are the gem-pickup proxy (a level-up resets it).
+    xp: float | None = None
     # Frame size the detections were measured in.
     size: tuple[int, int] = (REF_W_DEFAULT, REF_H_DEFAULT)
 
@@ -66,12 +69,13 @@ class Vision:
         h, w = frame.shape[:2]
         player = player_position(w, h)
         timer_s = self._maybe_read_timer(frame)
+        xp = read_xp_fraction(frame)
         if self._model is not None:
             try:
                 monsters = self._infer_model(frame)
                 menu = detect_level_up_menu(frame)
                 return VisionResult(
-                    player=player, monsters=monsters, menu=menu, note="torch", timer_s=timer_s,
+                    player=player, monsters=monsters, menu=menu, note="torch", timer_s=timer_s, xp=xp,
                 )
             except Exception as exc:  # noqa: BLE001
                 self._model = None
@@ -88,7 +92,7 @@ class Vision:
         chest_arrow = (arrow_xy[0] * sx, arrow_xy[1] * sy) if arrow_xy else None
         return VisionResult(
             player=player, monsters=monsters, menu=menu, note="heuristic",
-            threats=threats, gems=gems, timer_s=timer_s, size=(w, h),
+            threats=threats, gems=gems, timer_s=timer_s, size=(w, h), xp=xp,
             chest=chest, chest_arrow=chest_arrow,
         )
 
@@ -158,6 +162,9 @@ HUD_RECTS = (
 )
 # Tight crop of the stage timer digits inside HUD_RECTS[2] (ref 960x540).
 TIMER_RECT = (445, 20, 520, 48)
+# Top XP bar at 960x540: blue fill starts at x=51, the dark track ends at x=868.
+XP_BAR_X0, XP_BAR_X1 = 51, 869
+XP_BAR_Y0, XP_BAR_Y1 = 4, 14
 TIMER_OCR_PERIOD_S = 2.0
 # Player sprite + HP bar (camera keeps the character here).
 PLAYER_RECT = (452, 220, 508, 282)
@@ -419,12 +426,104 @@ def _chest_wood(frame: np.ndarray) -> np.ndarray:
     return (r > 85) & (r < 200) & (r > g + 22) & (g > b + 8) & (b < 120) & (g > 50) & (g < 170)
 
 
+def _pale_yellow(frame: np.ndarray) -> np.ndarray:
+    """Pale UI yellow of the real chest chevron (edge arrow and on-screen marker).
+
+    Live markers are BGR about (140-172, 254, 230-254). ``_yellow_core`` only
+    keeps saturated gold (b < 80), which matches coins and the painted fixture
+    arrow and misses every real one.
+    """
+    b = frame[:, :, 0].astype(np.int16)
+    g = frame[:, :, 1].astype(np.int16)
+    r = frame[:, :, 2].astype(np.int16)
+    return (r > 200) & (g > 220) & (b > 110) & (b < 200) & (g + 5 >= r) & (r + 40 > g) & (g > b + 40)
+
+
+def _playfield_edge_distance(cx: float, cy: float, w: int, h: int) -> float:
+    """Pixels from ``(cx, cy)`` in to the nearest playfield border.
+
+    Negative when the point sits in the side bars, outside the playfield.
+    """
+    x0 = PLAYFIELD_X0 * w / float(REF_W)
+    x1 = PLAYFIELD_X1 * w / float(REF_W)
+    return min(cx - x0, x1 - cx, cy, (h - 1) - cy)
+
+
+def _chest_under_marker(wood: np.ndarray, cx: float, cy: float, s: float) -> tuple[int, int] | None:
+    """Wooden chest body just below a pale chevron, or None."""
+    h, w = wood.shape[:2]
+    y0 = min(h, int(cy) + 2)
+    y1 = min(h, int(cy) + int(round(42 * s)))
+    x0 = max(0, int(cx) - int(round(22 * s)))
+    x1 = min(w, int(cx) + int(round(22 * s)))
+    if y1 <= y0 or x1 <= x0:
+        return None
+    win = wood[y0:y1, x0:x1]
+    if int(win.sum()) < 50 * s * s:
+        return None
+    ys, xs = np.nonzero(win)
+    width = int(xs.max() - xs.min() + 1)
+    if width < 12 * s or width > 30 * s:
+        return None
+    return (int(round(x0 + float(xs.mean()))), int(round(y0 + float(ys.mean()))))
+
+
+def _pale_markers(frame: np.ndarray) -> list[tuple[int, int, float, float, tuple[int, int] | None]]:
+    """Pale chevrons: (cx, cy, solidity, edge distance, chest center or None).
+
+    A chevron with a wooden body under it is an on-screen chest. The same shape
+    on the playfield edge, with no body, is the off-screen arrow.
+    """
+    h, w = frame.shape[:2]
+    pale = _pale_yellow(frame)
+    ignore, _side = _masks(w, h)
+    pale[ignore] = False
+    s = h / float(REF_H)
+    wood = _chest_wood(frame)
+    n, labels, stats, cents = cv2.connectedComponentsWithStats(pale.astype(np.uint8), connectivity=8)
+    out: list[tuple[int, int, float, float, tuple[int, int] | None]] = []
+    min_area = 100 * s * s
+    max_area = 320 * s * s
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_area or area > max_area:
+            continue
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        short, long = min(bw, bh), max(bw, bh)
+        if short < 8 * s or long > 42 * s or long / float(short) > 3.4:
+            continue
+        if area / float(bw * bh) < 0.28:
+            continue
+        comp = (labels == i).astype(np.uint8)
+        cnts, _hier = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            continue
+        hull = cv2.convexHull(max(cnts, key=cv2.contourArea))
+        solidity = area / float(cv2.contourArea(hull) or 1.0)
+        if solidity < 0.65:
+            continue
+        pix = frame[labels == i]
+        med_b = float(np.median(pix[:, 0]))
+        med_g = float(np.median(pix[:, 1]))
+        if med_g < 250 or not (120.0 <= med_b <= 190.0):
+            continue
+        cx = float(cents[i][0])
+        cy = float(cents[i][1])
+        dist = _playfield_edge_distance(cx, cy, w, h)
+        chest = _chest_under_marker(wood, cx, cy, s)
+        out.append((int(round(cx)), int(round(cy)), solidity, dist, chest))
+    return out
+
+
 def detect_chest_arrow(frame: np.ndarray) -> tuple[int, int] | None:
     """Centroid of the yellow off-screen chest arrow, in frame pixels.
 
-    The arrow sits on the screen edge and points at a treasure chest that is
-    still off-screen. It is a solid yellow triangle, much larger than a gold
-    coin. None when no arrow is visible.
+    The arrow sits inside the playfield, near an edge, and points at a treasure
+    chest that is still off-screen. Painted fixtures are saturated gold in a
+    tight frame-edge band. Real arrows are pale yellow and sit 30-110 px inside
+    the playfield (the side bars push left arrows past a 56 px frame band).
+    None when no arrow is visible.
     """
     h, w = frame.shape[:2]
     yellow = _yellow_core(frame)
@@ -462,6 +561,19 @@ def detect_chest_arrow(frame: np.ndarray) -> tuple[int, int] | None:
         if area > best_area:
             best_area = area
             best = (int(round(cx)), int(round(cy)))
+    if best is not None:
+        return best
+    # Real chevron: pale yellow, within ~120 px of the playfield border, and no
+    # wooden chest under it (that marker belongs to detect_chest). The most
+    # solid blob wins, so a nearby projectile smear loses to the UI arrow.
+    band = 120 * s
+    pale_sol = -1.0
+    for cx, cy, sol, dist, chest in _pale_markers(frame):
+        if chest is not None or dist < 0 or dist > band:
+            continue
+        if sol > pale_sol:
+            pale_sol = sol
+            best = (cx, cy)
     return best
 
 
@@ -530,6 +642,18 @@ def detect_chest(frame: np.ndarray) -> tuple[int, int] | None:
         if d < best_d:
             best_d = d
             best = (int(cx), int(cy))
+    if best is not None:
+        return best
+    # Real chest: the pale chevron floats ~28 px above a small wooden body.
+    # The body center is the seek point. Saturated gold-on-wood still wins above
+    # when a painted fixture matches, so coins and the Fire Wand stay rejected.
+    for _cx, _cy, _sol, _dist, chest in _pale_markers(frame):
+        if chest is None:
+            continue
+        d = (chest[0] - px) ** 2 + (chest[1] - py) ** 2
+        if d < best_d:
+            best_d = d
+            best = chest
     return best
 
 
@@ -575,6 +699,35 @@ def _timer_ocr_image(img: np.ndarray) -> str:
         print(f"[vision] timer OCR failed: {exc}", file=sys.stderr)
         return ""
     return out.stdout.decode("utf-8", "replace").strip()
+
+
+def read_xp_fraction(frame: np.ndarray) -> float | None:
+    """Filled fraction of the top XP bar, 0..1.
+
+    The bar is a blue run starting at the left of the track (x=51 at 960-wide).
+    None when that run is not there (menus, results). A level-up resets the fill,
+    so a later drop is not a pickup.
+    """
+    h, w = frame.shape[:2]
+    sx, sy = w / float(REF_W), h / float(REF_H)
+    x0, x1 = int(round(XP_BAR_X0 * sx)), int(round(XP_BAR_X1 * sx))
+    y0, y1 = int(round(XP_BAR_Y0 * sy)), int(round(XP_BAR_Y1 * sy))
+    if x1 <= x0 + 8 or y1 <= y0:
+        return None
+    roi = frame[y0:y1, x0:x1]
+    if roi.size == 0:
+        return None
+    b = roi[:, :, 0].astype(np.int16)
+    g = roi[:, :, 1].astype(np.int16)
+    r = roi[:, :, 2].astype(np.int16)
+    blue = (b > 160) & (b > g + 40) & (b > r + 40)
+    col = blue.mean(axis=0) >= 0.5
+    if int(col.sum()) < 8 or not bool(col[:6].any()):
+        return None
+    xs = np.flatnonzero(col)
+    if int(xs[0]) > 4:
+        return None
+    return float(int(xs[-1]) + 1) / float(x1 - x0)
 
 
 def read_timer_seconds(frame: np.ndarray) -> float | None:
