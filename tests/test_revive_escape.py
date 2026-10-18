@@ -332,6 +332,59 @@ def test_ring_escape_early_window_does_not_reset_origin():
     assert nav._escape_origin == origin
 
 
+def test_tied_north_and_south_do_not_default_north():
+    """DIRS starts with (0, -1). An east heading equidistant from N and S used to pick north."""
+    from vs_vision_bot.pathfind import _pick_min
+
+    costs = np.array([1, 1, 5, 5, 4, 4, 4, 4], np.float32)
+    assert DIRS[_pick_min(costs, (1.0, 0.0))] == (0, 1)
+    # West is the other orthogonal heading: clockwise from west is north, not a fixed default.
+    assert DIRS[_pick_min(costs, (-1.0, 0.0))] == (0, -1)
+    # A heading that already faces south keeps south.
+    assert DIRS[_pick_min(costs, (0.0, 1.0))] == (0, 1)
+
+
+def _walls_leaving_north_and_south_open():
+    pts = []
+    for deg in (0, 180, 45, 135, -45, -135):
+        for r in (160, 260, 360):
+            a = math.radians(deg)
+            x, y = 480 + r * math.cos(a), 256 + r * math.sin(a)
+            pts.append((x, y, 1.0))
+            px, py = -math.sin(a), math.cos(a)
+            for s in (-22, 22):
+                pts.append((x + px * s, y + py * s, 1.0))
+    return pts
+
+
+def test_side_heavy_revive_does_not_escape_north():
+    clock = Clock()
+    nav, _ = _quiet_nav(clock)
+    nav.heading = 0.0
+    nav.request_revive_escape()
+    run(nav, clock, result(_walls_leaving_north_and_south_open()), 2, hp=0.5)
+    assert nav.escaping and nav.breakout is not None
+    assert _nearest(nav.breakout) != (0, -1)
+
+
+def test_revive_hold_repicks_the_open_corridor():
+    """run6: the hold kept (0, -1) into the 15:00 bat wave after the opening moved."""
+    clock = Clock()
+    nav, logs = _quiet_nav(clock)
+    nav.heading = -math.pi / 2
+    nav.request_revive_escape()
+    gap_north = result(ring(480, 256, 150, 48, gap_deg=(250, 290)))
+    run(nav, clock, gap_north, 8, hp=0.5)
+    assert _nearest(nav.breakout) == (0, -1)
+    run(nav, clock, gap_north, 36, hp=0.5)
+    assert nav.escaping and any("revive escape holding" in line for line in logs)
+    assert _nearest(nav.breakout) == (0, -1)
+    gap_south = result(ring(480, 256, 150, 48, gap_deg=(70, 110)))
+    run(nav, clock, gap_south, 12, hp=0.5)
+    assert nav.escaping
+    assert _nearest(nav.breakout) == (0, 1)
+
+
 def test_revive_escape_early_window_still_allows_reversal():
     """REVIVE behaviour unchanged: stale first frame may be fully re-picked."""
     clock = Clock()

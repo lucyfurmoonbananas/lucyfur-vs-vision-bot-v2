@@ -34,7 +34,9 @@ continues from that heading, so the character keeps sweeping in big loops
 instead of being boxed in. After a REVIVE, ``request_revive_escape`` (built on
 ``request_flee``) runs a committed ~3 s escape toward the least threat-dense
 side: steering stays within ~45 deg of that heading, the heading is only re-aimed
-early or when its corridor is clearly shut, and it never turns back.
+early or when its corridor is clearly shut, and it never turns back. If the ring
+is still closed after that, the escape continues (up to 12 s) but the heading is
+re-picked toward the open corridor instead of staying on the first one.
 A fast HP crash (e.g. Man-eater flower ring ~5:00) also forces that flee, and
 during the mid-run flower window the cover trigger is lowered so breakouts
 start earlier and last longer; there a ring-closing breakout is also run as the
@@ -113,6 +115,8 @@ class Tuning:
     safe_danger: float = 0.6
     panic_danger: float = 2.5   # above this, kiting bias fades out
     low_hp: float = 0.5
+    # Below this, wider berth and no gem or chest chase. 0 disables.
+    critical_hp: float = 0.20
     # Encirclement breakout.
     sector_radius: float = 260.0   # crowd within this radius counts for encirclement
     sector_thr: float = 0.30       # per-sector density that counts as "occupied"
@@ -502,9 +506,20 @@ def score_directions(
     tune = tune or Tuning()
     pts = np.asarray(threats, dtype=np.float32).reshape(-1, 3) if threats is not None else np.zeros((0, 3), np.float32)
     px, py = float(player[0]), float(player[1])
-    defensive = hp is not None and hp < tune.low_hp
-    danger_gain = tune.danger_gain * (1.8 if defensive else 1.0)
-    radius = tune.radius * (1.25 if defensive else 1.0)
+    critical = hp is not None and tune.critical_hp > 0 and hp < tune.critical_hp
+    defensive = critical or (hp is not None and hp < tune.low_hp)
+    if critical:
+        danger_gain = tune.danger_gain * 3.2
+        radius = tune.radius * 1.9
+        body = tune.body * 1.7
+        kite_mul = 0.35
+        rollout_mul = 3.0
+    else:
+        danger_gain = tune.danger_gain * (1.8 if defensive else 1.0)
+        radius = tune.radius * (1.25 if defensive else 1.0)
+        body = tune.body
+        kite_mul = 0.7 if defensive else 1.0
+        rollout_mul = 1.8 if defensive else 1.0
 
     here = float(_danger_at(pts, np.array([px]), np.array([py]), radius)[0])
     nx = px + _UNIT[:, 0] * tune.step_near
@@ -512,10 +527,12 @@ def score_directions(
     fx = px + _UNIT[:, 0] * tune.step_far
     fy = py + _UNIT[:, 1] * tune.step_far
     danger = _danger_at(pts, nx, ny, radius) + 0.6 * _danger_at(pts, fx, fy, radius * 1.4)
-    contact = _path_contact(pts, px, py, tune.step_far, tune.body)
+    contact = _path_contact(pts, px, py, tune.step_far, body)
     scores = -(danger_gain * danger + tune.contact_gain * contact)
+    if critical:
+        scores = scores - corridor_costs(pts, px, py, tune.corridor_len, tune.corridor_width)
     if tune.rollout_gain > 0:
-        scores = scores - tune.rollout_gain * (1.8 if defensive else 1.0) * rollout_costs(pts, px, py, tune)
+        scores = scores - tune.rollout_gain * rollout_mul * rollout_costs(pts, px, py, tune)
 
     # Kiting fades out when things get tight: pure escape then.
     panic = min(1.0, max(0.0, (here - tune.safe_danger) / max(tune.panic_danger - tune.safe_danger, 1e-6)))
@@ -523,14 +540,14 @@ def score_directions(
         # Breakout heading: stays strong under pressure (contact terms still veto bodies).
         kite_scale = kite_weight * (1.0 - 0.3 * panic)
     else:
-        kite_scale = kite_weight * (1.0 - 0.75 * panic) * (0.7 if defensive else 1.0)
+        kite_scale = kite_weight * (1.0 - 0.75 * panic) * kite_mul
     if kite_dir is not None and kite_scale > 0:
         kx, ky = kite_dir
         norm = math.hypot(kx, ky) or 1.0
         scores = scores + kite_scale * (_UNIT[:, 0] * kx / norm + _UNIT[:, 1] * ky / norm)
 
     gem_scale = max(0.0, 1.0 - here / tune.gem_danger) if tune.gem_danger > 0 else 0.0
-    if gems and gem_scale > 0 and not defensive:
+    if gems and gem_scale > 0 and not defensive and not critical:
         # XP matters as much as dodging (live run8: level 6 at 3:53 with dozens of
         # gems left on screen), so gems pull at moderate danger too, fading out as
         # the crowd gets closer.
@@ -559,7 +576,7 @@ def score_directions(
 
     chest_scale = 0.0
     chest_vx = chest_vy = 0.0
-    if tune.chest_gain > 0 and tune.chest_danger > 0 and chest is not None:
+    if not critical and tune.chest_gain > 0 and tune.chest_danger > 0 and chest is not None:
         chest_scale = max(0.0, 1.0 - here / tune.chest_danger)
         chest_vx, chest_vy = float(chest[0]) - px, float(chest[1]) - py
         cd = math.hypot(chest_vx, chest_vy)
@@ -574,8 +591,8 @@ def score_directions(
         scores[DIRS.index(current)] += tune.hysteresis * (1.0 - 0.6 * panic)
 
     table = {d: float(s) for d, s in zip(DIRS, scores)}
-    best_i = int(np.argmax(scores))
-    best = DIRS[best_i]
+    prefer = current if current in DIRS else kite_dir
+    best = DIRS[_pick_min(-scores, prefer)]
     # Standing still gets swarmed: only allowed late game ("stand in the
     # middle, weapons clear it") and only while nothing is close.
     toward_chest = False
@@ -602,18 +619,29 @@ def _pick_min(costs: np.ndarray, prefer: tuple[float, float] | None) -> int:
 
     DIRS is up, down, left, then right. On a symmetric ring the vertical penalty
     leaves the other six corridors equal, and ``argmin`` then always returns left.
+    When ``prefer`` is equally aligned with several tied headings (east, with
+    north and south both open), DIRS order would still return north.
     """
     costs = np.asarray(costs, dtype=np.float32)
     best = float(np.min(costs))
     tied = np.flatnonzero(np.isfinite(costs) & (costs <= best + _COST_TIE))
     if tied.size == 0:
         return int(np.argmin(costs))
-    if prefer is None or tied.size == 1:
+    if tied.size == 1 or prefer is None:
         return int(tied[0])
     px, py = float(prefer[0]), float(prefer[1])
-    n = math.hypot(px, py) or 1.0
+    n = math.hypot(px, py)
+    if n < 1e-6:
+        return int(tied[0])
     dots = _UNIT[tied, 0] * (px / n) + _UNIT[tied, 1] * (py / n)
-    return int(tied[int(np.argmax(dots))])
+    best_dot = float(dots.max())
+    cand = np.flatnonzero(dots >= best_dot - 1e-5)
+    if cand.size == 1:
+        return int(tied[int(cand[0])])
+    # Clockwise on screen from prefer, so an east/west tie is not always north.
+    sub = tied[cand]
+    cross = _UNIT[sub, 0] * (py / n) - _UNIT[sub, 1] * (px / n)
+    return int(sub[int(np.argmin(cross))])
 
 
 def _toward_point(vec: tuple[float, float], pos: tuple[float, float], px: float, py: float) -> bool:
@@ -996,7 +1024,7 @@ class Navigator:
                 self._breakout_check = 0.0
                 costs = corridor_costs(pts, px, py, t.corridor_len, t.corridor_width)
                 cur = DIRS.index(_nearest_dir(self.breakout))
-                best = int(np.argmin(self._no_reverse(costs, self._breakout_origin or self.breakout)))
+                best = _pick_min(self._no_reverse(costs, self._breakout_origin or self.breakout), self.breakout)
                 if costs[cur] > 1.6 * costs[best] + 0.5:
                     self.breakout = tuple(_UNIT[best])
             return
@@ -1033,6 +1061,32 @@ class Navigator:
             )
         return True
 
+    def _revive_hold_repick(self, costs: np.ndarray, cur: int) -> bool:
+        """While a revive hold is running, aim at the current open corridor.
+
+        The first ``revive_escape_s`` stays committed. After that, a closed ring
+        keeps the escape going, but the heading follows the cheapest corridor,
+        including a reversal when the old one has filled in.
+        """
+        t = self.tune
+        if self._escape_reason != "revive" or self._escape_s <= t.revive_escape_s:
+            return False
+        if self.cover < t.cover_trigger:
+            return False
+        best = _pick_min(costs, self.breakout)
+        if (
+            best != cur
+            and np.isfinite(costs[best])
+            and costs[cur] > costs[best] * 1.1 + 0.15
+        ):
+            cur_d = DIRS[cur]
+            self.breakout = tuple(float(v) for v in _UNIT[best])
+            self._escape_origin = self.breakout
+            self.log(
+                f"[nav] revive escape re-aim {cur_d}->{DIRS[best]} at +{self._escape_s:.1f}s"
+            )
+        return True
+
     def _update_escape(self, pts: np.ndarray, px: float, py: float, dt: float) -> None:
         """Advance a committed post-REVIVE escape (no small-gap re-evaluation)."""
         t = self.tune
@@ -1050,19 +1104,21 @@ class Navigator:
         costs = escape_costs(pts, px, py, t)
         cur_d = _nearest_dir(self.breakout)
         cur = DIRS.index(cur_d)
+        if self._revive_hold_repick(costs, cur):
+            return
         # The free early re-pick exists for stale frames right after REVIVE only;
         # ring (flower-window) escapes start from a live frame, so they are locked
         # from the first frame (no reversal, origin kept).
         early = self._escape_reason == "revive" and self._escape_s <= t.escape_repick_s
         if early:
-            best = int(np.argmin(costs))
+            best = _pick_min(costs, self.breakout)
             switch = best != cur and costs[cur] > t.escape_repick_ratio * costs[best] + 0.3
         else:
             # Locked: only a clearly shut corridor, and never a reversal (the
             # replacement stays within 90 deg of the current heading).
             org = np.asarray(self._escape_origin or self.breakout, dtype=np.float32)
             ahead = ((_UNIT @ _UNIT[cur]) >= -1e-6) & ((_UNIT @ org) >= -1e-6)
-            best = int(np.argmin(np.where(ahead, costs, np.inf)))
+            best = _pick_min(np.where(ahead, costs, np.inf), self.breakout)
             switch = best != cur and costs[cur] > t.escape_switch_ratio * costs[best] + 1.5
         if switch:
             self.breakout = tuple(float(v) for v in _UNIT[best])
