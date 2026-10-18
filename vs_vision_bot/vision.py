@@ -44,6 +44,10 @@ class VisionResult:
     threats: np.ndarray | None = None
     # Blue XP gem centers in reference pixels.
     gems: list[tuple[float, float]] = field(default_factory=list)
+    # On-screen treasure chest center in reference pixels, else None.
+    chest: tuple[float, float] | None = None
+    # Yellow off-screen-chest arrow centroid in reference pixels, else None.
+    chest_arrow: tuple[float, float] | None = None
     # On-screen stage timer in seconds, when OCR is confident; else None.
     timer_s: float | None = None
     # Frame size the detections were measured in.
@@ -78,9 +82,14 @@ class Vision:
         monsters = detect_threat_blobs(frame, player, self.cfg, mask=mask)
         threats = threat_points(mask)
         menu = detect_level_up_menu(frame)
+        chest_xy = detect_chest(frame)
+        arrow_xy = detect_chest_arrow(frame)
+        chest = (chest_xy[0] * sx, chest_xy[1] * sy) if chest_xy else None
+        chest_arrow = (arrow_xy[0] * sx, arrow_xy[1] * sy) if arrow_xy else None
         return VisionResult(
             player=player, monsters=monsters, menu=menu, note="heuristic",
             threats=threats, gems=gems, timer_s=timer_s, size=(w, h),
+            chest=chest, chest_arrow=chest_arrow,
         )
 
     def _maybe_read_timer(self, frame: np.ndarray) -> float | None:
@@ -388,6 +397,135 @@ def detect_gems(frame: np.ndarray, enemies: np.ndarray | None = None) -> list[tu
         out.append((cx, cy))
     return out
 
+
+def _yellow_core(frame: np.ndarray) -> np.ndarray:
+    """Saturated yellow/gold (chest arrow, coin, chest lock). Grass and the XP bar fail.
+
+    Coins on real Mad Forest frames peak near BGR (48, 198, 254); the XP bar's
+    brightest pixels are bluer (b ~ 102). ``b < 80`` keeps the coins and a
+    chest arrow and drops the bar. Coins are tiny; the arrow is not.
+    """
+    b = frame[:, :, 0].astype(np.int16)
+    g = frame[:, :, 1].astype(np.int16)
+    r = frame[:, :, 2].astype(np.int16)
+    return (r > 210) & (g > 165) & (b < 80) & (g > b + 90) & (r > b + 120) & (r + 15 > g) & (r < g + 100)
+
+
+def _chest_wood(frame: np.ndarray) -> np.ndarray:
+    """Brown wooden chest body: redder than the dirt path (dirt has r ≈ g)."""
+    b = frame[:, :, 0].astype(np.int16)
+    g = frame[:, :, 1].astype(np.int16)
+    r = frame[:, :, 2].astype(np.int16)
+    return (r > 85) & (r < 200) & (r > g + 22) & (g > b + 8) & (b < 120) & (g > 50) & (g < 170)
+
+
+def detect_chest_arrow(frame: np.ndarray) -> tuple[int, int] | None:
+    """Centroid of the yellow off-screen chest arrow, in frame pixels.
+
+    The arrow sits on the screen edge and points at a treasure chest that is
+    still off-screen. It is a solid yellow triangle, much larger than a gold
+    coin. None when no arrow is visible.
+    """
+    h, w = frame.shape[:2]
+    yellow = _yellow_core(frame)
+    ignore, _side = _masks(w, h)
+    yellow[ignore] = False
+    s = h / float(REF_H)
+    band = max(8, int(round(56 * s)))
+    edge = np.zeros((h, w), dtype=bool)
+    edge[:band, :] = True
+    edge[-band:, :] = True
+    edge[:, :band] = True
+    edge[:, -band:] = True
+    yellow &= edge
+    n, _labels, stats, cents = cv2.connectedComponentsWithStats(yellow.astype(np.uint8), connectivity=8)
+    best: tuple[int, int] | None = None
+    best_area = 0
+    min_area = 70 * s * s
+    max_area = 1400 * s * s
+    min_side = 11 * s
+    max_side = 72 * s
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_area or area > max_area:
+            continue
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        short, long = min(bw, bh), max(bw, bh)
+        if short < min_side or long > max_side or long / float(short) > 2.8:
+            continue
+        if area / float(bw * bh) < 0.34:
+            continue
+        cx, cy = float(cents[i][0]), float(cents[i][1])
+        if min(cx, cy, (w - 1) - cx, (h - 1) - cy) > 42 * s:
+            continue
+        if area > best_area:
+            best_area = area
+            best = (int(round(cx)), int(round(cy)))
+    return best
+
+
+def detect_chest(frame: np.ndarray) -> tuple[int, int] | None:
+    """Center of an on-screen treasure chest, in frame pixels.
+
+    A chest is a compact brown wooden body with a bright gold lock/band.
+    Gold coins are the same yellow but sit on grass, so the wood test drops
+    them. None when nothing on screen looks like a chest. The nearest wins.
+    """
+    h, w = frame.shape[:2]
+    wood = _chest_wood(frame)
+    gold = _yellow_core(frame)
+    ignore, side = _masks(w, h)
+    wood[ignore | side] = False
+    gold[ignore | side] = False
+    s = h / float(REF_H)
+    n, _labels, stats, cents = cv2.connectedComponentsWithStats(gold.astype(np.uint8), connectivity=8)
+    px, py = player_position(w, h)
+    best: tuple[int, int] | None = None
+    best_d = 1e18
+    pad = int(round(16 * s))
+    # Coins on the Mad Forest fixtures top out near 32 yellow pixels. A chest
+    # lock+band is several times that; the edge arrow is larger still and is
+    # not a chest (it has no wooden body).
+    min_gold = 56 * s * s
+    max_gold = 400 * s * s
+    min_wood = 140 * s * s
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_gold or area > max_gold:
+            continue
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        short = min(bw, bh)
+        if short < 3 * s or max(bw, bh) / float(max(short, 1)) > 3.2:
+            continue
+        gx, gy = int(round(cents[i][0])), int(round(cents[i][1]))
+        y0, y1 = max(0, gy - pad), min(h, gy + pad)
+        x0, x1 = max(0, gx - pad), min(w, gx + pad)
+        win = wood[y0:y1, x0:x1]
+        wood_n = int(win.sum())
+        if wood_n < min_wood:
+            continue
+        ys, xs = np.nonzero(win)
+        wx0, wx1 = int(xs.min()), int(xs.max())
+        wy0, wy1 = int(ys.min()), int(ys.max())
+        ww, hh = wx1 - wx0 + 1, wy1 - wy0 + 1
+        if not (16 * s <= ww <= 56 * s and 14 * s <= hh <= 52 * s):
+            continue
+        if wood_n / float(ww * hh) < 0.28:
+            continue
+        # The lock sits on the body, not beside a tree the window happened to clip.
+        if not (wx0 - 4 <= gx - x0 <= wx1 + 4 and wy0 - 4 <= gy - y0 <= wy1 + 4):
+            continue
+        cx = x0 + (wx0 + wx1) // 2
+        cy = y0 + (wy0 + wy1) // 2
+        if float(np.hypot(cx - gx, cy - gy)) > 14 * s:
+            continue
+        d = (cx - px) ** 2 + (cy - py) ** 2
+        if d < best_d:
+            best_d = d
+            best = (int(cx), int(cy))
+    return best
 
 
 def parse_timer_text(text: str) -> float | None:
