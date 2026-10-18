@@ -16,6 +16,9 @@ Per frame, every one of the 8 WASD directions is scored:
   big loops and never stands idle in the open.
 * gems    - pull toward blue XP gems when nothing is close (stronger / farther before the flower),
   plus, early, a non-cancelling pull at one target gem (densest clump per distance).
+* chests  - walk toward an on-screen treasure chest, or the yellow edge arrow that
+  points at an off-screen one. Outranks gems and roaming; fades out as danger
+  rises and is skipped during flees and committed escapes. ``chest_gain`` 0 disables.
 * inertia - hysteresis: the current direction gets a bonus and a minimum
   dwell time so the chord does not jitter frame to frame.
 
@@ -172,6 +175,10 @@ class Tuning:
     early_gem_target_gain: float = 1.4
     gem_target_gain: float = 0.0      # base (late) value; gem_tune_for swaps in the early one
     gem_cluster_r: float = 70.0
+    # On-screen chest or the yellow edge arrow. Fades out by chest_danger.
+    # Not applied during a flee or committed escape. 0 disables.
+    chest_gain: float = 8.0
+    chest_danger: float = 1.6
     # Early Garlic engage: before early_engage_until_s, HP >= early_engage_hp, danger < safe_danger
     # and no gems waiting to be collected (early_engage_max_gems), pull toward enemies.
     engage_gain: float = 0.0
@@ -477,6 +484,7 @@ def score_directions(
     tune: Tuning | None = None,
     idle_ok: bool = False,
     kite_floor: bool = False,
+    chest: tuple[float, float] | None = None,
 ) -> Decision:
     """Pure scoring: returns the best 8-way (or idle) vector plus diagnostics."""
     tune = tune or Tuning()
@@ -537,6 +545,19 @@ def score_directions(
     if tune.engage_gain > 0 and pts.shape[0]:
         scores = scores + engage_pull(pts, px, py, here, hp, tune, gems=gems)
 
+    chest_scale = 0.0
+    chest_vx = chest_vy = 0.0
+    if tune.chest_gain > 0 and tune.chest_danger > 0 and chest is not None:
+        chest_scale = max(0.0, 1.0 - here / tune.chest_danger)
+        chest_vx, chest_vy = float(chest[0]) - px, float(chest[1]) - py
+        cd = math.hypot(chest_vx, chest_vy)
+        if chest_scale > 0 and cd > 1e-3:
+            scores = scores + tune.chest_gain * chest_scale * (
+                _UNIT[:, 0] * chest_vx / cd + _UNIT[:, 1] * chest_vy / cd
+            )
+        else:
+            chest_scale = 0.0
+
     if current in DIRS:
         scores[DIRS.index(current)] += tune.hysteresis * (1.0 - 0.6 * panic)
 
@@ -545,8 +566,20 @@ def score_directions(
     best = DIRS[best_i]
     # Standing still gets swarmed: only allowed late game ("stand in the
     # middle, weapons clear it") and only while nothing is close.
-    mode = "escape" if panic > 0.5 else ("kite" if kite_dir is not None else "roam")
-    if idle_ok and here < tune.safe_danger * 0.5:
+    toward_chest = False
+    if chest_scale > 0:
+        cd = math.hypot(chest_vx, chest_vy)
+        if cd > 1e-3:
+            toward_chest = (best[0] * chest_vx + best[1] * chest_vy) / (math.hypot(*best) * cd) > 0.5
+    if panic > 0.5:
+        mode = "escape"
+    elif toward_chest:
+        mode = "chest"
+    elif kite_dir is not None:
+        mode = "kite"
+    else:
+        mode = "roam"
+    if idle_ok and not toward_chest and here < tune.safe_danger * 0.5:
         table[(0, 0)] = table[best] + 0.1
         return Decision((0, 0), table, here, "hold")
     return Decision(best, table, here, mode)
@@ -1001,10 +1034,14 @@ class Navigator:
                 cone = [d for i, d in enumerate(DIRS) if _UNIT[i, 0] * ox + _UNIT[i, 1] * oy >= -1e-6]
                 dec.vector = max(cone, key=lambda d: dec.scores[d])
         else:
+            chest_at = None
+            if self.tune.chest_gain > 0:
+                chest_at = result.chest or result.chest_arrow
             dec = score_directions(
                 pts, (px, py), kite, phase.kite_weight,
                 gems=result.gems, current=self.current, hp=hp,
                 tune=score_tune, idle_ok=phase.idle_ok,
+                chest=chest_at,
             )
 
         # Flip the orbit when the field keeps overruling it (the loop runs into
