@@ -17,7 +17,7 @@ from vs_vision_bot.debug_window import DebugWindow
 from vs_vision_bot.hotkeys import CommandBus, HotkeyService
 from vs_vision_bot.input_backend import make_backend
 from vs_vision_bot.menus import MenuPilot, detect_level_up, hp_for_nav, read_hp_fraction, tesseract_available
-from vs_vision_bot.pathfind import Navigator, tuning_from_env
+from vs_vision_bot.pathfind import Navigator, chest_status, tuning_from_env
 from vs_vision_bot.vision import Vision, draw_synthetic_arena
 from vs_vision_bot.watchdog import (
     FRAME_CHANGE_MIN,
@@ -437,7 +437,8 @@ def main(argv: list[str] | None = None) -> int:
                     print(
                         f"[nav] game~{nav.game_s:5.0f}s {decision.mode} v={decision.vector} "
                         f"danger={decision.danger_here:.2f} cover={nav.cover:.2f} "
-                        f"cells={n_thr} gems={len(result.gems)} hp={hp_txt} breakouts={nav.breakouts}"
+                        f"cells={n_thr} gems={len(result.gems)} hp={hp_txt} breakouts={nav.breakouts} "
+                        f"{chest_status(result)}"
                     )
                 trace.observe(
                     now_obs, read_hp_fraction(frame), pilot.hp,
