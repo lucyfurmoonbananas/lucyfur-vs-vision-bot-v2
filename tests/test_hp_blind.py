@@ -67,6 +67,48 @@ def test_static_death_screen_saves_earlier_snaps(tmp_path):
     assert _pixels(paths) == [30, 80, 140, 200]
 
 
+def _red_sprite_over_hidden_bar() -> np.ndarray:
+    """Anchored bar hidden; a pure-red run in the fallback search window.
+
+    death_quit_053751_02_06 and death_revive_053457_01_05: the bar rect is
+    occluded (read_hp_bar is None) and read_hp_fraction returns ~1.0 from a
+    red sprite / damage flash above the bar.
+    """
+    frame = np.full((540, 960, 3), (40, 90, 50), np.uint8)
+    frame[260:268, 500:539] = (0, 0, 254)
+    return frame
+
+
+def test_upward_hp_spike_cannot_cancel_low_or_blind():
+    """run6 quit trace: 0.00, 0.80, 0.53, 1.00, 0.06 while the median was ~0.03."""
+    spike = menus.read_hp_fraction(_red_sprite_over_hidden_bar())
+    assert spike == pytest.approx(1.0)
+
+    t = menus.HpTracker()
+    for _ in range(5):
+        t.add(0.03)
+    for v in (0.00, 0.80, 0.53, spike, 0.06):
+        t.add(v)
+    assert t.value < 0.2
+
+    # One high frame is not a heal.
+    healed = menus.HpTracker()
+    for _ in range(4):
+        healed.add(0.12)
+    healed.add(0.55)
+    assert healed.value < 0.3
+    healed.add(0.55)
+    healed.add(0.52)
+    assert healed.value == pytest.approx(0.55, abs=0.05)
+
+    for _ in range(3):
+        t.add(None)
+    assert t.blind is True
+    t.add(spike)
+    assert t.blind is True
+    assert menus.hp_for_nav(t.value, t.blind) == 0.0
+
+
 def test_snaps_older_than_the_keep_window_are_dropped(tmp_path):
     tr = DeathTrace(str(tmp_path), log=lambda _s: None)
     # 12s before the dump is outside the 8s snap window; 7s before it is inside.
