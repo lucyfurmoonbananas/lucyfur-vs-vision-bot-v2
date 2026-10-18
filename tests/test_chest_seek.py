@@ -7,13 +7,14 @@ look: a solid yellow edge triangle, and a brown chest with a gold band.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 from vs_vision_bot.config import Config
-from vs_vision_bot.pathfind import Navigator, Tuning, tuning_from_env
+from vs_vision_bot.pathfind import Navigator, Tuning, chest_status, tuning_from_env
 from vs_vision_bot.vision import Vision, detect_chest, detect_chest_arrow, draw_synthetic_arena
 
 from tests.test_movement import Clock, blob, result, ring, run
@@ -141,3 +142,97 @@ def test_high_danger_escapes_then_resumes_chest():
     resumed = run(nav, clock, safe, 6, hp=0.95)
     assert resumed[-1] == (1, 0)
     assert nav.last.mode.startswith("chest")
+
+
+# Scattered gems whose summed pull cancels, clump on the right. Same layout as
+# test_gem_target: without a non-cancelling target the kite heading wins.
+SCATTER = [(700.0, 256.0), (712.0, 262.0), (330.0, 120.0), (330.0, 392.0)]
+
+
+def test_symmetric_breakout_follows_heading_not_left():
+    """A full ring ties every non-vertical corridor. argmin used to lock left."""
+    pts = ring(480, 256, 160, 36)
+    for heading, sign in ((0.0, 1), (math.pi, -1)):
+        clock = Clock()
+        nav = Navigator(clock=clock, log=lambda *_: None)
+        nav.heading = heading
+        nav.game_s = 100.0
+        run(nav, clock, result(pts), 3, hp=1.0)
+        assert nav.breakouts >= 1 and nav.breakout is not None
+        assert nav.breakout[0] * sign > 0.5
+
+
+def test_late_gems_beat_kite_at_moderate_danger():
+    """After the early window, a gem clump still outranks an upward kite."""
+    clock = Clock()
+    nav = Navigator(clock=clock, log=lambda *_: None)
+    nav.game_s = 400.0
+    nav.heading = -math.pi / 2
+    crowd = blob(480, 420, n=8, spread=25)  # below the player, not on the gems
+    vecs = run(nav, clock, result(crowd, gems=SCATTER), 8, hp=1.0)
+    assert 0.3 < nav.last.danger_here < Tuning().gem_danger
+    assert vecs[-1][0] == 1
+
+    # The same situation with the knob off leaves the kite in charge.
+    clock = Clock()
+    off = tuning_from_env("gem_seek_gain=0", log=lambda *_: None)
+    nav = Navigator(tune=off, clock=clock, log=lambda *_: None)
+    nav.game_s = 400.0
+    nav.heading = -math.pi / 2
+    vecs = run(nav, clock, result(crowd, gems=SCATTER), 8, hp=1.0)
+    assert vecs[-1][0] != 1
+
+
+def test_high_danger_breakout_keeps_the_gap_not_the_chest():
+    clock = Clock()
+    nav = Navigator(clock=clock, log=lambda *_: None)
+    nav.game_s = 100.0
+    closing = result(ring(480, 256, 170, 40, gap_deg=(170, 200)))  # gap to the left
+    closing.chest = CHEST_RIGHT
+    vecs = run(nav, clock, closing, 6, hp=1.0)
+    assert nav.last.danger_here >= Tuning().chest_danger
+    assert nav.breakouts >= 1
+    assert all(v[0] < 0 for v in vecs)
+
+
+def test_chest_seek_logs_transitions_with_position_and_danger():
+    lines: list[str] = []
+    clock = Clock()
+    nav = Navigator(clock=clock, log=lines.append)
+    arrow = result([], gems=GEM_LEFT)
+    arrow.chest_arrow = ARROW_RIGHT
+    run(nav, clock, arrow, 6, hp=1.0)
+    seeks = [ln for ln in lines if ln.startswith("[chest] seek arrow ")]
+    assert seeks == ["[chest] seek arrow (900,256) danger=0.00"]
+    run(nav, clock, arrow, 4, hp=1.0)
+    assert [ln for ln in lines if ln.startswith("[chest]")] == seeks
+
+    gone = result([], gems=GEM_LEFT)
+    run(nav, clock, gone, 2, hp=1.0)
+    assert "[chest] clear arrow (900,256) danger=0.00" in lines
+
+    lines.clear()
+    both = result([])
+    both.chest_arrow = ARROW_RIGHT
+    both.chest = CHEST_RIGHT
+    run(nav, clock, both, 3, hp=1.0)
+    assert any(ln.startswith("[chest] seek chest (720,256) danger=") for ln in lines)
+    assert not any(ln.startswith("[chest] seek arrow") for ln in lines)
+
+    # Crowd and chest both to the right: danger is past chest_danger, so no seek.
+    lines.clear()
+    crowd = result(blob(600, 256, n=16, spread=16), gems=GEM_LEFT)
+    crowd.chest = CHEST_RIGHT
+    run(nav, clock, crowd, 6, hp=1.0)
+    assert nav.last.danger_here >= Tuning().chest_danger
+    assert not any(ln.startswith("[chest] seek") for ln in lines)
+
+
+def test_chest_status_names_the_raw_detection():
+    bare = result([])
+    assert chest_status(bare) == "chest=-"
+    bare.chest = (640.4, 380.6)
+    bare.chest_arrow = ARROW_RIGHT
+    assert chest_status(bare) == "chest=(640,381)"
+    bare.chest = None
+    assert chest_status(bare) == "arrow=(900,256)"

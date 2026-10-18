@@ -15,10 +15,12 @@ Per frame, every one of the 8 WASD directions is scored:
   one side). With no crowd the heading keeps rotating, so the character walks
   big loops and never stands idle in the open.
 * gems    - pull toward blue XP gems when nothing is close (stronger / farther before the flower),
-  plus, early, a non-cancelling pull at one target gem (densest clump per distance).
+  plus a non-cancelling pull at one target gem (densest clump per distance). While
+  roaming with no chest, ``gem_seek_gain`` keeps that clump ahead of the kite heading.
 * chests  - walk toward an on-screen treasure chest, or the yellow edge arrow that
-  points at an off-screen one. Outranks gems and roaming; fades out as danger
-  rises and is skipped during flees and committed escapes. ``chest_gain`` 0 disables.
+  points at an off-screen one. Outranks gems and roaming, including a plain
+  breakout; fades out as danger rises and is skipped during flees and committed
+  escapes. ``chest_gain`` 0 disables. Seek transitions are logged as ``[chest]``.
 * inertia - hysteresis: the current direction gets a bonus and a minimum
   dwell time so the chord does not jitter frame to frame.
 
@@ -68,6 +70,8 @@ VECTORS_8 = (
 )
 DIRS = VECTORS_8[1:]
 _UNIT = np.array([(dx / math.hypot(dx, dy), dy / math.hypot(dx, dy)) for dx, dy in DIRS], dtype=np.float32)
+# Symmetric corridor costs match to float noise. A looser band would hide a real gap.
+_COST_TIE = 1e-3
 
 
 @dataclass
@@ -174,6 +178,10 @@ class Tuning:
     # early_gem_until_s via gem_tune_for (late game unchanged). 0 disables.
     early_gem_target_gain: float = 1.4
     gem_target_gain: float = 0.0      # base (late) value; gem_tune_for swaps in the early one
+    # Roam only, and only when no chest is armed: raise the clump pull to this if
+    # gem_target_gain is lower, so scattered gems still beat the kite heading once
+    # danger is off zero (gem_danger still fades it; 0 disables).
+    gem_seek_gain: float = 6.0
     gem_cluster_r: float = 70.0
     # On-screen chest or the yellow edge arrow. Fades out by chest_danger.
     # Not applied during a flee or committed escape. 0 disables.
@@ -585,6 +593,49 @@ def score_directions(
     return Decision(best, table, here, mode)
 
 
+def _pick_min(costs: np.ndarray, prefer: tuple[float, float] | None) -> int:
+    """Index of the cheapest direction. Exact ties follow ``prefer``, not DIRS order.
+
+    DIRS is up, down, left, then right. On a symmetric ring the vertical penalty
+    leaves the other six corridors equal, and ``argmin`` then always returns left.
+    """
+    costs = np.asarray(costs, dtype=np.float32)
+    best = float(np.min(costs))
+    tied = np.flatnonzero(np.isfinite(costs) & (costs <= best + _COST_TIE))
+    if tied.size == 0:
+        return int(np.argmin(costs))
+    if prefer is None or tied.size == 1:
+        return int(tied[0])
+    px, py = float(prefer[0]), float(prefer[1])
+    n = math.hypot(px, py) or 1.0
+    dots = _UNIT[tied, 0] * (px / n) + _UNIT[tied, 1] * (py / n)
+    return int(tied[int(np.argmax(dots))])
+
+
+def _toward_point(vec: tuple[float, float], pos: tuple[float, float], px: float, py: float) -> bool:
+    """True when ``vec`` is within ~60 deg of the direction from the player to ``pos``."""
+    if vec == (0, 0):
+        return False
+    vx, vy = float(pos[0]) - px, float(pos[1]) - py
+    cd = math.hypot(vx, vy)
+    vn = math.hypot(vec[0], vec[1])
+    if cd < 1e-3 or vn < 1e-3:
+        return False
+    return (vec[0] * vx + vec[1] * vy) / (vn * cd) > 0.5
+
+
+def chest_status(result: VisionResult) -> str:
+    """Raw chest/arrow detection for the periodic ``[nav]`` line."""
+    spot = result.chest
+    label = "chest"
+    if spot is None:
+        spot = result.chest_arrow
+        label = "arrow"
+    if spot is None:
+        return "chest=-"
+    return f"{label}=({spot[0]:.0f},{spot[1]:.0f})"
+
+
 # HUD timer OCR plausibility (see Navigator._sync_timer).
 TIMER_JUMP_TOL_S = 8.0       # accept readings this close to the wall-clock estimate
 TIMER_RESYNC_N = 3           # consecutive agreeing out-of-range readings to resync
@@ -632,6 +683,9 @@ class Navigator:
         self._escape_reason = "revive"  # "revive" or "ring" (flower-window commit)
         self._last_break_dir: tuple[float, float] | None = None  # heading of the last breakout
         self._last_break_end = -1e9     # game_s when it ended
+        self._seek: tuple[str, tuple[float, float]] | None = None  # ("chest"|"arrow", xy) while seeking
+        self._tie_bias = 0.0  # orbit radians kept across breakout-heading snaps
+        self._spun = 0.0      # orbit radians since the last snap
 
     @property
     def escaping(self) -> bool:
@@ -733,7 +787,7 @@ class Navigator:
             ecost = escape_costs(pts, px, py, t)
             if self._escape_reason == "ring":
                 ecost = self._no_reverse(ecost, self._recent_break_dir())
-            self.breakout = tuple(float(v) for v in _UNIT[int(np.argmin(ecost))])
+            self.breakout = tuple(float(v) for v in _UNIT[_pick_min(ecost, self._roam_vec())])
             self._escape_origin = self.breakout
             self._breakout_origin = self.breakout
             self._breakout_s = 0.0
@@ -745,13 +799,28 @@ class Navigator:
             )
             return
         costs = corridor_costs(pts, px, py, t.corridor_len, t.corridor_width)
-        if self.current in DIRS:
-            cu = _UNIT[DIRS.index(self.current)]
-            align = _UNIT @ cu
-            costs = costs + 0.25 * (1.0 - align)
         prev = self._recent_break_dir()
         costs = self._no_reverse(costs, prev)
-        best = int(np.argmin(costs))
+        # A symmetric crowd ties. The 0.25 "don't reverse" nudge would then lock
+        # the first DIRS winner (left) forever, so only apply it when one corridor
+        # is actually thinner.
+        finite = costs[np.isfinite(costs)]
+        unique = finite.size > 0 and int(np.sum(finite <= float(finite.min()) + _COST_TIE)) == 1
+        if unique and self.current in DIRS:
+            cu = _UNIT[DIRS.index(self.current)]
+            costs = costs + 0.25 * (1.0 - (_UNIT @ cu))
+            costs = self._no_reverse(costs, prev)
+        # Ties follow the remembered breakout inside the flower window (no-reverse
+        # is already masking the back half). Outside it, follow the roam loop,
+        # including the turn a breakout snap would otherwise throw away — DIRS
+        # order used to make that tie left, and keeping the snap heading made
+        # the first side stick for the rest of the run.
+        if prev is not None and self._in_flower():
+            prefer = prev
+        else:
+            ang = self.heading + self._tie_bias
+            prefer = (math.cos(ang), math.sin(ang))
+        best = _pick_min(costs, prefer)
         if prev is not None and self._in_flower() and t.flower_noreverse_s > 0:
             self.log(
                 f"[nav] flower no-reverse breakout {DIRS[best]} (last {_nearest_dir(prev)}) game~{self.game_s:.0f}s"
@@ -762,10 +831,40 @@ class Navigator:
         self._breakout_check = 0.0
         self.breakouts += 1
 
+    def _roam_vec(self) -> tuple[float, float]:
+        return (math.cos(self.heading), math.sin(self.heading))
+
+    def _keep_orbit(self, vec: tuple[float, float]) -> None:
+        """Aim the roam along ``vec`` without dropping the loop's accumulated turn."""
+        self._tie_bias += self._spun
+        self._spun = 0.0
+        self.heading = math.atan2(vec[1], vec[0])
+
+    def _note_chest(self, kind: str | None, pos: tuple[float, float] | None, danger: float) -> None:
+        """Log each transition into or out of an arrow-seek or chest-seek target."""
+        prev = self._seek
+        if kind is None or pos is None:
+            if prev is not None:
+                k, p = prev
+                self.log(f"[chest] clear {k} ({p[0]:.0f},{p[1]:.0f}) danger={danger:.2f}")
+            self._seek = None
+            return
+        spot = (float(pos[0]), float(pos[1]))
+        if prev is not None and prev[0] == kind:
+            self._seek = (kind, spot)
+            return
+        if prev is not None:
+            k, p = prev
+            self.log(f"[chest] clear {k} ({p[0]:.0f},{p[1]:.0f}) danger={danger:.2f}")
+        self.log(f"[chest] seek {kind} ({spot[0]:.0f},{spot[1]:.0f}) danger={danger:.2f}")
+        self._seek = (kind, spot)
+
     def _kite_direction(self, pts: np.ndarray, px: float, py: float, dt: float) -> tuple[float, float]:
 
         phase = self.phase
-        self.heading += self.orbit * dt * 2.0 * math.pi / phase.orbit_period_s
+        step = self.orbit * dt * 2.0 * math.pi / phase.orbit_period_s
+        self._spun += step
+        self.heading += step
         roam = (math.cos(self.heading), math.sin(self.heading))
         if pts.shape[0] == 0:
             return roam
@@ -880,7 +979,7 @@ class Navigator:
                     self._breakout_s >= t.breakout_min_s and not closing
                 )
             if done:
-                self.heading = math.atan2(self.breakout[1], self.breakout[0])
+                self._keep_orbit(self.breakout)
                 self._end_breakout()
                 self._flee_remaining = 0.0
                 return
@@ -912,7 +1011,7 @@ class Navigator:
         self._escape_remaining = max(0.0, self._escape_remaining - dt)
         self._flee_remaining = self._escape_remaining
         if self._escape_remaining <= 0:
-            self.heading = math.atan2(self.breakout[1], self.breakout[0])
+            self._keep_orbit(self.breakout)
             self.log(f"[nav] {self._escape_reason} escape done {_nearest_dir(self.breakout)} game~{self.game_s:.0f}s")
             self._end_breakout()
             self._flee_remaining = 0.0
@@ -1003,6 +1102,9 @@ class Navigator:
         # Denser early XP: boost gem pull before the flower without changing late knobs.
         score_tune = gem_tune_for(self.tune, self.game_s)
         cone: list[tuple[int, int]] | None = None
+        chest_at: tuple[float, float] | None = None
+        if self.tune.chest_gain > 0 and not escape and self._flee_remaining <= 0:
+            chest_at = result.chest or result.chest_arrow
         if self.breakout is not None:
             t = self.tune
             plain = not escape and self._flee_remaining <= 0
@@ -1011,8 +1113,9 @@ class Navigator:
             dec = score_directions(
                 pts, (px, py), self.breakout, self.tune.breakout_weight,
                 gems=bgems, current=self.current, hp=hp, tune=btune, idle_ok=False,
-                kite_floor=True,
+                kite_floor=True, chest=chest_at if plain else None,
             )
+            walked_chest = dec.mode == "chest"
             dec.mode = "breakout"
             kite = self.breakout
             if escape:
@@ -1033,14 +1136,20 @@ class Navigator:
                 ox, oy = self._breakout_origin or self.breakout
                 cone = [d for i, d in enumerate(DIRS) if _UNIT[i, 0] * ox + _UNIT[i, 1] * oy >= -1e-6]
                 dec.vector = max(cone, key=lambda d: dec.scores[d])
+            if walked_chest and not escape:
+                dec.mode = "chest"
         else:
-            chest_at = None
-            if self.tune.chest_gain > 0:
-                chest_at = result.chest or result.chest_arrow
+            roam_tune = score_tune
+            if (
+                chest_at is None
+                and result.gems
+                and self.tune.gem_seek_gain > score_tune.gem_target_gain
+            ):
+                roam_tune = replace(score_tune, gem_target_gain=self.tune.gem_seek_gain)
             dec = score_directions(
                 pts, (px, py), kite, phase.kite_weight,
                 gems=result.gems, current=self.current, hp=hp,
-                tune=score_tune, idle_ok=phase.idle_ok,
+                tune=roam_tune, idle_ok=phase.idle_ok,
                 chest=chest_at,
             )
 
@@ -1067,6 +1176,12 @@ class Navigator:
         if choice != self.current:
             self._since_change = 0.0
         self.current = choice
+        armed = chest_at if chest_at is not None and dec.danger_here < self.tune.chest_danger else None
+        if armed is not None and _toward_point(choice, armed, px, py):
+            kind = "chest" if result.chest else "arrow"
+            self._note_chest(kind, armed, dec.danger_here)
+        else:
+            self._note_chest(None, None, dec.danger_here)
         dec = Decision(choice, dec.scores, dec.danger_here, f"{dec.mode}/{phase.name}")
         self.last = dec
         return dec
