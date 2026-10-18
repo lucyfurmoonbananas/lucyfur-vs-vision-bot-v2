@@ -128,6 +128,10 @@ class Tuning:
     # that just killed us. Oct 5 logs: the plain 2 s flee re-picked its corridor every
     # 0.4 s and reversed (w -> s, d -> a), walking back into the ring.
     revive_escape_s: float = 3.0      # length of the committed escape
+    # run3 at 641s and 651s: the 3s heading ended with cover still 1.0 (danger 12–19)
+    # and the next death was 9–10s later. Hold the heading while the ring stays
+    # closed, and stop once it opens or this cap is reached.
+    revive_escape_max_s: float = 12.0
     escape_len: float = 420.0         # corridor length when picking the escape heading
     escape_wedge_radius: float = 480.0  # crowd within this radius counts for the wedge term
     escape_wedge_gain: float = 0.5    # weight of whole-screen wedge density vs. corridor
@@ -681,6 +685,7 @@ class Navigator:
         self._escape_pending = False    # escape requested, heading not picked yet
         self._escape_origin: tuple[float, float] | None = None  # heading after the early window
         self._escape_reason = "revive"  # "revive" or "ring" (flower-window commit)
+        self._revive_held = False       # logged the surrounded-hold extension once
         self._last_break_dir: tuple[float, float] | None = None  # heading of the last breakout
         self._last_break_end = -1e9     # game_s when it ended
         self._seek: tuple[str, tuple[float, float]] | None = None  # ("chest"|"arrow", xy) while seeking
@@ -727,9 +732,11 @@ class Navigator:
         lowest-threat-density direction (``escape_costs``), steering only within
         ~45 deg of that heading. The heading may be re-picked during the first
         ``escape_repick_s`` (stale first frames), afterwards only if that corridor
-        is clearly shut and never into a reversal. An HP crash during the escape
-        does not drop the heading. Calling it again while the REVIVE screen is up
-        just restarts the same window. Returns the applied duration.
+        is clearly shut and never into a reversal. While cover stays at or above
+        ``cover_trigger`` the heading is held up to ``revive_escape_max_s``. An HP
+        crash during the escape does not drop the heading. Calling it again while
+        the REVIVE screen is up just restarts the same window. Returns the applied
+        duration.
         """
         t = self.tune
         dur = t.revive_escape_s if duration_s is None else float(duration_s)
@@ -743,6 +750,7 @@ class Navigator:
         self._escape_remaining = dur
         self._escape_s = 0.0
         self._escape_pending = True
+        self._revive_held = False
         return dur
 
     def _end_breakout(self) -> None:
@@ -1003,6 +1011,28 @@ class Navigator:
             self._request_escape(t.ring_commit_s, "ring")
         self._start_breakout(pts, px, py)
 
+    def _hold_revive_escape(self, t: Tuning) -> bool:
+        """Keep a post-revive heading while the ring is still closed.
+
+        A one-sided crowd (cover under ``cover_trigger``) still ends at
+        ``revive_escape_s``. A closed ring holds until it opens or
+        ``revive_escape_max_s``.
+        """
+        if self._escape_reason != "revive" or self.cover < t.cover_trigger:
+            return False
+        room = t.revive_escape_max_s - self._escape_s
+        if room <= 1e-3:
+            return False
+        self._escape_remaining = min(0.5, room)
+        self._flee_remaining = self._escape_remaining
+        if not self._revive_held:
+            self._revive_held = True
+            self.log(
+                f"[nav] revive escape holding {_nearest_dir(self.breakout)} "
+                f"(cover {self.cover:.2f}) up to {t.revive_escape_max_s:.0f}s game~{self.game_s:.0f}s"
+            )
+        return True
+
     def _update_escape(self, pts: np.ndarray, px: float, py: float, dt: float) -> None:
         """Advance a committed post-REVIVE escape (no small-gap re-evaluation)."""
         t = self.tune
@@ -1011,11 +1041,12 @@ class Navigator:
         self._escape_remaining = max(0.0, self._escape_remaining - dt)
         self._flee_remaining = self._escape_remaining
         if self._escape_remaining <= 0:
-            self._keep_orbit(self.breakout)
-            self.log(f"[nav] {self._escape_reason} escape done {_nearest_dir(self.breakout)} game~{self.game_s:.0f}s")
-            self._end_breakout()
-            self._flee_remaining = 0.0
-            return
+            if not self._hold_revive_escape(t):
+                self._keep_orbit(self.breakout)
+                self.log(f"[nav] {self._escape_reason} escape done {_nearest_dir(self.breakout)} game~{self.game_s:.0f}s")
+                self._end_breakout()
+                self._flee_remaining = 0.0
+                return
         costs = escape_costs(pts, px, py, t)
         cur_d = _nearest_dir(self.breakout)
         cur = DIRS.index(cur_d)

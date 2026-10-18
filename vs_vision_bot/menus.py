@@ -831,28 +831,52 @@ def read_banish_button(frame: np.ndarray) -> BanishButton | None:
 REVIVE_HP_HOLDOFF_S = 1.0
 
 
+# Consecutive missed bar reads that drop a stale value. One occlusion must not
+# swing a level-up; a swarm sitting on the bar (run1: none for ~4.6s, med stuck
+# at 0.92) must not keep that high reading.
+HP_BLIND_MISSES = 3
+
+
 class HpTracker:
     """Median of the last few HP-bar readings: one frame with a sprite over the bar
     (or a red hit flash) must not swing the level-up choice."""
 
-    def __init__(self, window: int = 5) -> None:
+    def __init__(self, window: int = 5, miss_limit: int = HP_BLIND_MISSES) -> None:
         self.window = window
+        self.miss_limit = miss_limit
         self.values: list[float] = []
+        self.misses = 0
+        self.blind = False
 
     def add(self, v: float | None) -> None:
         if v is None:
+            self.misses += 1
+            if self.values and self.misses >= self.miss_limit:
+                self.values.clear()
+                self.blind = True
             return
+        self.misses = 0
+        self.blind = False
         self.values.append(float(v))
         del self.values[: -self.window]
 
     def reset(self) -> None:
         self.values.clear()
+        self.misses = 0
+        self.blind = False
 
     @property
     def value(self) -> float | None:
         if not self.values:
             return None
         return float(np.median(self.values))
+
+
+def hp_for_nav(hp: float | None, blind: bool) -> float | None:
+    """HP nav should act on. A bar lost under a swarm counts as empty."""
+    if blind:
+        return 0.0
+    return hp
 
 
 # ---------------------------------------------------------------- chest OCR
@@ -1006,13 +1030,18 @@ class MenuPilot:
 
     @property
     def hp(self) -> float | None:
-        """Smoothed HP fraction (median of recent bar readings), None until seen."""
+        """Smoothed HP fraction (median of recent bar readings), None until seen or when the bar is lost."""
         return self._hp.value
 
     @hp.setter
     def hp(self, v: float | None) -> None:
         self._hp.reset()
         self._hp.add(v)
+
+    @property
+    def hp_blind(self) -> bool:
+        """True after the bar stays unreadable: the last high reading has been dropped."""
+        return self._hp.blind
 
     def new_run(self) -> None:
         """A fresh run: forget owned items and HP history."""
