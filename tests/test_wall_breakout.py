@@ -38,6 +38,28 @@ def test_late_density_surge_commits_through_the_gap_and_holds():
     assert all(v[0] >= 0 for v in out)
 
 
+def test_density_surge_overrides_a_latched_chest():
+    """A closing wall commits through the gap even while a chest seek is latched."""
+    clock = Clock()
+    logs: list[str] = []
+    nav = Navigator(clock=clock, log=logs.append)
+    nav.game_s = 660.0
+    quiet = result(blob(700, 256, n=4, spread=12))
+    quiet.chest = (300.0, 256.0)  # west; the gap below is east
+    run(nav, clock, quiet, 6, hp=1.0)
+    assert nav._chest_latched
+    assert any(line.startswith("[chest] seek") for line in logs)
+
+    gap_east = result(ring(480, 256, 150, 48, gap_deg=(-1, 25)))
+    gap_east.chest = (300.0, 256.0)
+    out = run(nav, clock, gap_east, 4, hp=0.80)
+    assert nav.escaping and nav.last.mode.startswith("ring-escape")
+    assert nav.breakout is not None and nav.breakout[0] > 0.5
+    assert nav._chest_latched is False
+    assert any(line.startswith("[chest] clear") for line in logs)
+    assert all(v[0] >= 0 for v in out)
+
+
 def test_surge_picks_the_south_gap_when_that_side_is_thinnest():
     clock = Clock()
     nav = Navigator(clock=clock, log=lambda *_: None)

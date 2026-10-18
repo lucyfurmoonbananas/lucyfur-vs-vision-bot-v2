@@ -13,7 +13,7 @@ import pytest
 from vs_vision_bot import menus
 from vs_vision_bot.pathfind import Navigator, Tuning, score_directions
 
-from tests.test_movement import Clock, P, blob, result, run
+from tests.test_movement import Clock, P, blob, result, ring, run
 
 
 def test_low_read_then_a_miss_stays_critical_until_a_trusted_heal():
@@ -55,6 +55,44 @@ def test_low_read_then_a_miss_stays_critical_until_a_trusted_heal():
         spike.add(0.55)
     assert spike.value >= 0.2 and spike.low_held is False
     assert menus.hp_for_nav(spike.value, spike.blind, spike.low_held) >= 0.2
+
+
+def test_critical_hp_drops_a_latched_chest_and_late_breakout_gems():
+    """The chest latch and the post-flower breakout gem seek both stop under 0.20 HP."""
+    clock = Clock()
+    logs: list[str] = []
+    nav = Navigator(clock=clock, log=logs.append)
+    nav.game_s = 600.0
+    armed = result([])
+    armed.chest = (720.0, 256.0)
+    assert run(nav, clock, armed, 3, hp=1.0) == [(1, 0)] * 3
+    assert nav._chest_latched
+
+    into = result(blob(640, 256, n=6, spread=12))
+    into.chest = (720.0, 256.0)
+    into.gems = [(710.0, 250.0), (720.0, 260.0)]
+    vecs = run(nav, clock, into, 4, hp=0.12)
+    assert nav._chest_latched is False
+    assert any(line.startswith("[chest] clear") for line in logs)
+    assert all(v[0] <= 0 for v in vecs)
+    assert nav.last.mode.endswith("critical")
+
+    # Same late ring as the gem-seek tests: gap north, gems east. Full HP steps
+    # toward those gems; critical HP must not.
+    clock2 = Clock()
+    late = Navigator(clock=clock2, log=lambda *_: None)
+    late.game_s = 600.0
+    gap = result(ring(480, 256, 180, 28, gap_deg=(250, 290)), gems=[(700.0, 256.0), (712.0, 262.0)])
+    healthy = run(late, clock2, gap, 8, hp=1.0)
+    assert late.breakout is not None and not late.escaping
+    assert healthy[-1][0] > 0
+
+    clock3 = Clock()
+    low = Navigator(clock=clock3, log=lambda *_: None)
+    low.game_s = 600.0
+    crit = run(low, clock3, gap, 8, hp=0.12)
+    assert low.breakout is not None and not low.escaping
+    assert all(v[0] <= 0 for v in crit[-4:])
 
 
 def test_critical_hp_logs_on_off_and_tags_the_nav_mode():
