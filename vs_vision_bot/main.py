@@ -8,6 +8,7 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 
 from vs_vision_bot.capture import ScreenCapture
 from vs_vision_bot.config import Config
@@ -15,7 +16,7 @@ from vs_vision_bot.controller import MoveController
 from vs_vision_bot.debug_window import DebugWindow
 from vs_vision_bot.hotkeys import CommandBus, HotkeyService
 from vs_vision_bot.input_backend import make_backend
-from vs_vision_bot.menus import MenuPilot, detect_level_up, tesseract_available
+from vs_vision_bot.menus import MenuPilot, detect_level_up, read_hp_fraction, tesseract_available
 from vs_vision_bot.pathfind import Navigator, tuning_from_env
 from vs_vision_bot.vision import Vision, draw_synthetic_arena
 from vs_vision_bot.watchdog import LoopHeartbeat, ProgressWatchdog, Stall
@@ -27,10 +28,93 @@ EXIT_WATCHDOG = 3
 # After a REVIVE click, log the move vector and held keys this long (~4 lines/s).
 REVIVE_TRACE_S = 3.5  # covers the whole ~3 s revive escape
 REVIVE_TRACE_EVERY_S = 0.25
+# Per-frame HP / danger / mode kept across this window and dumped on REVIVE or QUIT.
+DEATH_TRACE_S = 5.0
+DEATH_TRACE_FRAMES = 2  # frames saved before the detected screen, plus that frame
+DEATH_KINDS = ("revive", "quit")
 # During the committed post-REVIVE escape a vision-heuristic-only menu flag (no
 # pilot / OCR confirmation) must hold this many consecutive frames before the
 # character is frozen. Real level-ups are confirmed by the pilot within a frame.
 ESCAPE_HEURISTIC_MENU_FRAMES = 3
+
+
+def _trace_num(v: float | None) -> str:
+    return "none" if v is None else f"{v:.2f}"
+
+
+class DeathTrace:
+    """Last ``window_s`` of per-frame HP read, danger and nav mode, plus a few frames.
+
+    ``observe`` stores numbers only (and the last ``prior_frames`` frame references,
+    not copies). ``dump`` logs the window and writes the triggering frame plus those
+    priors into ``save_dir``.
+    """
+
+    def __init__(
+        self,
+        save_dir: str,
+        window_s: float = DEATH_TRACE_S,
+        prior_frames: int = DEATH_TRACE_FRAMES,
+        log=print,
+    ) -> None:
+        self.save_dir = save_dir
+        self.window_s = window_s
+        self.log = log
+        self.samples: deque = deque()
+        self._priors: deque = deque(maxlen=prior_frames)
+        self._hold = None
+        self._seq = 0
+
+    def observe(
+        self,
+        t: float,
+        hp: float | None,
+        med: float | None,
+        danger: float | None,
+        mode: str,
+        frame,
+    ) -> None:
+        if self._hold is not None:
+            self._priors.append(self._hold)
+        self._hold = frame
+        self.samples.append((float(t), hp, med, danger, mode))
+        cutoff = float(t) - self.window_s
+        while self.samples and self.samples[0][0] < cutoff:
+            self.samples.popleft()
+
+    def clear(self) -> None:
+        self.samples.clear()
+        self._priors.clear()
+        self._hold = None
+
+    def dump(self, kind: str, frame, t: float, game_s: float | None) -> list[str]:
+        when = "?" if game_s is None else f"{game_s:.0f}"
+        self.log(f"[death-trace] {kind} game~{when}s n={len(self.samples)}")
+        for ts, hp, med, danger, mode in self.samples:
+            self.log(
+                f"[death-trace] {ts - t:6.2f}s hp={_trace_num(hp)} med={_trace_num(med)} "
+                f"danger={_trace_num(danger)} mode={mode}"
+            )
+        paths: list[str] = []
+        try:
+            import cv2
+
+            os.makedirs(self.save_dir, exist_ok=True)
+            stamp = time.strftime("%H%M%S")
+            self._seq += 1
+            frames = [frame, *reversed(self._priors)]
+            for i, fr in enumerate(frames):
+                if fr is None:
+                    continue
+                path = os.path.join(
+                    self.save_dir, f"death_{kind}_{stamp}_{self._seq:02d}_{i:02d}.png"
+                )
+                if cv2.imwrite(path, fr):
+                    paths.append(path)
+            self.log("[death-trace] saved " + " ".join(paths))
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"[death-trace] frame save failed: {exc}")
+        return paths
 
 
 def gate_heuristic_menu(
@@ -212,6 +296,13 @@ def main(argv: list[str] | None = None) -> int:
     blackbox_dir = os.environ.get("VS_BLACKBOX_DIR", "/workspace/vsbot-check/deaths")
     last_box = [0.0]
     dumped_for = [0]
+    trace_root = (
+        os.environ.get("VS_SESSION")
+        or os.environ.get("VS_RESULTS_DIR")
+        or "/workspace/vsbot-check/results"
+    )
+    trace = DeathTrace(os.path.join(trace_root, "deaths"))
+    trace_dumped = [0]
     t0 = time.monotonic()
     revive_seen = [0]
     revive_trace = [0.0, -1e9, 0.0]  # started_at, until, last_line_at
@@ -291,24 +382,39 @@ def main(argv: list[str] | None = None) -> int:
                 heur_streak[0] = 0
             if bus.paused or result.menu:
                 vector, keys = (0, 0), ()
+                if not bus.paused:
+                    now_obs = time.monotonic()
+                    trace.observe(
+                        now_obs, read_hp_fraction(frame), pilot.hp, None, menu_kind or "menu", frame,
+                    )
             else:
                 decision = nav.step(result, hp=pilot.hp)
                 vector, keys = decision.vector, cfg.keys_for_vector(decision.vector)
                 hp_txt = "?" if pilot.hp is None else f"{pilot.hp:.2f}"
                 result.note = f"{decision.mode} d={decision.danger_here:.1f} hp={hp_txt}{menu_hint}"
-                now_log = time.monotonic()
-                if now_log - last_nav_log[0] >= 3.0:
-                    last_nav_log[0] = now_log
+                now_obs = time.monotonic()
+                if now_obs - last_nav_log[0] >= 3.0:
+                    last_nav_log[0] = now_obs
                     n_thr = 0 if result.threats is None else len(result.threats)
                     print(
                         f"[nav] game~{nav.game_s:5.0f}s {decision.mode} v={decision.vector} "
                         f"danger={decision.danger_here:.2f} cover={nav.cover:.2f} "
                         f"cells={n_thr} gems={len(result.gems)} hp={hp_txt} breakouts={nav.breakouts}"
                     )
+                trace.observe(
+                    now_obs, read_hp_fraction(frame), pilot.hp,
+                    decision.danger_here, decision.mode, frame,
+                )
+            if not bus.paused and deaths > trace_dumped[0]:
+                trace_dumped[0] = deaths
+                if menu_kind in DEATH_KINDS:
+                    trace.dump(menu_kind, frame, now_obs, nav.game_s)
             last_vector = vector
             if pilot.finished and not bus.paused:
                 pilot_new_run[0] = True
                 dumped_for[0] = 0
+                trace_dumped[0] = 0
+                trace.clear()
                 # Final GAME OVER handled (QUIT + DONE). Stop acting; the game is
                 # closed / reopened outside the bot. Press p to run again.
                 bus.toggle_pause()
