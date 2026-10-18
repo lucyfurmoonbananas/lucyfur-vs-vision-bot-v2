@@ -517,6 +517,11 @@ def detect_chest(frame: np.ndarray) -> tuple[int, int] | None:
         # The lock sits on the body, not beside a tree the window happened to clip.
         if not (wx0 - 4 <= gx - x0 <= wx1 + 4 and wy0 - 4 <= gy - y0 <= wy1 + 4):
             continue
+        # A chest's gold is a horizontal band across the wooden body. A Fire Wand
+        # fireball is a round yellow core inside an orange halo: same colors, but
+        # the gold is as tall as it is wide and does not reach the sides of the halo.
+        if bw < bh * 1.6 or bw < 0.65 * ww or bh > 0.65 * hh:
+            continue
         cx = x0 + (wx0 + wx1) // 2
         cy = y0 + (wy0 + wy1) // 2
         if float(np.hypot(cx - gx, cy - gy)) > 14 * s:
