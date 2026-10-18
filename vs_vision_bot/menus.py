@@ -835,6 +835,12 @@ REVIVE_HP_HOLDOFF_S = 1.0
 # swing a level-up; a swarm sitting on the bar (run1: none for ~4.6s, med stuck
 # at 0.92) must not keep that high reading.
 HP_BLIND_MISSES = 3
+# A red sprite or damage flash in the fallback search window reads as ~1.0 while
+# the anchored bar is hidden (run6 quit: 0.00 → 0.80 → 0.53 → 1.00 → 0.06).
+# An upward jump this large is ignored until several frames agree.
+HP_JUMP_UP = 0.30
+HP_JUMP_CONFIRM = 3
+HP_JUMP_AGREE = 0.15
 
 
 class HpTracker:
@@ -847,23 +853,53 @@ class HpTracker:
         self.values: list[float] = []
         self.misses = 0
         self.blind = False
+        self._anchor: float | None = None
+        self._pending: list[float] = []
 
     def add(self, v: float | None) -> None:
         if v is None:
+            self._pending.clear()
             self.misses += 1
             if self.values and self.misses >= self.miss_limit:
+                self._anchor = self.value
                 self.values.clear()
                 self.blind = True
             return
+        v = float(v)
+        base = self.value if self.values else self._anchor
+        if base is not None and v > base + HP_JUMP_UP:
+            if self._pending and abs(v - self._pending[-1]) > HP_JUMP_AGREE:
+                self._pending.clear()
+            self._pending.append(v)
+            if (
+                len(self._pending) >= HP_JUMP_CONFIRM
+                and max(self._pending) - min(self._pending) <= HP_JUMP_AGREE
+            ):
+                self._accept_window(self._pending[-HP_JUMP_CONFIRM :])
+            return
+        self._accept(v)
+
+    def _accept(self, v: float) -> None:
         self.misses = 0
         self.blind = False
+        self._pending.clear()
         self.values.append(float(v))
         del self.values[: -self.window]
+        self._anchor = self.value
+
+    def _accept_window(self, samples: list[float]) -> None:
+        self.misses = 0
+        self.blind = False
+        self._pending.clear()
+        self.values = [float(s) for s in samples[-self.window :]]
+        self._anchor = self.value
 
     def reset(self) -> None:
         self.values.clear()
         self.misses = 0
         self.blind = False
+        self._anchor = None
+        self._pending.clear()
 
     @property
     def value(self) -> float | None:
