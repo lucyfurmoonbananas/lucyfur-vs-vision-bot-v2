@@ -16,10 +16,17 @@ from vs_vision_bot.controller import MoveController
 from vs_vision_bot.debug_window import DebugWindow
 from vs_vision_bot.hotkeys import CommandBus, HotkeyService
 from vs_vision_bot.input_backend import make_backend
-from vs_vision_bot.menus import MenuPilot, detect_level_up, read_hp_fraction, tesseract_available
+from vs_vision_bot.menus import MenuPilot, detect_level_up, hp_for_nav, read_hp_fraction, tesseract_available
 from vs_vision_bot.pathfind import Navigator, tuning_from_env
 from vs_vision_bot.vision import Vision, draw_synthetic_arena
-from vs_vision_bot.watchdog import LoopHeartbeat, ProgressWatchdog, Stall
+from vs_vision_bot.watchdog import (
+    FRAME_CHANGE_MIN,
+    LoopHeartbeat,
+    ProgressWatchdog,
+    Stall,
+    frame_signature,
+    signature_change,
+)
 
 # Exit status when a watchdog ended the run. play_run.sh (scripts/) answers it by
 # killing the game, relaunching it and realigning the window; session_loop does not
@@ -30,7 +37,9 @@ REVIVE_TRACE_S = 3.5  # covers the whole ~3 s revive escape
 REVIVE_TRACE_EVERY_S = 0.25
 # Per-frame HP / danger / mode kept across this window and dumped on REVIVE or QUIT.
 DEATH_TRACE_S = 5.0
-DEATH_TRACE_FRAMES = 2  # frames saved before the detected screen, plus that frame
+DEATH_TRACE_FRAMES = 2  # immediate frames; a static death screen is replaced by older snaps
+DEATH_TRACE_SNAP_S = 0.5
+DEATH_TRACE_SNAP_KEEP_S = 8.0  # outlasts the OCR wait on the game-over screen
 DEATH_KINDS = ("revive", "quit")
 # During the committed post-REVIVE escape a vision-heuristic-only menu flag (no
 # pilot / OCR confirmation) must hold this many consecutive frames before the
@@ -42,12 +51,23 @@ def _trace_num(v: float | None) -> str:
     return "none" if v is None else f"{v:.2f}"
 
 
-class DeathTrace:
-    """Last ``window_s`` of per-frame HP read, danger and nav mode, plus a few frames.
+def _frames_alike(a, b) -> bool:
+    """True when both frames are the same static screen.
 
-    ``observe`` stores numbers only (and the last ``prior_frames`` frame references,
-    not copies). ``dump`` logs the window and writes the triggering frame plus those
-    priors into ``save_dir``.
+    A GAME OVER overlay drifts well under ``FRAME_CHANGE_MIN``; live gameplay does not.
+    """
+    if a is None or b is None or getattr(a, "shape", None) != getattr(b, "shape", None):
+        return False
+    return signature_change(frame_signature(a), frame_signature(b)) < FRAME_CHANGE_MIN
+
+
+class DeathTrace:
+    """Last ``window_s`` of per-frame HP read, danger and nav mode, plus frames.
+
+    ``observe`` stores numbers, the last ``prior_frames`` frame references, and a
+    copy every ``DEATH_TRACE_SNAP_S`` kept for ``DEATH_TRACE_SNAP_KEEP_S``. ``dump``
+    logs the window. When the frames in hand are a static death screen, it writes
+    the earlier snaps; otherwise it writes the triggering frame plus those priors.
     """
 
     def __init__(
@@ -63,6 +83,8 @@ class DeathTrace:
         self.samples: deque = deque()
         self._priors: deque = deque(maxlen=prior_frames)
         self._hold = None
+        self._snaps: deque = deque()
+        self._snap_at: float | None = None
         self._seq = 0
 
     def observe(
@@ -77,15 +99,32 @@ class DeathTrace:
         if self._hold is not None:
             self._priors.append(self._hold)
         self._hold = frame
-        self.samples.append((float(t), hp, med, danger, mode))
-        cutoff = float(t) - self.window_s
+        now = float(t)
+        self.samples.append((now, hp, med, danger, mode))
+        cutoff = now - self.window_s
         while self.samples and self.samples[0][0] < cutoff:
             self.samples.popleft()
+        if frame is not None and (self._snap_at is None or now - self._snap_at >= DEATH_TRACE_SNAP_S):
+            self._snaps.append((now, frame.copy()))
+            self._snap_at = now
+            cut = now - DEATH_TRACE_SNAP_KEEP_S
+            while self._snaps and self._snaps[0][0] < cut:
+                self._snaps.popleft()
 
     def clear(self) -> None:
         self.samples.clear()
         self._priors.clear()
         self._hold = None
+        self._snaps.clear()
+        self._snap_at = None
+
+    def _frames_to_save(self, frame) -> list:
+        recent = [fr for fr in (frame, *reversed(self._priors)) if fr is not None]
+        static = len(recent) >= 2 and all(_frames_alike(recent[0], fr) for fr in recent[1:])
+        if not static:
+            return recent
+        older = [img for _ts, img in self._snaps if not _frames_alike(img, frame)]
+        return older if older else recent
 
     def dump(self, kind: str, frame, t: float, game_s: float | None) -> list[str]:
         when = "?" if game_s is None else f"{game_s:.0f}"
@@ -102,10 +141,7 @@ class DeathTrace:
             os.makedirs(self.save_dir, exist_ok=True)
             stamp = time.strftime("%H%M%S")
             self._seq += 1
-            frames = [frame, *reversed(self._priors)]
-            for i, fr in enumerate(frames):
-                if fr is None:
-                    continue
+            for i, fr in enumerate(self._frames_to_save(frame)):
                 path = os.path.join(
                     self.save_dir, f"death_{kind}_{stamp}_{self._seq:02d}_{i:02d}.png"
                 )
@@ -388,7 +424,9 @@ def main(argv: list[str] | None = None) -> int:
                         now_obs, read_hp_fraction(frame), pilot.hp, None, menu_kind or "menu", frame,
                     )
             else:
-                decision = nav.step(result, hp=pilot.hp)
+                decision = nav.step(
+                    result, hp=hp_for_nav(pilot.hp, getattr(pilot, "hp_blind", False)),
+                )
                 vector, keys = decision.vector, cfg.keys_for_vector(decision.vector)
                 hp_txt = "?" if pilot.hp is None else f"{pilot.hp:.2f}"
                 result.note = f"{decision.mode} d={decision.danger_here:.1f} hp={hp_txt}{menu_hint}"

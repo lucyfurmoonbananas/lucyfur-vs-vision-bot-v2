@@ -176,6 +176,38 @@ def test_escape_in_ring_leaves_through_gap():
     assert sum(1 for v in out if v[0] == -1) >= 20
 
 
+def test_revive_escape_holds_while_the_ring_stays_closed_and_ends_when_it_opens():
+    """r3 at 641s and 651s: the 3s heading ended with cover still 1.0, dead ~10s later."""
+    clock = Clock()
+    nav, logs = _quiet_nav(clock)
+    nav.game_s = 641.0
+    wall = result(ring(480, 256, 140, 64))
+    nav.request_revive_escape()
+    run(nav, clock, wall, 40, hp=0.5)  # ~3.3 s, past the old fixed window
+    assert nav.escaping and nav.cover >= nav.tune.cover_trigger
+    assert nav.last.mode.startswith("revive-escape")
+    assert any("revive escape holding" in line for line in logs)
+    assert not any("escape done" in line for line in logs)
+    h0 = nav.breakout
+    # Open ground: the hold stops and the committed heading ends.
+    run(nav, clock, result([]), 10, hp=0.5)
+    assert not nav.escaping
+    assert any("revive escape done" in line for line in logs)
+    assert h0 is not None and _dot(nav._last_break_dir or h0, h0) >= -1e-6
+
+
+def test_revive_escape_hold_stops_at_the_cap_inside_a_closed_ring():
+    clock = Clock()
+    nav, logs = _quiet_nav(clock)
+    wall = result(ring(480, 256, 140, 64))
+    nav.request_revive_escape()
+    run(nav, clock, wall, 12 * 12 + 8, hp=0.5)  # 12.7 s inside a ring that never opens
+    assert any("revive escape holding" in line for line in logs)
+    assert not nav.escaping
+    assert any("revive escape done" in line for line in logs)
+    assert nav.tune.revive_escape_max_s > nav.tune.revive_escape_s
+
+
 # -- main.gate_heuristic_menu
 
 
