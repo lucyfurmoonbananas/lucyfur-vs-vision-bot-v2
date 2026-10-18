@@ -374,7 +374,7 @@ def corridor_costs(points: np.ndarray, px: float, py: float, length: float = 320
     # less, so a little unseen-space penalty keeps breakouts biased toward long runs.
     vis = np.array([min(abs(430 / ux) if ux else 1e9, abs(250 / uy) if uy else 1e9) for ux, uy in _UNIT])
     out += 0.4 * np.clip((length - vis) / length, 0, None)
-    return out
+    return _fill_short_side(out, px, py)
 
 
 def escape_costs(points: np.ndarray, px: float, py: float, tune: "Tuning") -> np.ndarray:
@@ -441,7 +441,7 @@ def rollout_costs(
         e2 = e2 + v / d[..., None] * np.minimum(tune.enemy_speed * dt, d)[..., None]
         d = np.hypot(p2[:, :, None, 0] - e2[..., 0], p2[:, :, None, 1] - e2[..., 1])
         c2 += ((w / (1.0 + d * d / body2)) * (1.0 + 2.0 * (d < tune.body))).sum(axis=2) * 0.6
-    return (c1 + c2.min(axis=1)) / tune.rollout_steps
+    return _fill_short_side((c1 + c2.min(axis=1)) / tune.rollout_steps, px, py)
 
 
 def gems_in_range(gems, px: float, py: float, radius: float) -> int:
@@ -644,6 +644,67 @@ def score_directions(
     return Decision(best, table, here, mode)
 
 
+# How far to extend a ray's own density across the part of the screen the
+# opposite vertical heading can still see. The camera sits at y=256 of 540, so
+# a full-frame crowd has a shorter northern ray and that ray was scoring as the
+# opening (run1 breakouts: up 59, down 13). 0 disables.
+_SHORT_SIDE_FILL = 1.0
+
+
+def _edge_distance(px: float, py: float, ux: float, uy: float) -> float:
+    """Pixels from (px, py) to the 960x540 border along a unit heading."""
+    tx = 1e9 if abs(ux) < 1e-8 else ((-px) / ux if ux < 0 else (960.0 - px) / ux)
+    ty = 1e9 if abs(uy) < 1e-8 else ((-py) / uy if uy < 0 else (540.0 - py) / uy)
+    return float(min(tx, ty))
+
+
+def _fill_short_side(costs: np.ndarray, px: float, py: float) -> np.ndarray:
+    """Charge a short ray for the density it cannot see on the longer opposite side."""
+    if _SHORT_SIDE_FILL <= 0:
+        return costs
+    out = np.asarray(costs, dtype=np.float32).copy()
+    for i, (ux, uy) in enumerate(_UNIT):
+        if out[i] <= 0:
+            continue
+        here = _edge_distance(px, py, float(ux), float(uy))
+        there = _edge_distance(px, py, float(ux), -float(uy))
+        short = there - here
+        if short > 1.0 and here > 1.0:
+            out[i] += out[i] / here * short * _SHORT_SIDE_FILL
+    return out
+
+
+def _pick_best(
+    scores: dict[tuple[int, int], float],
+    candidates: list[tuple[int, int]],
+    prefer: tuple[float, float] | None,
+) -> tuple[int, int]:
+    """Highest score. Exact ties follow ``prefer``, not candidate order.
+
+    ``candidates`` is a DIRS slice. ``max`` on that slice returns the first
+    entry, and DIRS starts with north, so a tied east cone used to go north.
+    """
+    best = max(scores[d] for d in candidates)
+    tied = [d for d in candidates if scores[d] >= best - 1e-5]
+    if len(tied) == 1 or prefer is None:
+        return tied[0]
+    px, py = float(prefer[0]), float(prefer[1])
+    n = math.hypot(px, py)
+    if n < 1e-6:
+        return tied[0]
+    dots = [((d[0] * px + d[1] * py) / ((math.hypot(*d) or 1.0) * n)) for d in tied]
+    top = max(dots)
+    aligned = [d for d, dot in zip(tied, dots) if dot >= top - 1e-5]
+    if len(aligned) == 1:
+        return aligned[0]
+    # Same clockwise rule as _pick_min.
+    cross = [
+        (d[0] / (math.hypot(*d) or 1.0)) * (py / n) - (d[1] / (math.hypot(*d) or 1.0)) * (px / n)
+        for d in aligned
+    ]
+    return aligned[int(np.argmin(cross))]
+
+
 def _pick_min(costs: np.ndarray, prefer: tuple[float, float] | None) -> int:
     """Index of the cheapest direction. Exact ties follow ``prefer``, not DIRS order.
 
@@ -774,6 +835,7 @@ class Navigator:
         self._gem_summary_logged = False
         self._tie_bias = 0.0  # orbit radians kept across breakout-heading snaps
         self._spun = 0.0      # orbit radians since the last snap
+        self._critical_on = False
 
     @property
     def escaping(self) -> bool:
@@ -1108,8 +1170,11 @@ class Navigator:
             return
         if not closing:
             return
-        if flower and t.ring_commit_s > 0:
-            # Flower ring closing: commit (least-dense side, cone, no reversal).
+        # A fast density rise is a wall closing, including past the flower window
+        # (run1 ~11:00: cells 105 -> 1746, cover 0.25 -> 0.88). Commit the thin
+        # side the same way a flower ring does, so it is not dropped after 1.1 s.
+        surge = cover >= t.cover_rising and rising >= t.rise_trigger
+        if (flower or surge) and t.ring_commit_s > 0:
             self._request_escape(t.ring_commit_s, "ring")
         self._start_breakout(pts, px, py)
 
@@ -1301,6 +1366,7 @@ class Navigator:
             self.current = (0, 0)
             self.last = Decision((0, 0), {}, 0.0, "menu")
             return self.last
+        self._note_critical(hp)
         self._note_xp(result.xp)
         self._since_change += dt
 
@@ -1320,6 +1386,15 @@ class Navigator:
         chest_at = seen[1] if seen is not None else None
         cone: list[tuple[int, int]] | None = None
         gem_seek_on = False
+        # Critical HP drops a latched chest. A committed escape (including a
+        # fast-density wall) already made _chest_seen return None.
+        if self._critical_on:
+            chest_kind = None
+            chest_at = None
+            self._chest_latched = False
+            self._chest_until = 0.0
+            self._chest_hold = None
+            self._chest_miss_s = 0.0
         dec: Decision | None = None
         # A latched seek that scores into a real flee (danger >= chest_clear_danger)
         # is thrown away and rescored with no chest, so the commit cannot walk
@@ -1341,7 +1416,7 @@ class Navigator:
                     and self.game_s >= t.late_gem_after_s
                     and self.game_s > t.flower_phase_hi
                 )
-                bgems = result.gems if in_early or in_late else None
+                bgems = None if self._critical_on else (result.gems if in_early or in_late else None)
                 btune = replace(base, engage_gain=0.0) if base.engage_gain else base
                 if in_late and bgems and not in_early:
                     over: dict[str, float] = {}
@@ -1363,6 +1438,7 @@ class Navigator:
                 if escape:
                     # Committed: best-scoring direction inside the ~45 deg cone only
                     # (the field can still side-step a body, never turn back).
+                    # Ties follow the heading, not DIRS order (north is first).
                     bx, by = self.breakout
                     ox, oy = self._escape_origin or self.breakout
                     cone = [
@@ -1370,20 +1446,21 @@ class Navigator:
                         if _UNIT[i, 0] * bx + _UNIT[i, 1] * by >= self.tune.escape_cone_dot
                         and _UNIT[i, 0] * ox + _UNIT[i, 1] * oy >= -1e-6
                     ]
-                    dec.vector = max(cone, key=lambda d: dec.scores[d])
+                    dec.vector = _pick_best(dec.scores, cone, self.breakout)
                     dec.mode = f"{self._escape_reason}-escape"
                 elif self.tune.flower_noreverse_s > 0 and self._in_flower():
                     # Flower window: the field may side-step (<= 90 deg of the *start*
                     # heading), never gradually flip 180 via successive re-aims.
                     ox, oy = self._breakout_origin or self.breakout
                     cone = [d for i, d in enumerate(DIRS) if _UNIT[i, 0] * ox + _UNIT[i, 1] * oy >= -1e-6]
-                    dec.vector = max(cone, key=lambda d: dec.scores[d])
+                    dec.vector = _pick_best(dec.scores, cone, self._breakout_origin or self.breakout)
                 if walked_chest and not escape:
                     dec.mode = "chest"
             else:
                 roam_tune = base
                 if (
-                    this_chest is None
+                    not self._critical_on
+                    and this_chest is None
                     and result.gems
                     and self.tune.gem_seek_gain > base.gem_target_gain
                 ):
@@ -1398,7 +1475,7 @@ class Navigator:
                     gem_seek_on = True
                 dec = score_directions(
                     pts, (px, py), kite, phase.kite_weight,
-                    gems=result.gems, current=self.current, hp=hp,
+                    gems=None if self._critical_on else result.gems, current=self.current, hp=hp,
                     tune=roam_tune, idle_ok=phase.idle_ok,
                     chest=this_chest,
                 )
@@ -1457,9 +1534,21 @@ class Navigator:
         if gem_seek_on and not self._gem_seeking:
             self.gem_seeks += 1
         self._gem_seeking = gem_seek_on
-        dec = Decision(choice, dec.scores, dec.danger_here, f"{dec.mode}/{phase.name}")
+        mode = f"{dec.mode}/{phase.name}"
+        if self._critical_on:
+            mode = f"{mode} critical"
+        dec = Decision(choice, dec.scores, dec.danger_here, mode)
         self.last = dec
         return dec
+
+    def _note_critical(self, hp: float | None) -> None:
+        """Log the edges of the critical-HP band. The [nav] mode carries the tag."""
+        on = hp is not None and self.tune.critical_hp > 0 and hp < self.tune.critical_hp
+        if on == self._critical_on:
+            return
+        self._critical_on = on
+        shown = "?" if hp is None else f"{hp:.2f}"
+        self.log(f"[nav] critical HP {'on' if on else 'off'} hp={shown} game~{self.game_s:.0f}s")
 
 
 def _ref_player(result: VisionResult) -> tuple[float, float]:

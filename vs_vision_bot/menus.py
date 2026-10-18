@@ -841,6 +841,9 @@ HP_BLIND_MISSES = 3
 HP_JUMP_UP = 0.30
 HP_JUMP_CONFIRM = 3
 HP_JUMP_AGREE = 0.15
+# Same band as Tuning.critical_hp. A read below it sticks across misses until the
+# accepted window itself recovers (run1 death 1: 0.06 then none, median still 0.92).
+HP_CRITICAL = 0.20
 
 
 class HpTracker:
@@ -853,6 +856,7 @@ class HpTracker:
         self.values: list[float] = []
         self.misses = 0
         self.blind = False
+        self.low_held = False
         self._anchor: float | None = None
         self._pending: list[float] = []
 
@@ -886,6 +890,7 @@ class HpTracker:
         self.values.append(float(v))
         del self.values[: -self.window]
         self._anchor = self.value
+        self._sync_low(float(v))
 
     def _accept_window(self, samples: list[float]) -> None:
         self.misses = 0
@@ -893,11 +898,26 @@ class HpTracker:
         self._pending.clear()
         self.values = [float(s) for s in samples[-self.window :]]
         self._anchor = self.value
+        self._sync_low(float(self._anchor))
+
+    def _sync_low(self, v: float) -> None:
+        """Hold critical across unread frames until a trusted recovery.
+
+        One accepted sample under ``HP_CRITICAL`` sticks even while the median
+        is still the previous high window. Misses and rejected spikes do not
+        clear it. It clears when an accepted sample and the median are both
+        back at or above the band (a confirmed heal replaces the window).
+        """
+        if v < HP_CRITICAL:
+            self.low_held = True
+        elif self.value is not None and self.value >= HP_CRITICAL:
+            self.low_held = False
 
     def reset(self) -> None:
         self.values.clear()
         self.misses = 0
         self.blind = False
+        self.low_held = False
         self._anchor = None
         self._pending.clear()
 
@@ -908,9 +928,14 @@ class HpTracker:
         return float(np.median(self.values))
 
 
-def hp_for_nav(hp: float | None, blind: bool) -> float | None:
-    """HP nav should act on. A bar lost under a swarm counts as empty."""
-    if blind:
+def hp_for_nav(hp: float | None, blind: bool, low_held: bool = False) -> float | None:
+    """HP nav should act on. A bar lost under a swarm counts as empty.
+
+    ``low_held`` keeps that empty reading when the last accepted sample was
+    critical and the median has not recovered yet (the window can still be the
+    pre-crash high while the bar is already unreadable).
+    """
+    if blind or (low_held and (hp is None or hp >= HP_CRITICAL)):
         return 0.0
     return hp
 
@@ -1078,6 +1103,11 @@ class MenuPilot:
     def hp_blind(self) -> bool:
         """True after the bar stays unreadable: the last high reading has been dropped."""
         return self._hp.blind
+
+    @property
+    def hp_low_held(self) -> bool:
+        """True after a critical read until a trusted recovery, including missed frames."""
+        return self._hp.low_held
 
     def new_run(self) -> None:
         """A fresh run: forget owned items and HP history."""

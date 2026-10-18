@@ -425,7 +425,11 @@ def main(argv: list[str] | None = None) -> int:
                     )
             else:
                 decision = nav.step(
-                    result, hp=hp_for_nav(pilot.hp, getattr(pilot, "hp_blind", False)),
+                    result, hp=hp_for_nav(
+                        pilot.hp,
+                        getattr(pilot, "hp_blind", False),
+                        getattr(pilot, "hp_low_held", False),
+                    ),
                 )
                 vector, keys = decision.vector, cfg.keys_for_vector(decision.vector)
                 hp_txt = "?" if pilot.hp is None else f"{pilot.hp:.2f}"
