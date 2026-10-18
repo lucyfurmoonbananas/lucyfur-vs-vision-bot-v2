@@ -17,12 +17,16 @@ Per frame, every one of the 8 WASD directions is scored:
 * gems    - pull toward blue XP gems when nothing is close (stronger / farther before the flower),
   plus a non-cancelling pull at one target gem (densest clump per distance). While
   roaming with no chest, ``gem_seek_gain`` keeps that clump ahead of the kite heading.
+  After the flower, a plain breakout does the same, fading at ``late_gem_danger``
+  and only forward of the breakout so it cannot turn back into the ring.
   Each time that boost turns on is a gem-seek activation. Gem pickups are counted
   from rises in the XP bar (a level-up resets the bar and is not a pickup).
 * chests  - walk toward an on-screen treasure chest, or the yellow edge arrow that
   points at an off-screen one. Outranks gems and roaming, including a plain
-  breakout; fades out as danger rises and is skipped during flees and committed
-  escapes. ``chest_gain`` 0 disables. Seek transitions are logged as ``[chest]``.
+  breakout. A seek arms below ``chest_danger`` and then holds up to
+  ``chest_clear_danger`` (the pull fades at ``chest_commit_fade``). Flees and
+  committed escapes skip it. ``chest_gain`` 0 disables. Seek transitions are
+  logged as ``[chest]``.
 * inertia - hysteresis: the current direction gets a bonus and a minimum
   dwell time so the chord does not jitter frame to frame.
 
@@ -193,10 +197,21 @@ class Tuning:
     # danger is off zero (gem_danger still fades it; 0 disables).
     gem_seek_gain: float = 6.0
     gem_cluster_r: float = 70.0
-    # On-screen chest or the yellow edge arrow. Fades out by chest_danger.
-    # Not applied during a flee or committed escape. 0 disables.
+    # After the flower window, plain breakouts seek gems again. The roam seek
+    # uses the same higher fade, so a late crowd (danger ~2-4, still under this)
+    # does not zero the pull the way gem_danger 1.6 does. 0 disables.
+    late_gem_after_s: float = 360.0
+    late_gem_danger: float = 5.0
+    # On-screen chest or the yellow edge arrow. The pull fades out by chest_danger
+    # until a seek arms; a latched seek then fades at chest_commit_fade and is
+    # not dropped until chest_clear_danger. Not applied during a flee or
+    # committed escape. chest_gain 0 disables.
     chest_gain: float = 8.0
     chest_danger: float = 1.6
+    chest_clear_danger: float = 3.0
+    chest_commit_fade: float = 4.5
+    chest_commit_s: float = 0.75   # minimum hold once armed, while danger stays under chest_clear_danger
+    chest_hold_s: float = 0.10     # ignore a detection miss shorter than this
     # Early Garlic engage: before early_engage_until_s, HP >= early_engage_hp, danger < safe_danger
     # and no gems waiting to be collected (early_engage_max_gems), pull toward enemies.
     engage_gain: float = 0.0
@@ -503,6 +518,7 @@ def score_directions(
     idle_ok: bool = False,
     kite_floor: bool = False,
     chest: tuple[float, float] | None = None,
+    gem_forward: bool = False,
 ) -> Decision:
     """Pure scoring: returns the best 8-way (or idle) vector plus diagnostics."""
     tune = tune or Tuning()
@@ -549,6 +565,12 @@ def score_directions(
         scores = scores + kite_scale * (_UNIT[:, 0] * kx / norm + _UNIT[:, 1] * ky / norm)
 
     gem_scale = max(0.0, 1.0 - here / tune.gem_danger) if tune.gem_danger > 0 else 0.0
+    gem_mask = None
+    if gem_forward and kite_dir is not None and gem_scale > 0:
+        kx, ky = float(kite_dir[0]), float(kite_dir[1])
+        kn = math.hypot(kx, ky) or 1.0
+        # Breakout: gems may bias the open half, not pull a U-turn back into the ring.
+        gem_mask = (_UNIT[:, 0] * (kx / kn) + _UNIT[:, 1] * (ky / kn)) >= -1e-6
     if gems and gem_scale > 0 and not defensive and not critical:
         # XP matters as much as dodging (live run8: level 6 at 3:53 with dozens of
         # gems left on screen), so gems pull at moderate danger too, fading out as
@@ -562,16 +584,22 @@ def score_directions(
                 vx, vy = gx - px, gy - py
                 d = math.hypot(vx, vy) or 1.0
                 pull += (_UNIT[:, 0] * vx / d + _UNIT[:, 1] * vy / d) / (1.0 + d / 80.0)
-            scores = scores + tune.gem_gain * gem_scale * np.clip(pull, -1.5, 1.5)
+            bonus = tune.gem_gain * gem_scale * np.clip(pull, -1.5, 1.5)
+            if gem_mask is not None:
+                bonus = np.where(gem_mask, np.maximum(bonus, 0.0), 0.0)
+            scores = scores + bonus
             if tune.gem_target_gain > 0:
                 tgt = gem_target(close, px, py, tune.gem_radius, tune.gem_cluster_r)
                 if tgt is not None:
                     vx, vy = tgt[0] - px, tgt[1] - py
                     d = math.hypot(vx, vy)
                     if d > 1e-3:
-                        scores = scores + tune.gem_target_gain * gem_scale * (
+                        bonus = tune.gem_target_gain * gem_scale * (
                             _UNIT[:, 0] * vx / d + _UNIT[:, 1] * vy / d
                         )
+                        if gem_mask is not None:
+                            bonus = np.where(gem_mask, np.maximum(bonus, 0.0), 0.0)
+                        scores = scores + bonus
 
     if tune.engage_gain > 0 and pts.shape[0]:
         scores = scores + engage_pull(pts, px, py, here, hp, tune, gems=gems)
@@ -704,6 +732,7 @@ class Navigator:
         self.game_s = 0.0
         self._last_t: float | None = None
         self._timer_cands: list[float] = []  # offsets (reading - wall clock) of rejected OCR jumps
+        self._timer_behind: list[float] = []  # ticking HUD readings that sit well behind game_s
         self.heading = 0.0          # radians, roam heading when nothing is around
         self.orbit = 1              # +1 clockwise on screen, -1 counter-clockwise
         self.current: tuple[int, int] = (0, 0)
@@ -734,6 +763,10 @@ class Navigator:
         self._last_break_dir: tuple[float, float] | None = None  # heading of the last breakout
         self._last_break_end = -1e9     # game_s when it ended
         self._seek: tuple[str, tuple[float, float]] | None = None  # ("chest"|"arrow", xy) while seeking
+        self._chest_latched = False
+        self._chest_until = 0.0       # game_s: minimum hold of the current chest seek
+        self._chest_hold: tuple[str, tuple[float, float]] | None = None
+        self._chest_miss_s = 0.0
         self.gem_seeks = 0          # times the roam gem-seek boost turned on
         self.gem_pickups = 0        # XP-bar rises (pickup proxy; a level-up drop does not count)
         self._gem_seeking = False
@@ -1167,6 +1200,53 @@ class Navigator:
                 self._escape_origin = self.breakout
             self.log(f"[nav] {self._escape_reason} escape re-aim {cur_d}->{DIRS[best]} at +{self._escape_s:.1f}s")
 
+    def _note_timer_behind(self, reading: float) -> None:
+        """Resync ``game_s`` when the HUD is far behind but keeps ticking.
+
+        A stuck misread (the same wrong second repeated) does not grow the
+        list, so it cannot pull the clock backwards. Three readings that each
+        move forward by at least half a second are the real timer.
+        """
+        prev = self._timer_behind
+        if not prev or reading >= prev[-1] + 0.5:
+            prev.append(reading)
+        elif reading < prev[-1] - 0.5:
+            self._timer_behind = [reading]
+            return
+        else:
+            return
+        if (
+            len(self._timer_behind) >= TIMER_RESYNC_N
+            and self._timer_behind[-1] - self._timer_behind[0] >= 1.0
+        ):
+            self.game_s = reading
+            self._timer_behind.clear()
+
+    def _chest_seen(
+        self, result: VisionResult, escape: bool, dt: float,
+    ) -> tuple[str, tuple[float, float]] | None:
+        """Chest or arrow to chase, held through a one-frame detection miss.
+
+        Flees and committed escapes return None so they keep their own heading.
+        """
+        if self.tune.chest_gain <= 0 or escape or self._flee_remaining > 0:
+            self._chest_hold = None
+            self._chest_miss_s = 0.0
+            return None
+        spot = result.chest or result.chest_arrow
+        if spot is not None:
+            kind = "chest" if result.chest is not None else "arrow"
+            self._chest_hold = (kind, (float(spot[0]), float(spot[1])))
+            self._chest_miss_s = 0.0
+            return self._chest_hold
+        if self._chest_hold is not None:
+            self._chest_miss_s += dt
+            if self._chest_miss_s <= self.tune.chest_hold_s:
+                return self._chest_hold
+        self._chest_hold = None
+        self._chest_miss_s = 0.0
+        return None
+
     def _sync_timer(self, reading: float, now: float) -> None:
         """Plausibility-check an OCR'd HUD timer reading against the wall clock.
 
@@ -1175,21 +1255,26 @@ class Navigator:
         (e.g. 05:27 read as 06:27, 01:34 as 11:34), which would flip the phase, so:
 
         * a reading within ``TIMER_JUMP_TOL_S`` of the expectation is accepted;
-        * anything else is rejected and the wall-clock estimate keeps running;
-        * ``game_s`` never moves backwards;
-        * a real drift (e.g. a stall/pause of the loop) is resynced only when
-          ``TIMER_RESYNC_N`` consecutive readings agree with each other.
+        * a stuck misread behind the estimate is rejected (the clock does not
+          jump backwards on a repeated wrong value);
+        * a HUD that is far behind but keeps ticking (level-up pauses the game
+          while the wall clock ran on) resyncs after ``TIMER_RESYNC_N``
+          increasing readings;
+        * a real drift ahead of the estimate (a stall of the loop) is resynced
+          only when ``TIMER_RESYNC_N`` consecutive readings agree with each other.
         """
         expected = self.game_s
         if abs(reading - expected) <= TIMER_JUMP_TOL_S:
             self.game_s = max(expected, reading)
             self._timer_cands.clear()
+            self._timer_behind.clear()
             return
         if reading < expected:
-            # Behind the estimate: moving back is never allowed, so it cannot
-            # seed a resync either.
+            # Far behind. A stuck misread stays rejected; a ticking HUD resyncs.
             self._timer_cands.clear()
+            self._note_timer_behind(reading)
             return
+        self._timer_behind.clear()
         # Ahead by more than the tolerance. Track the offset to the wall clock:
         # successive readings of one true clock keep that offset constant even
         # while game_s keeps lagging (slow frames hit the dt cap).
@@ -1230,59 +1315,102 @@ class Navigator:
         escape = self.breakout is not None and self._escape_remaining > 0
         # Denser early XP: boost gem pull before the flower without changing late knobs.
         score_tune = gem_tune_for(self.tune, self.game_s)
+        seen = self._chest_seen(result, escape, dt)
+        chest_kind = seen[0] if seen is not None else None
+        chest_at = seen[1] if seen is not None else None
         cone: list[tuple[int, int]] | None = None
-        chest_at: tuple[float, float] | None = None
         gem_seek_on = False
-        if self.tune.chest_gain > 0 and not escape and self._flee_remaining <= 0:
-            chest_at = result.chest or result.chest_arrow
-        if self.breakout is not None:
-            t = self.tune
-            plain = not escape and self._flee_remaining <= 0
-            bgems = result.gems if plain and self.game_s < t.breakout_gem_until_s else None
-            btune = replace(score_tune, engage_gain=0.0) if score_tune.engage_gain else score_tune
-            dec = score_directions(
-                pts, (px, py), self.breakout, self.tune.breakout_weight,
-                gems=bgems, current=self.current, hp=hp, tune=btune, idle_ok=False,
-                kite_floor=True, chest=chest_at if plain else None,
-            )
-            walked_chest = dec.mode == "chest"
-            dec.mode = "breakout"
-            kite = self.breakout
-            if escape:
-                # Committed: best-scoring direction inside the ~45 deg cone only
-                # (the field can still side-step a body, never turn back).
-                bx, by = self.breakout
-                ox, oy = self._escape_origin or self.breakout
-                cone = [
-                    d for i, d in enumerate(DIRS)
-                    if _UNIT[i, 0] * bx + _UNIT[i, 1] * by >= self.tune.escape_cone_dot
-                    and _UNIT[i, 0] * ox + _UNIT[i, 1] * oy >= -1e-6
-                ]
-                dec.vector = max(cone, key=lambda d: dec.scores[d])
-                dec.mode = f"{self._escape_reason}-escape"
-            elif self.tune.flower_noreverse_s > 0 and self._in_flower():
-                # Flower window: the field may side-step (<= 90 deg of the *start*
-                # heading), never gradually flip 180 via successive re-aims.
-                ox, oy = self._breakout_origin or self.breakout
-                cone = [d for i, d in enumerate(DIRS) if _UNIT[i, 0] * ox + _UNIT[i, 1] * oy >= -1e-6]
-                dec.vector = max(cone, key=lambda d: dec.scores[d])
-            if walked_chest and not escape:
-                dec.mode = "chest"
-        else:
-            roam_tune = score_tune
+        dec: Decision | None = None
+        # A latched seek that scores into a real flee (danger >= chest_clear_danger)
+        # is thrown away and rescored with no chest, so the commit cannot walk
+        # into that crowd.
+        for drop_chest in (False, True):
+            gem_seek_on = False
+            cone = None
+            this_chest = None if drop_chest else chest_at
+            base = score_tune
+            if self._chest_latched and this_chest is not None and self.tune.chest_commit_fade > base.chest_danger:
+                base = replace(base, chest_danger=self.tune.chest_commit_fade)
+            if self.breakout is not None:
+                t = self.tune
+                plain = not escape and self._flee_remaining <= 0
+                in_early = plain and t.breakout_gem_until_s > 0 and self.game_s < t.breakout_gem_until_s
+                in_late = (
+                    plain
+                    and t.late_gem_after_s > 0
+                    and self.game_s >= t.late_gem_after_s
+                    and self.game_s > t.flower_phase_hi
+                )
+                bgems = result.gems if in_early or in_late else None
+                btune = replace(base, engage_gain=0.0) if base.engage_gain else base
+                if in_late and bgems and not in_early:
+                    over: dict[str, float] = {}
+                    if t.late_gem_danger > btune.gem_danger:
+                        over["gem_danger"] = t.late_gem_danger
+                    if this_chest is None and t.gem_seek_gain > btune.gem_target_gain:
+                        over["gem_target_gain"] = t.gem_seek_gain
+                    if over:
+                        btune = replace(btune, **over)
+                dec = score_directions(
+                    pts, (px, py), self.breakout, self.tune.breakout_weight,
+                    gems=bgems, current=self.current, hp=hp, tune=btune, idle_ok=False,
+                    kite_floor=True, chest=this_chest if plain else None,
+                    gem_forward=bool(in_late and not in_early and bgems),
+                )
+                walked_chest = dec.mode == "chest"
+                dec.mode = "breakout"
+                kite = self.breakout
+                if escape:
+                    # Committed: best-scoring direction inside the ~45 deg cone only
+                    # (the field can still side-step a body, never turn back).
+                    bx, by = self.breakout
+                    ox, oy = self._escape_origin or self.breakout
+                    cone = [
+                        d for i, d in enumerate(DIRS)
+                        if _UNIT[i, 0] * bx + _UNIT[i, 1] * by >= self.tune.escape_cone_dot
+                        and _UNIT[i, 0] * ox + _UNIT[i, 1] * oy >= -1e-6
+                    ]
+                    dec.vector = max(cone, key=lambda d: dec.scores[d])
+                    dec.mode = f"{self._escape_reason}-escape"
+                elif self.tune.flower_noreverse_s > 0 and self._in_flower():
+                    # Flower window: the field may side-step (<= 90 deg of the *start*
+                    # heading), never gradually flip 180 via successive re-aims.
+                    ox, oy = self._breakout_origin or self.breakout
+                    cone = [d for i, d in enumerate(DIRS) if _UNIT[i, 0] * ox + _UNIT[i, 1] * oy >= -1e-6]
+                    dec.vector = max(cone, key=lambda d: dec.scores[d])
+                if walked_chest and not escape:
+                    dec.mode = "chest"
+            else:
+                roam_tune = base
+                if (
+                    this_chest is None
+                    and result.gems
+                    and self.tune.gem_seek_gain > base.gem_target_gain
+                ):
+                    roam_tune = replace(base, gem_target_gain=self.tune.gem_seek_gain)
+                    if (
+                        self.tune.late_gem_after_s > 0
+                        and self.game_s >= self.tune.late_gem_after_s
+                        and self.game_s > self.tune.flower_phase_hi
+                        and self.tune.late_gem_danger > roam_tune.gem_danger
+                    ):
+                        roam_tune = replace(roam_tune, gem_danger=self.tune.late_gem_danger)
+                    gem_seek_on = True
+                dec = score_directions(
+                    pts, (px, py), kite, phase.kite_weight,
+                    gems=result.gems, current=self.current, hp=hp,
+                    tune=roam_tune, idle_ok=phase.idle_ok,
+                    chest=this_chest,
+                )
             if (
-                chest_at is None
-                and result.gems
-                and self.tune.gem_seek_gain > score_tune.gem_target_gain
+                drop_chest
+                or this_chest is None
+                or not self._chest_latched
+                or dec.danger_here < self.tune.chest_clear_danger
             ):
-                roam_tune = replace(score_tune, gem_target_gain=self.tune.gem_seek_gain)
-                gem_seek_on = True
-            dec = score_directions(
-                pts, (px, py), kite, phase.kite_weight,
-                gems=result.gems, current=self.current, hp=hp,
-                tune=roam_tune, idle_ok=phase.idle_ok,
-                chest=chest_at,
-            )
+                break
+            self._chest_latched = False
+        assert dec is not None
 
         # Flip the orbit when the field keeps overruling it (the loop runs into
         # a crowd): kiting the other way round stops the two fighting.
@@ -1307,10 +1435,23 @@ class Navigator:
         if choice != self.current:
             self._since_change = 0.0
         self.current = choice
-        armed = chest_at if chest_at is not None and dec.danger_here < self.tune.chest_danger else None
-        if armed is not None and _toward_point(choice, armed, px, py):
-            kind = "chest" if result.chest else "arrow"
-            self._note_chest(kind, armed, dec.danger_here)
+        high = dec.danger_here >= self.tune.chest_clear_danger
+        toward = (
+            chest_at is not None
+            and chest_kind is not None
+            and _toward_point(choice, chest_at, px, py)
+        )
+        if chest_at is None or chest_kind is None or high:
+            self._chest_latched = False
+            self._chest_until = 0.0
+        elif self._chest_latched or dec.danger_here < self.tune.chest_danger:
+            self._chest_latched = True
+            if dec.danger_here < self.tune.chest_danger or toward:
+                self._chest_until = self.game_s + self.tune.chest_commit_s
+        elif self.game_s >= self._chest_until:
+            self._chest_latched = False
+        if self._chest_latched and chest_at is not None and (toward or self.game_s < self._chest_until):
+            self._note_chest(chest_kind, chest_at, dec.danger_here)
         else:
             self._note_chest(None, None, dec.danger_here)
         if gem_seek_on and not self._gem_seeking:
