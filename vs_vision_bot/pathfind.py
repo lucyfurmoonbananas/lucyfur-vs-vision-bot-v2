@@ -24,9 +24,10 @@ Per frame, every one of the 8 WASD directions is scored:
 * chests  - walk toward an on-screen treasure chest, or the yellow edge arrow that
   points at an off-screen one. Outranks gems and roaming, including a plain
   breakout. A seek arms below ``chest_danger`` and then holds up to
-  ``chest_clear_danger`` (the pull fades at ``chest_commit_fade``). Flees and
-  committed escapes skip it. ``chest_gain`` 0 disables. Seek transitions are
-  logged as ``[chest]``.
+  ``chest_clear_danger`` (the pull fades at ``chest_commit_fade``). One missed
+  sample keeps the last point (live frames are often slower than
+  ``chest_hold_s``). Flees and committed escapes skip it. ``chest_gain`` 0
+  disables. Seek transitions are logged as ``[chest]``.
 * inertia - hysteresis: the current direction gets a bonus and a minimum
   dwell time so the chord does not jitter frame to frame.
 
@@ -181,6 +182,10 @@ class Tuning:
     early_gem_until_s: float = 280.0
     early_gem_gain: float = 3.2       # vs gem_gain 1.6 (was 2.8; Oct 11 still under-leveled into flower)
     early_gem_radius: float = 460.0   # vs gem_radius 300; was 420 — reach gems left in the wake
+    # First minute, while the field is still thin: look past early_gem_radius so a
+    # gem near the screen edge is sought when danger is ~0. 0 disables.
+    opening_gem_until_s: float = 75.0
+    opening_gem_radius: float = 560.0
     # Gem target (Oct 16, from Oct 14-15 logs, 19 runs): at game 200-280 s 4-25 gems sat on
     # screen on average even in samples with danger < 0.8, so the summed gem pull is not
     # collecting them. That pull is a sum of unit vectors weighted 1/(1+d/80): a gem 300 px
@@ -251,12 +256,16 @@ def gem_tune_for(tune: Tuning, game_s: float) -> Tuning:
     """Return ``tune`` with early gem_gain/radius (and early Garlic engage) applied.
 
     No-op when ``early_gem_until_s`` is 0 or ``game_s`` is already past it, so late-game
-    and VS_TUNE=early_gem_until_s=0 keep the base gem knobs unchanged.
+    and VS_TUNE=early_gem_until_s=0 keep the base gem knobs unchanged. Before
+    ``opening_gem_until_s`` the radius reaches the screen edge.
     """
     over: dict[str, float] = {}
     if tune.early_gem_until_s > 0 and game_s < tune.early_gem_until_s:
+        radius = tune.early_gem_radius
+        if tune.opening_gem_until_s > 0 and game_s < tune.opening_gem_until_s:
+            radius = max(radius, tune.opening_gem_radius)
         over.update(
-            gem_gain=tune.early_gem_gain, gem_radius=tune.early_gem_radius,
+            gem_gain=tune.early_gem_gain, gem_radius=radius,
             gem_target_gain=tune.early_gem_target_gain,
         )
     if tune.early_engage_until_s > 0 and game_s < tune.early_engage_until_s:
@@ -778,6 +787,7 @@ def format_gem_summary(nav: Navigator) -> str:
 TIMER_JUMP_TOL_S = 8.0       # accept readings this close to the wall-clock estimate
 TIMER_RESYNC_N = 3           # consecutive agreeing out-of-range readings to resync
 TIMER_RESYNC_AGREE_S = 2.0   # max spread of those readings' offsets to the estimate
+TIMER_BEHIND_MAX_S = 45.0    # pause drift can lag ~30s; a dropped minute digit is 60s+
 
 
 class Navigator:
@@ -828,6 +838,7 @@ class Navigator:
         self._chest_until = 0.0       # game_s: minimum hold of the current chest seek
         self._chest_hold: tuple[str, tuple[float, float]] | None = None
         self._chest_miss_s = 0.0
+        self._chest_miss_n = 0
         self.gem_seeks = 0          # times the roam gem-seek boost turned on
         self.gem_pickups = 0        # XP-bar rises (pickup proxy; a level-up drop does not count)
         self._gem_seeking = False
@@ -1272,6 +1283,12 @@ class Navigator:
         list, so it cannot pull the clock backwards. Three readings that each
         move forward by at least half a second are the real timer.
         """
+        # A dropped minute digit (10:14 read as 0:14) ticks forward too, but it
+        # is hundreds of seconds behind the estimate. Only a lag near the
+        # current clock — a level-up pause — may resync.
+        if self.game_s - reading > TIMER_BEHIND_MAX_S:
+            self._timer_behind.clear()
+            return
         prev = self._timer_behind
         if not prev or reading >= prev[-1] + 0.5:
             prev.append(reading)
@@ -1297,19 +1314,27 @@ class Navigator:
         if self.tune.chest_gain <= 0 or escape or self._flee_remaining > 0:
             self._chest_hold = None
             self._chest_miss_s = 0.0
+            self._chest_miss_n = 0
             return None
         spot = result.chest or result.chest_arrow
         if spot is not None:
             kind = "chest" if result.chest is not None else "arrow"
             self._chest_hold = (kind, (float(spot[0]), float(spot[1])))
             self._chest_miss_s = 0.0
+            self._chest_miss_n = 0
             return self._chest_hold
         if self._chest_hold is not None:
             self._chest_miss_s += dt
-            if self._chest_miss_s <= self.tune.chest_hold_s:
+            self._chest_miss_n += 1
+            # Live frames are often slower than chest_hold_s, so a one-sample
+            # flicker used to clear the latch on the next tick. Keep that
+            # first miss. A second miss still obeys the time limit: two frames
+            # at 12 fps are 0.17 s and do clear.
+            if self._chest_miss_n <= 1 or self._chest_miss_s <= self.tune.chest_hold_s:
                 return self._chest_hold
         self._chest_hold = None
         self._chest_miss_s = 0.0
+        self._chest_miss_n = 0
         return None
 
     def _sync_timer(self, reading: float, now: float) -> None:
@@ -1322,9 +1347,10 @@ class Navigator:
         * a reading within ``TIMER_JUMP_TOL_S`` of the expectation is accepted;
         * a stuck misread behind the estimate is rejected (the clock does not
           jump backwards on a repeated wrong value);
-        * a HUD that is far behind but keeps ticking (level-up pauses the game
-          while the wall clock ran on) resyncs after ``TIMER_RESYNC_N``
-          increasing readings;
+        * a HUD that is behind but keeps ticking, and stays within
+          ``TIMER_BEHIND_MAX_S`` of the estimate (a level-up pause), resyncs
+          after ``TIMER_RESYNC_N`` increasing readings. A large backward jump
+          (a dropped minute digit, 10:14 read as 0:14) is rejected;
         * a real drift ahead of the estimate (a stall of the loop) is resynced
           only when ``TIMER_RESYNC_N`` consecutive readings agree with each other.
         """
@@ -1395,6 +1421,7 @@ class Navigator:
             self._chest_until = 0.0
             self._chest_hold = None
             self._chest_miss_s = 0.0
+            self._chest_miss_n = 0
         dec: Decision | None = None
         # A latched seek that scores into a real flee (danger >= chest_clear_danger)
         # is thrown away and rescored with no chest, so the commit cannot walk

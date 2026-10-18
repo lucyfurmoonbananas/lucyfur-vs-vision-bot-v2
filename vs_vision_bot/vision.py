@@ -516,6 +516,24 @@ def _pale_markers(frame: np.ndarray) -> list[tuple[int, int, float, float, tuple
     return out
 
 
+def _chest_icon_pixels(frame: np.ndarray, cx: int, cy: int, s: float) -> int:
+    """Near-white chest glyph in the chevron. The yellow outline itself is darker blue.
+
+    Real chest arrows carry that glyph (about 55–120 px at 960x540). A bare pale
+    streak, or a red heart pickup beside a chevron, does not.
+    """
+    h, w = frame.shape[:2]
+    rad = max(4, int(round(22 * s)))
+    x0, y0 = max(0, int(cx) - rad), max(0, int(cy) - rad)
+    x1, y1 = min(w, int(cx) + rad + 1), min(h, int(cy) + rad + 1)
+    win = frame[y0:y1, x0:x1]
+    b = win[:, :, 0].astype(np.int16)
+    g = win[:, :, 1].astype(np.int16)
+    r = win[:, :, 2].astype(np.int16)
+    # Pale yellow tops out under b=200. The chest icon sits at b~224, g~254, r~254.
+    return int(((r > 190) & (g > 200) & (b >= 200)).sum())
+
+
 def detect_chest_arrow(frame: np.ndarray) -> tuple[int, int] | None:
     """Centroid of the yellow off-screen chest arrow, in frame pixels.
 
@@ -568,8 +586,13 @@ def detect_chest_arrow(frame: np.ndarray) -> tuple[int, int] | None:
     # solid blob wins, so a nearby projectile smear loses to the UI arrow.
     band = 120 * s
     pale_sol = -1.0
+    # Other off-screen pickups use a pale edge chevron too. The boss chest is
+    # the one with a near-white chest glyph inside the chevron.
+    icon_min = 40 * s * s
     for cx, cy, sol, dist, chest in _pale_markers(frame):
         if chest is not None or dist < 0 or dist > band:
+            continue
+        if _chest_icon_pixels(frame, cx, cy, s) < icon_min:
             continue
         if sol > pale_sol:
             pale_sol = sol
