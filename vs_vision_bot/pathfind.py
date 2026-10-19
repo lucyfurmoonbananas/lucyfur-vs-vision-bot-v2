@@ -228,7 +228,8 @@ class Tuning:
     # collecting them. That pull is a sum of unit vectors weighted 1/(1+d/80): a gem 300 px
     # away adds ~0.2, and gems scattered around the wide-circle trail cancel out, so the
     # kite bias (1.0) + hysteresis (0.35) win. On top of it, aim at ONE gem: the one with
-    # the most gems within gem_cluster_r per distance (score count / (1 + d/150)), with a
+    # the most XP-value within gem_cluster_r per distance (score sum(value) / (1 + d/150);
+    # blue is 1, so an all-blue screen still scores as a count), with a
     # pull that does not decay with distance or cancel. Same gates as the gem pull (inside
     # gem_radius, fades with gem_danger, off at low HP / in flee-escapes). Only before
     # early_gem_until_s via gem_tune_for (late game unchanged). 0 disables.
@@ -531,31 +532,90 @@ def rollout_costs(
     return _fill_short_side((c1 + c2.min(axis=1)) / tune.rollout_steps, px, py)
 
 
+# XP weights. Blue is the common gem. Green and red are worth more, but the
+# target score is still value / (1 + d/150), so a far red loses to a near gem.
+# Anything that is not one of these colours counts as blue.
+GEM_VALUE = {"blue": 1.0, "green": 1.7, "red": 2.4}
+
+
+def gem_value(color: str | None) -> float:
+    """XP weight of a gem colour. Unknown and missing colours count as blue."""
+    if color in GEM_VALUE:
+        return GEM_VALUE[color]
+    return GEM_VALUE["blue"]
+
+
+def _gem_xy_val(gems):
+    """Gem centers and per-gem weights. A missing third column is blue (1)."""
+    g = np.asarray(gems, dtype=np.float32)
+    if g.size == 0:
+        return np.zeros((0, 2), np.float32), np.ones((0,), np.float32)
+    if g.ndim == 1:
+        g = g.reshape(-1, 2)
+    xy = g[:, :2]
+    val = g[:, 2] if g.shape[1] >= 3 else np.ones(g.shape[0], np.float32)
+    return xy, val
+
+
+def gems_with_values(gems, colors) -> list:
+    """``(x, y, value)`` rows. No colour list leaves the positions untouched."""
+    if not gems or not colors:
+        return gems
+    out = []
+    for i, g in enumerate(gems):
+        color = colors[i] if i < len(colors) else "blue"
+        out.append((float(g[0]), float(g[1]), gem_value(color)))
+    return out
+
+
+def seek_gem_color(gems, colors, px, py, radius, cluster_r) -> str:
+    """Colour of the gem a seek would walk to, or "" when none is in range.
+
+    A missing or unknown colour counts as blue.
+    """
+    if not gems:
+        return ""
+    tgt = gem_target(gems_with_values(gems, colors), px, py, radius, cluster_r)
+    if tgt is None:
+        return ""
+    best_i, best_d = 0, 1e18
+    for i, g in enumerate(gems):
+        dist = (float(g[0]) - tgt[0]) ** 2 + (float(g[1]) - tgt[1]) ** 2
+        if dist < best_d:
+            best_i, best_d = i, dist
+    if colors and best_i < len(colors) and colors[best_i] in GEM_VALUE:
+        return colors[best_i]
+    return "blue"
+
+
 def gems_in_range(gems, px: float, py: float, radius: float) -> int:
     """Number of gem positions within ``radius`` px of the player (None / empty -> 0)."""
     if not gems:
         return 0
-    g = np.asarray(gems, dtype=np.float32).reshape(-1, 2)
-    return int((np.hypot(g[:, 0] - px, g[:, 1] - py) < radius).sum())
+    xy, _val = _gem_xy_val(gems)
+    return int((np.hypot(xy[:, 0] - px, xy[:, 1] - py) < radius).sum())
 
 
 def gem_target(gems, px: float, py: float, radius: float, cluster_r: float) -> tuple[float, float] | None:
-    """Gem to walk to: most gems within ``cluster_r`` of it per distance, inside ``radius``.
+    """Gem to walk to: most XP-value within ``cluster_r`` of it per distance, inside ``radius``.
 
-    Score = cluster count / (1 + d / 150): a near single gem beats a far one, a clump of
-    gems a bit farther beats a lone near one. None when no gem is within ``radius``.
+    Score = sum of values in the cluster / (1 + d / 150). A missing value counts as
+    blue (1), so an all-blue screen scores exactly as a gem count. A near gem beats
+    a far one; a red beats a closer blue when it is not far. None when nothing is
+    within ``radius``.
     """
     if gems is None or len(gems) == 0:
         return None
-    g = np.asarray(gems, dtype=np.float32).reshape(-1, 2)
-    d = np.hypot(g[:, 0] - px, g[:, 1] - py)
-    g, d = g[d < radius], d[d < radius]
-    if g.shape[0] == 0:
+    xy, val = _gem_xy_val(gems)
+    d = np.hypot(xy[:, 0] - px, xy[:, 1] - py)
+    keep = d < radius
+    xy, d, val = xy[keep], d[keep], val[keep]
+    if xy.shape[0] == 0:
         return None
-    pair = np.hypot(g[:, None, 0] - g[None, :, 0], g[:, None, 1] - g[None, :, 1])
-    count = (pair < cluster_r).sum(axis=1).astype(np.float32)
-    i = int(np.argmax(count / (1.0 + d / 150.0)))
-    return float(g[i, 0]), float(g[i, 1])
+    pair = np.hypot(xy[:, None, 0] - xy[None, :, 0], xy[:, None, 1] - xy[None, :, 1])
+    weight = ((pair < cluster_r) * val[None, :]).sum(axis=1)
+    i = int(np.argmax(weight / (1.0 + d / 150.0)))
+    return float(xy[i, 0]), float(xy[i, 1])
 
 
 def engage_pull(
@@ -662,21 +722,24 @@ def score_directions(
         # XP matters as much as dodging (live run8: level 6 at 3:53 with dozens of
         # gems left on screen), so gems pull at moderate danger too, fading out as
         # the crowd gets closer.
-        g = np.asarray(gems, dtype=np.float32).reshape(-1, 2)
-        gd = np.hypot(g[:, 0] - px, g[:, 1] - py)
-        close = g[gd < tune.gem_radius]
-        if close.shape[0]:
+        xy, val = _gem_xy_val(gems)
+        gd = np.hypot(xy[:, 0] - px, xy[:, 1] - py)
+        close = gd < tune.gem_radius
+        if int(close.sum()):
             pull = np.zeros(len(DIRS), dtype=np.float32)
-            for gx, gy in close:
-                vx, vy = gx - px, gy - py
+            for gx, gy, gv in zip(xy[close, 0], xy[close, 1], val[close]):
+                vx, vy = float(gx) - px, float(gy) - py
                 d = math.hypot(vx, vy) or 1.0
-                pull += (_UNIT[:, 0] * vx / d + _UNIT[:, 1] * vy / d) / (1.0 + d / 80.0)
+                pull += float(gv) * (_UNIT[:, 0] * vx / d + _UNIT[:, 1] * vy / d) / (1.0 + d / 80.0)
             bonus = tune.gem_gain * gem_scale * np.clip(pull, -1.5, 1.5)
             if gem_mask is not None:
                 bonus = np.where(gem_mask, np.maximum(bonus, 0.0), 0.0)
             scores = scores + bonus
             if tune.gem_target_gain > 0:
-                tgt = gem_target(close, px, py, tune.gem_radius, tune.gem_cluster_r)
+                tgt = gem_target(
+                    np.column_stack((xy[close], val[close])),
+                    px, py, tune.gem_radius, tune.gem_cluster_r,
+                )
                 if tgt is not None:
                     vx, vy = tgt[0] - px, tgt[1] - py
                     d = math.hypot(vx, vy)
@@ -863,17 +926,24 @@ def chest_status(result: VisionResult) -> str:
 
 def gem_status(nav: Navigator) -> str:
     """Running gem-seek activations and XP-bar pickup proxy for the ``[nav]`` line."""
-    return f"gem_seek={nav.gem_seeks} gem_pickups={nav.gem_pickups}"
+    text = f"gem_seek={nav.gem_seeks} gem_pickups={nav.gem_pickups}"
+    color = nav.gem_target_color
+    if color:
+        text = f"{text} gem_target={color}"
+    return text
 
 
 def format_gem_summary(nav: Navigator) -> str:
     """One line for the end of a run: counts plus pickups per minute of game time."""
     minutes = nav.game_s / 60.0
     rate = nav.gem_pickups / minutes if minutes >= 1.0 / 60.0 else 0.0
-    return (
+    text = (
         f"[gems] seeks={nav.gem_seeks} pickups={nav.gem_pickups} "
         f"game~{nav.game_s:.0f}s {rate:.1f}/min"
     )
+    if nav.gem_red or nav.gem_green or nav.gem_blue:
+        text = f"{text} red={nav.gem_red} green={nav.gem_green} blue={nav.gem_blue}"
+    return text
 
 
 # HUD timer OCR plausibility (see Navigator._sync_timer).
@@ -936,6 +1006,10 @@ class Navigator:
         self._chest_miss_n = 0
         self.gem_seeks = 0          # times the roam gem-seek boost turned on
         self.gem_pickups = 0        # XP-bar rises (pickup proxy; a level-up drop does not count)
+        self.gem_red = 0            # of those seeks, how many locked a red / green / blue
+        self.gem_green = 0
+        self.gem_blue = 0
+        self.gem_target_color = ""  # colour of the gem the current seek is walking to
         self._gem_seeking = False
         self._xp: float | None = None
         self._gem_summary_logged = False
@@ -1968,6 +2042,7 @@ class Navigator:
         chest_at = seen[1] if seen is not None else None
         cone: list[tuple[int, int]] | None = None
         gem_seek_on = False
+        valued_gems = gems_with_values(result.gems, result.gem_colors)
         # Critical HP drops a latched chest. A committed escape (including a
         # fast-density wall) already made _chest_seen return None.
         if self._critical_on:
@@ -2001,7 +2076,7 @@ class Navigator:
                     and self.game_s >= t.late_gem_after_s
                     and self.game_s > t.flower_phase_hi
                 )
-                bgems = None if self._critical_on else (result.gems if in_early or in_late else None)
+                bgems = None if self._critical_on else (valued_gems if in_early or in_late else None)
                 btune = replace(base, engage_gain=0.0) if base.engage_gain else base
                 if in_late and bgems and not in_early:
                     over: dict[str, float] = {}
@@ -2071,7 +2146,7 @@ class Navigator:
                     pulled = False
                     dec = score_directions(
                         pts, (px, py), self._orbit_aim, self.tune.chest_orbit_gain,
-                        gems=None if self._critical_on else result.gems, current=self.current, hp=hp,
+                        gems=None if self._critical_on else valued_gems, current=self.current, hp=hp,
                         tune=roam_tune, idle_ok=False, kite_floor=True, chest=None,
                     )
                     self._bias_keepout(dec)
@@ -2081,7 +2156,7 @@ class Navigator:
                     pulled = True
                     dec = score_directions(
                         pts, (px, py), kite, phase.kite_weight,
-                        gems=None if self._critical_on else result.gems, current=self.current, hp=hp,
+                        gems=None if self._critical_on else valued_gems, current=self.current, hp=hp,
                         tune=roam_tune, idle_ok=phase.idle_ok,
                         chest=self._leash_screen(px, py),
                     )
@@ -2091,7 +2166,7 @@ class Navigator:
                     )
                     dec = score_directions(
                         pts, (px, py), aim, phase.kite_weight,
-                        gems=None if self._critical_on else result.gems, current=self.current, hp=hp,
+                        gems=None if self._critical_on else valued_gems, current=self.current, hp=hp,
                         tune=roam_tune, idle_ok=phase.idle_ok,
                         chest=score_chest,
                     )
@@ -2154,8 +2229,23 @@ class Navigator:
             self._note_chest(chest_kind, chest_at, dec.danger_here)
         else:
             self._note_chest(None, None, dec.danger_here)
+        if gem_seek_on:
+            color = seek_gem_color(
+                result.gems, result.gem_colors, px, py,
+                score_tune.gem_radius, score_tune.gem_cluster_r,
+            ) or "blue"
+            self.gem_target_color = color
+        else:
+            color = ""
+            self.gem_target_color = ""
         if gem_seek_on and not self._gem_seeking:
             self.gem_seeks += 1
+            if color == "red":
+                self.gem_red += 1
+            elif color == "green":
+                self.gem_green += 1
+            else:
+                self.gem_blue += 1
         self._gem_seeking = gem_seek_on
         mode = f"{dec.mode}/{phase.name}"
         if self._critical_on:
@@ -2208,7 +2298,10 @@ def choose_vector(
     pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
     if pts.shape[0] == 0:
         return (0, 0)
-    dec = score_directions(pts, _ref_player(result), None, 0.0, gems=result.gems, current=last, hp=hp)
+    dec = score_directions(
+        pts, _ref_player(result), None, 0.0,
+        gems=gems_with_values(result.gems, result.gem_colors), current=last, hp=hp,
+    )
     return dec.vector
 
 

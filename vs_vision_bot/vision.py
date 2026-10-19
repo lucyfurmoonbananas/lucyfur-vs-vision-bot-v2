@@ -42,8 +42,10 @@ class VisionResult:
     note: str = ""
     # Threat grid in reference 960x540 pixels: rows of (x, y, weight).
     threats: np.ndarray | None = None
-    # Blue XP gem centers in reference pixels.
+    # XP gem centers in reference pixels. ``gem_colors`` is parallel
+    # ("blue", "green", or "red"); empty means every gem is blue.
     gems: list[tuple[float, float]] = field(default_factory=list)
+    gem_colors: list[str] = field(default_factory=list)
     # On-screen treasure chest center in reference pixels, else None.
     chest: tuple[float, float] | None = None
     # Yellow off-screen-chest arrow centroid in reference pixels, else None.
@@ -82,7 +84,9 @@ class Vision:
                 print(f"[vision] model failed, falling back to heuristic: {exc}", file=sys.stderr)
         mask = enemy_mask(frame)
         sx, sy = REF_W / w, REF_H / h
-        gems = [(gx * sx, gy * sy) for gx, gy in detect_gems(frame, mask)]
+        colored = detect_colored_gems(frame, mask)
+        gems = [(gx * sx, gy * sy) for gx, gy, _color in colored]
+        gem_colors = [color for _gx, _gy, color in colored]
         monsters = detect_threat_blobs(frame, player, self.cfg, mask=mask)
         threats = threat_points(mask)
         menu = detect_level_up_menu(frame)
@@ -92,7 +96,7 @@ class Vision:
         chest_arrow = (arrow_xy[0] * sx, arrow_xy[1] * sy) if arrow_xy else None
         return VisionResult(
             player=player, monsters=monsters, menu=menu, note="heuristic",
-            threats=threats, gems=gems, timer_s=timer_s, size=(w, h), xp=xp,
+            threats=threats, gems=gems, gem_colors=gem_colors, timer_s=timer_s, size=(w, h), xp=xp,
             chest=chest, chest_arrow=chest_arrow,
         )
 
@@ -403,6 +407,117 @@ def detect_gems(frame: np.ndarray, enemies: np.ndarray | None = None) -> list[tu
             enemies[y0:y1, x0:x1] = False
         out.append((cx, cy))
     return out
+
+
+def _hue_gem_mask(frame: np.ndarray, color: str) -> np.ndarray:
+    """Bright rim of a green or red XP gem.
+
+    A real blue core is BGR about (228, 180, 38). Moving that hue to green
+    (~60) or red (~0) puts the rim at green BGR (38, 228, 38) and red BGR
+    (38, 38, 228): one channel high, the other two low and nearly equal.
+    Orange (the winged heart, red flowers, Floor Chicken) has green well
+    above blue. Foliage and yellow-green sprites have red and blue apart,
+    or red too high to be a pure green rim.
+    """
+    b = frame[:, :, 0].astype(np.int16)
+    g = frame[:, :, 1].astype(np.int16)
+    r = frame[:, :, 2].astype(np.int16)
+    if color == "red":
+        # r >= 190, g < 80, b < 80, |g - b| <= 35, and both gaps >= 150.
+        m = (r >= 190) & (r - g >= 150) & (r - b >= 150) & (g < 80) & (b < 80) & (np.abs(g - b) <= 35)
+    else:
+        m = (g >= 190) & (g - r >= 150) & (g - b >= 150) & (r < 70) & (b < 70) & (np.abs(r - b) <= 35)
+    h, w = frame.shape[:2]
+    ignore, side = _masks(w, h)
+    m[ignore | side] = False
+    return m
+
+
+def _loose_body(frame: np.ndarray, color: str) -> np.ndarray:
+    """Wider red/green than the rim, so a heart, flower, or splatter stays one blob."""
+    b = frame[:, :, 0].astype(np.int16)
+    g = frame[:, :, 1].astype(np.int16)
+    r = frame[:, :, 2].astype(np.int16)
+    if color == "red":
+        m = (r >= 160) & (r >= g + 80) & (r >= b + 80)
+    else:
+        m = (g >= 160) & (g >= r + 80) & (g >= b + 80)
+    h, w = frame.shape[:2]
+    ignore, side = _masks(w, h)
+    m[ignore | side] = False
+    return m
+
+
+def _hue_gems(frame: np.ndarray, color: str, enemies: np.ndarray | None) -> list[tuple[int, int]]:
+    """Green or red gem centers. Same idea as ``detect_gems``, stricter shape.
+
+    The rim has to be gem-sized (about 6x8, area >= 12 at 960x540), not a
+    hollow dark body, and not a piece of a larger red/green sprite. A dark
+    enemy under the candidate is rejected the same way a blue gem is.
+    """
+    m = _hue_gem_mask(frame, color)
+    h, w = frame.shape[:2]
+    scale = (w * h) / (REF_W * REF_H)
+    sx, sy = w / float(REF_W), h / float(REF_H)
+    min_area = max(8, int(round(12 * scale)))
+    max_area = max(8, int(round(40 * scale)))
+    bw_min = max(3, int(round(4 * sx)))
+    bw_max = max(bw_min, int(round(10 * sx)))
+    bh_min = max(5, int(round(7 * sy)))
+    bh_max = max(bh_min, int(round(12 * sy)))
+    slack = max(4, int(round(8 * scale)))
+    loose = _loose_body(frame, color).astype(np.uint8)
+    _ln, llabels, lstats, _lc = cv2.connectedComponentsWithStats(loose, connectivity=8)
+    n, labels, stats, cents = cv2.connectedComponentsWithStats(m.astype(np.uint8), connectivity=8)
+    rx = max(4, int(round(12 * w / REF_W)))
+    ry = max(4, int(round(14 * h / REF_H)))
+    out = []
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if not min_area <= area <= max_area:
+            continue
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        if bw < bw_min or bw > bw_max or bh < bh_min or bh > bh_max:
+            continue
+        aspect = bw / float(max(bh, 1))
+        if aspect < 0.4 or aspect > 2.2:
+            continue
+        bx = int(stats[i, cv2.CC_STAT_LEFT])
+        by = int(stats[i, cv2.CC_STAT_TOP])
+        roi_mx = frame[by : by + bh, bx : bx + bw].max(axis=2)
+        dark_frac = float((roi_mx < DARK_MAX).sum()) / float(max(1, bw * bh))
+        if dark_frac > 0.12:
+            continue
+        touched = np.unique(llabels[labels == i])
+        touched = touched[touched > 0]
+        body = int(sum(int(lstats[j, cv2.CC_STAT_AREA]) for j in touched))
+        if body > area + slack:
+            continue
+        cx, cy = int(cents[i][0]), int(cents[i][1])
+        if enemies is not None:
+            y0, y1, x0, x1 = max(0, cy - ry), cy + ry, max(0, cx - rx), cx + rx
+            dark = int(np.count_nonzero(enemies[y0:y1, x0:x1]))
+            if dark > 70 * scale:
+                continue
+            enemies[y0:y1, x0:x1] = False
+        out.append((cx, cy))
+    return out
+
+
+def detect_colored_gems(
+    frame: np.ndarray, enemies: np.ndarray | None = None
+) -> list[tuple[int, int, str]]:
+    """XP gem centers and colour. Blue uses ``detect_gems`` unchanged.
+
+    Green and red have to pass the gem shape gate above. A pixel that is not
+    one of those rims is not given a colour here; callers treat a missing
+    colour as blue.
+    """
+    found = [(x, y, "blue") for x, y in detect_gems(frame, enemies)]
+    found.extend((x, y, "red") for x, y in _hue_gems(frame, "red", enemies))
+    found.extend((x, y, "green") for x, y in _hue_gems(frame, "green", enemies))
+    return found
 
 
 def _yellow_core(frame: np.ndarray) -> np.ndarray:
