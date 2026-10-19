@@ -22,10 +22,10 @@ FALSE = Path(__file__).parent / "fixtures" / "chest_false"
 
 
 def test_slow_frame_miss_does_not_drop_a_latched_arrow():
-    """A live frame is often slower than chest_hold_s (0.10). One miss must hold.
+    """One missed sample is held. Further misses last until chest_hold_s (0.6).
 
-    Two misses still clear, which is what the 12 fps two-frame test already
-    requires (0.17 s).
+    The 5 fps cases live in test_chest_hold. Here a 0.25 s frame stays latched,
+    and a second miss that pushes the gap past 0.6 s clears.
     """
     lines: list[str] = []
     clock = Clock()
@@ -42,7 +42,7 @@ def test_slow_frame_miss_does_not_drop_a_latched_arrow():
     assert not any(ln.startswith("[chest] clear") for ln in lines)
     assert nav._chest_latched
 
-    clock.t += 0.25
+    clock.t += 0.45  # miss time 0.70 s, past chest_hold_s
     nav.step(gone, hp=1.0)
     assert any(ln.startswith("[chest] clear arrow") for ln in lines)
 

@@ -24,9 +24,10 @@ Per frame, every one of the 8 WASD directions is scored:
 * chests  - walk toward an on-screen treasure chest, or the yellow edge arrow that
   points at an off-screen one. Outranks gems and roaming, including a plain
   breakout. A seek arms below ``chest_danger`` and then holds up to
-  ``chest_clear_danger`` (the pull fades at ``chest_commit_fade``). One missed
-  sample keeps the last point (live frames are often slower than
-  ``chest_hold_s``). Flees and committed escapes skip it. ``chest_gain`` 0
+  ``chest_clear_danger`` (the pull fades at ``chest_commit_fade``). The first
+  missed sample is always kept, then further misses up to ``chest_hold_s``
+  (0.6 s, about three frames at the live ~5 fps). Flees and committed escapes
+  skip it. ``chest_gain`` 0
   disables. Seek transitions are logged as ``[chest]``.
 * inertia - hysteresis: the current direction gets a bonus and a minimum
   dwell time so the chord does not jitter frame to frame.
@@ -216,7 +217,11 @@ class Tuning:
     chest_clear_danger: float = 3.0
     chest_commit_fade: float = 4.5
     chest_commit_s: float = 0.75   # minimum hold once armed, while danger stays under chest_clear_danger
-    chest_hold_s: float = 0.10     # ignore a detection miss shorter than this
+    # Ignore a chest/arrow detection miss up to this long. The first missed
+    # frame is always held: live frames are ~0.2 s apart, so 0.10 never held
+    # one (test3 on 3c8c971: 205 seek/clear pairs, 168 with no tick between).
+    # VS_TUNE=chest_hold_s=0.10 restores that short window.
+    chest_hold_s: float = 0.6
     # Early Garlic engage: before early_engage_until_s, HP >= early_engage_hp, danger < safe_danger
     # and no gems waiting to be collected (early_engage_max_gems), pull toward enemies.
     engage_gain: float = 0.0
@@ -1307,8 +1312,9 @@ class Navigator:
     def _chest_seen(
         self, result: VisionResult, escape: bool, dt: float,
     ) -> tuple[str, tuple[float, float]] | None:
-        """Chest or arrow to chase, held through a one-frame detection miss.
+        """Chest or arrow to chase, held through short detection misses.
 
+        The first missed frame is always held, then up to ``chest_hold_s``.
         Flees and committed escapes return None so they keep their own heading.
         """
         if self.tune.chest_gain <= 0 or escape or self._flee_remaining > 0:
@@ -1326,10 +1332,9 @@ class Navigator:
         if self._chest_hold is not None:
             self._chest_miss_s += dt
             self._chest_miss_n += 1
-            # Live frames are often slower than chest_hold_s, so a one-sample
-            # flicker used to clear the latch on the next tick. Keep that
-            # first miss. A second miss still obeys the time limit: two frames
-            # at 12 fps are 0.17 s and do clear.
+            # Live frames are ~0.2 s. Always keep the first miss, then keep
+            # going until chest_hold_s (0.6 s). A second miss inside that
+            # window used to clear when the limit was 0.10 s.
             if self._chest_miss_n <= 1 or self._chest_miss_s <= self.tune.chest_hold_s:
                 return self._chest_hold
         self._chest_hold = None

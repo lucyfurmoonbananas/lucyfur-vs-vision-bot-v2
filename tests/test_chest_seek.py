@@ -208,7 +208,11 @@ def test_chest_seek_logs_transitions_with_position_and_danger():
     assert [ln for ln in lines if ln.startswith("[chest]")] == seeks
 
     gone = result([], gems=GEM_LEFT)
+    # Misses are held for chest_hold_s (0.6 s), so two frames at 12 fps stay
+    # latched and the clear comes after the window (~8 frames).
     run(nav, clock, gone, 2, hp=1.0)
+    assert not any(ln.startswith("[chest] clear") for ln in lines)
+    run(nav, clock, gone, 8, hp=1.0)
     assert "[chest] clear arrow (900,256) danger=0.00" in lines
 
     lines.clear()
