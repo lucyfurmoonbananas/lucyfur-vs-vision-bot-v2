@@ -156,6 +156,18 @@ class Tuning:
     low_hp: float = 0.5
     # Below this, wider berth and no gem or chest chase. 0 disables.
     critical_hp: float = 0.20
+    # High-HP dive. Garlic kills inside ~40 px (sim aura) and the engage standoff
+    # is 34, but the danger kernel is 42 and the kite's near band is 110, so a
+    # full bar still arcs wide of the aura. At dive_hp_hi the step kernel and
+    # danger_gain shrink by dive_radius_scale (42 -> ~29, inside the aura) and
+    # gems keep pulling up to gem_danger * dive_gem_gain. Fades out at dive_hp_lo.
+    # dive_radius_scale 1.0 turns the whole dive off, gem fade included. Low HP,
+    # critical HP, and kite_floor escapes (wall commit, flower, revive) ignore it.
+    # VS_TUNE=dive_radius_scale=1
+    dive_hp_hi: float = 0.75
+    dive_hp_lo: float = 0.5
+    dive_radius_scale: float = 0.7
+    dive_gem_gain: float = 1.5
     # Encirclement breakout.
     sector_radius: float = 260.0   # crowd within this radius counts for encirclement
     sector_thr: float = 0.30       # per-sector density that counts as "occupied"
@@ -391,6 +403,23 @@ class Decision:
     scores: dict[tuple[int, int], float] = field(default_factory=dict)
     danger_here: float = 0.0
     mode: str = ""
+    dive: float = 0.0  # 0 = today's caution; 1 = full high-HP dive
+
+
+def dive_level(hp: float | None, tune: Tuning) -> float:
+    """Aggression from HP, 0 at ``dive_hp_lo`` and 1 at ``dive_hp_hi``.
+
+    ``dive_radius_scale`` 1.0 forces 0, so radius, danger_gain, and the gem
+    fade all come back exactly. Unknown HP is not high. The low band and
+    critical HP stay at 0 even if the anchors are tuned down over them.
+    """
+    if hp is None or tune.dive_radius_scale == 1.0:
+        return 0.0
+    if tune.dive_hp_hi <= tune.dive_hp_lo or hp <= tune.dive_hp_lo:
+        return 0.0
+    if hp < tune.low_hp or (tune.critical_hp > 0 and hp < tune.critical_hp):
+        return 0.0
+    return float(min(1.0, (hp - tune.dive_hp_lo) / (tune.dive_hp_hi - tune.dive_hp_lo)))
 
 
 def _danger_at(points: np.ndarray, sx: np.ndarray, sy: np.ndarray, radius: float) -> np.ndarray:
@@ -686,12 +715,22 @@ def score_directions(
         kite_mul = 0.7 if defensive else 1.0
         rollout_mul = 1.8 if defensive else 1.0
 
+    # High HP dives: a smaller step kernel and a smaller danger weight, so the
+    # tangent beats the wide outward diagonal. ``here`` stays on the unscaled
+    # radius (chest fade, panic, logged danger). kite_floor is a committed
+    # escape / orbit and does not dive. Contact and the chase rollout stay put.
+    level = 0.0 if kite_floor else dive_level(hp, tune)
+    radius_scale = 1.0 + (tune.dive_radius_scale - 1.0) * level
+    gem_mul = 1.0 + (tune.dive_gem_gain - 1.0) * level
+    danger_gain *= radius_scale
+    step_radius = radius * radius_scale
+
     here = float(_danger_at(pts, np.array([px]), np.array([py]), radius)[0])
     nx = px + _UNIT[:, 0] * tune.step_near
     ny = py + _UNIT[:, 1] * tune.step_near
     fx = px + _UNIT[:, 0] * tune.step_far
     fy = py + _UNIT[:, 1] * tune.step_far
-    danger = _danger_at(pts, nx, ny, radius) + 0.6 * _danger_at(pts, fx, fy, radius * 1.4)
+    danger = _danger_at(pts, nx, ny, step_radius) + 0.6 * _danger_at(pts, fx, fy, step_radius * 1.4)
     contact = _path_contact(pts, px, py, tune.step_far, body)
     scores = -(danger_gain * danger + tune.contact_gain * contact)
     if critical:
@@ -711,7 +750,10 @@ def score_directions(
         norm = math.hypot(kx, ky) or 1.0
         scores = scores + kite_scale * (_UNIT[:, 0] * kx / norm + _UNIT[:, 1] * ky / norm)
 
-    gem_scale = max(0.0, 1.0 - here / tune.gem_danger) if tune.gem_danger > 0 else 0.0
+    # dive_gem_gain extends the fade (moderate danger still pulls). At zero
+    # danger the scale is already 1, so a safe chest-vs-gem choice is unchanged.
+    gem_cap = tune.gem_danger * gem_mul
+    gem_scale = max(0.0, 1.0 - here / gem_cap) if gem_cap > 0 else 0.0
     gem_mask = None
     if gem_forward and kite_dir is not None and gem_scale > 0:
         kx, ky = float(kite_dir[0]), float(kite_dir[1])
@@ -790,8 +832,8 @@ def score_directions(
         mode = "roam"
     if idle_ok and not toward_chest and here < tune.safe_danger * 0.5:
         table[(0, 0)] = table[best] + 0.1
-        return Decision((0, 0), table, here, "hold")
-    return Decision(best, table, here, mode)
+        return Decision((0, 0), table, here, "hold", dive=level)
+    return Decision(best, table, here, mode, dive=level)
 
 
 # How far to extend a ray's own density across the part of the screen the
@@ -1016,6 +1058,7 @@ class Navigator:
         self._tie_bias = 0.0  # orbit radians kept across breakout-heading snaps
         self._spun = 0.0      # orbit radians since the last snap
         self._critical_on = False
+        self.dive = 0.0  # aggression applied on the last step (0 during escapes)
         self._world = (0.0, 0.0)  # player position; the camera follows, so this is dead-reckoned
         self._leash: tuple[float, float] | None = None  # last chest, same coordinates
         self._leash_kind = ""
@@ -2007,6 +2050,7 @@ class Navigator:
         if result.menu:
             # Level-up / chest screens pause the game clock too.
             self.current = (0, 0)
+            self.dive = 0.0
             self.last = Decision((0, 0), {}, 0.0, "menu")
             return self.last
         self._advance_world(dt)
@@ -2250,7 +2294,8 @@ class Navigator:
         mode = f"{dec.mode}/{phase.name}"
         if self._critical_on:
             mode = f"{mode} critical"
-        dec = Decision(choice, dec.scores, dec.danger_here, mode)
+        dec = Decision(choice, dec.scores, dec.danger_here, mode, dive=dec.dive)
+        self.dive = dec.dive
         self.last = dec
         return dec
 
