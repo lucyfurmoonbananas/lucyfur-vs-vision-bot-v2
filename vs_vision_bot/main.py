@@ -375,6 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     revive_trace = [0.0, -1e9, 0.0]  # started_at, until, last_line_at
     parked = False
     in_menu = False
+    prev_menu = None
     heur_streak = [0]
 
     try:
@@ -422,6 +423,10 @@ def main(argv: list[str] | None = None) -> int:
                     # Committed ~3 s escape out of the death crowd (no gem pull,
                     # no small-gap re-picks, heuristic menu hints ignored).
                     nav.request_revive_escape()
+                elif menu_kind == "chest" and prev_menu != "chest":
+                    # One Treasure Found screen spans several frames. Count the open once.
+                    nav.on_chest_opened()
+            prev_menu = menu_kind
             in_menu = menu_kind is not None
             if not cfg.demo and not bus.paused and not menu_kind:
                 now_box = time.monotonic()
