@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from vs_vision_bot.pathfind import Navigator, Tuning, tuning_from_env
+from vs_vision_bot.pathfind import DIRS, Navigator, Tuning, tuning_from_env
 from vs_vision_bot.vision import PLAYFIELD_X1, REF_H_DEFAULT
 
 from tests.test_movement import Clock, blob, result, ring, run
@@ -255,3 +255,181 @@ def test_orbit_direction_flips_toward_the_open_side():
     north = run(nav, clock, result(_south_crowd()), 10, hp=1.0)
     assert nav._orbit_sign == -sign
     assert all(v[1] < 0 for v in north[-4:])
+
+
+def _free_open(nav: Navigator, clock: Clock, logs: list[str]) -> None:
+    """A chest dropped while the free quota remains is stepped onto."""
+    start = len(logs)
+    _anchor(nav, clock, chest=CHEST_RIGHT)
+    fresh = logs[start:]
+    assert any(ln.startswith("[chest] open-allowed (free)") for ln in fresh)
+    assert any(ln.startswith("[leash] step-in ") for ln in fresh)
+    assert not any(ln.startswith("[chest] hold ") for ln in fresh)
+    nav.on_chest_opened()
+    assert nav._leash is None
+
+
+def test_first_three_chests_open_and_the_fourth_is_held():
+    """The first chest_free_opens chests are taken. The next one is orbited, not stepped on."""
+    tune = tuning_from_env("chest_orbit_swell=0", log=lambda *_: None)
+    assert tune.chest_free_opens == 3
+    clock = Clock()
+    logs: list[str] = []
+    nav = Navigator(tune=tune, clock=clock, log=logs.append)
+    for _ in range(3):
+        _free_open(nav, clock, logs)
+    assert nav._chests_opened == 3
+
+    start = len(logs)
+    _anchor(nav, clock, chest=CHEST_RIGHT)
+    _park_west_of(nav, tune.chest_orbit_radius)
+    nav.current = (0, 1)
+    nav._since_change = 1.0
+    dist = nav._leash_dist()
+    run(nav, clock, result([]), 24, hp=1.0)
+    fresh = logs[start:]
+    assert any(ln.startswith("[chest] hold (opened=3 evo_ready=False ") for ln in fresh)
+    assert any(ln.startswith("[leash] orbit r=") for ln in fresh)
+    assert not any(ln.startswith("[leash] step-in ") for ln in fresh)
+    assert nav.last.mode.startswith("leash-orbit")
+    assert nav._leash_dist() > dist - tune.chest_orbit_band
+    assert nav._leash_dist() > tune.chest_hold_keepout
+
+
+def test_evolution_ready_holds_until_ten_minutes_then_steps_in():
+    """Max level plus the partner passive is not enough before 10:00. After that, open one."""
+    tune = tuning_from_env("chest_orbit_swell=0", log=lambda *_: None)
+    assert tune.chest_evo_after_s == 600.0
+    clock = Clock()
+    logs: list[str] = []
+    nav = Navigator(tune=tune, clock=clock, log=logs.append)
+    for _ in range(tune.chest_free_opens):
+        nav.on_chest_opened()
+    nav.set_build_state(True, False)
+    nav.set_build_state(True, False)
+    assert [ln for ln in logs if ln.startswith("[build]")] == [
+        "[build] evolution_ready=True all_maxed=False"
+    ]
+
+    nav.game_s = 540.0
+    _anchor(nav, clock, chest=CHEST_RIGHT)
+    _park_west_of(nav, tune.chest_orbit_radius)
+    nav.current = (0, 1)
+    nav._since_change = 1.0
+    held = nav._leash_dist()
+    run(nav, clock, result([]), 12, hp=1.0)
+    assert any(
+        ln.startswith("[chest] hold (opened=3 evo_ready=True t=540)") for ln in logs
+    )
+    assert not any(ln.startswith("[leash] step-in ") for ln in logs)
+    assert nav._leash_dist() > held - tune.chest_orbit_band
+
+    nav.game_s = 600.0
+    dist = nav._leash_dist()
+    run(nav, clock, result([]), 18, hp=1.0)
+    assert any(ln.startswith("[chest] open-allowed (evolution)") for ln in logs)
+    assert any(ln.startswith("[leash] step-in ") for ln in logs)
+    assert nav._leash_dist() < dist - 100.0
+
+    # The same gate is re-checked for the next chest. Still ready past 10:00, so it opens.
+    nav.on_chest_opened()
+    assert nav._chests_opened == 4
+    nav.game_s = 610.0
+    start = len(logs)
+    _anchor(nav, clock, chest=CHEST_RIGHT)
+    assert any(ln.startswith("[chest] open-allowed (evolution)") for ln in logs[start:])
+    assert any(ln.startswith("[leash] step-in ") for ln in logs[start:])
+    assert not any(ln.startswith("[chest] hold ") for ln in logs[start:])
+
+    # The tracker clears the flag once that evolution is spent. The next chest waits again.
+    nav.on_chest_opened()
+    nav.set_build_state(False, False)
+    nav.game_s = 620.0
+    start = len(logs)
+    _anchor(nav, clock, chest=CHEST_RIGHT)
+    _park_west_of(nav, tune.chest_orbit_radius)
+    nav._since_change = 1.0
+    dist = nav._leash_dist()
+    run(nav, clock, result([]), 12, hp=1.0)
+    fresh = logs[start:]
+    assert any(ln.startswith("[chest] hold (opened=5 evo_ready=False ") for ln in fresh)
+    assert not any(ln.startswith("[leash] step-in ") for ln in fresh)
+    assert nav._leash_dist() > dist - tune.chest_orbit_band
+
+
+def test_all_maxed_opens_a_chest_at_any_time():
+    tune = tuning_from_env("chest_orbit_swell=0", log=lambda *_: None)
+    clock = Clock()
+    logs: list[str] = []
+    nav = Navigator(tune=tune, clock=clock, log=logs.append)
+    for _ in range(tune.chest_free_opens):
+        nav.on_chest_opened()
+    nav.game_s = 90.0
+    nav.set_build_state(False, True)
+    assert "[build] evolution_ready=False all_maxed=True" in logs
+    _anchor(nav, clock, chest=CHEST_RIGHT)
+    _park_west_of(nav, tune.chest_orbit_radius)
+    nav._since_change = 1.0
+    dist = nav._leash_dist()
+    run(nav, clock, result([]), 18, hp=1.0)
+    assert any(ln.startswith("[chest] open-allowed (all-maxed)") for ln in logs)
+    assert not any(ln.startswith("[chest] hold ") for ln in logs)
+    assert any(ln.startswith("[leash] step-in ") for ln in logs)
+    assert nav._leash_dist() < dist - 100.0
+
+
+def test_held_chest_keepout_blocks_a_step_in_but_not_an_escape():
+    """The disc sits in the orbit costs. A committed escape may still walk across it."""
+    tune = tuning_from_env("chest_orbit_swell=0", log=lambda *_: None)
+    assert 0 < tune.chest_hold_keepout < tune.chest_orbit_radius
+    clock = Clock()
+    nav = Navigator(tune=tune, clock=clock, log=lambda *_: None)
+    for _ in range(tune.chest_free_opens):
+        nav.on_chest_opened()
+    _anchor(nav, clock, chest=CHEST_RIGHT)
+    _park_west_of(nav, tune.chest_hold_keepout * 0.5)
+    nav._since_change = 1.0
+    costs = nav._keepout_costs()
+    assert costs[DIRS.index((1, 0))] > costs[DIRS.index((-1, 0))]
+    start = nav._leash_dist()
+    vecs = run(nav, clock, result([]), 8, hp=1.0)
+    assert all(v[0] <= 0 for v in vecs)
+    assert nav._leash_dist() > start + 20.0
+
+    _park_west_of(nav, tune.chest_hold_keepout * 0.5)
+    nav._since_change = 1.0
+    nav.heading = 0.0
+    nav.request_revive_escape()
+    gap = result(ring(480, 256, 170, 48, gap_deg=(340, 360)))
+    vecs = run(nav, clock, gap, 6, hp=1.0)
+    assert nav.escaping and nav.breakout is not None and nav.breakout[0] > 0
+    assert all(v[0] > 0 for v in vecs)
+
+
+def test_chest_free_opens_is_a_vs_tune_knob():
+    """A high chest_free_opens disables the hold. Zero holds the first chest."""
+    assert Tuning().chest_free_opens == 3
+    wide = tuning_from_env("chest_free_opens=9", log=lambda *_: None)
+    assert wide.chest_free_opens == 9
+    clock = Clock()
+    logs: list[str] = []
+    nav = Navigator(tune=wide, clock=clock, log=logs.append)
+    for _ in range(4):
+        nav.on_chest_opened()
+    _anchor(nav, clock, chest=CHEST_RIGHT)
+    assert any(ln.startswith("[chest] open-allowed (free)") for ln in logs)
+    assert any(ln.startswith("[leash] step-in ") for ln in logs)
+    assert not any(ln.startswith("[chest] hold ") for ln in logs)
+
+    held = tuning_from_env("chest_free_opens=0,chest_orbit_swell=0", log=lambda *_: None)
+    clock = Clock()
+    logs = []
+    nav = Navigator(tune=held, clock=clock, log=logs.append)
+    _anchor(nav, clock, chest=CHEST_RIGHT)
+    _park_west_of(nav, held.chest_orbit_radius)
+    nav._since_change = 1.0
+    dist = nav._leash_dist()
+    run(nav, clock, result([]), 12, hp=1.0)
+    assert any(ln.startswith("[chest] hold (opened=0 ") for ln in logs)
+    assert not any(ln.startswith("[leash] step-in ") for ln in logs)
+    assert nav._leash_dist() > dist - held.chest_orbit_band

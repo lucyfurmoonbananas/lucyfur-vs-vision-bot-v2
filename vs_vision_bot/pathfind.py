@@ -37,11 +37,18 @@ Per frame, every one of the 8 WASD directions is scored:
   ``chest_orbit_radius`` (wider as danger rises). The orbit sign is whichever
   tangent corridor is more open, and it flips when the other side opens up.
   A low-danger corridor toward the chest (the same gate as a chest seek)
-  steps in. Committed escapes, flees, and critical HP are not pulled. When
-  escape costs are close, the corridor toward the anchor wins by
+  steps in, unless the chest is being held. The first ``chest_free_opens``
+  chests (default 3) open immediately. After that the bot keeps orbiting and
+  treats the chest as a small keep-out disc until a weapon is evolution-ready
+  and the clock is past ``chest_evo_after_s`` (10:00), or every weapon is
+  maxed or evolved. ``set_build_state`` reports those two flags; both default
+  to false, so an unwired tracker holds every chest after the free ones.
+  Committed escapes, flees, and critical HP are not pulled and may cross the
+  disc. When escape costs are close, the corridor toward the anchor wins by
   ``chest_leash_tie``. The anchor drops once the chest is reached, after
   ``chest_leash_forget_s`` without a re-sight, or after ``chest_leash_slip``
-  of travel since the last sight. Orbit enter/exit and step-in are logged.
+  of travel since the last sight. Orbit enter/exit, step-in, hold, and
+  open-allowed are logged.
 * inertia - hysteresis: the current direction gets a bonus and a minimum
   dwell time so the chord does not jitter frame to frame.
 
@@ -265,6 +272,15 @@ class Tuning:
     # The other tangent takes the orbit when its corridor cost is below this
     # fraction of the current side. Ties keep the way the body is already pointed.
     chest_orbit_switch: float = 0.7
+    # Chests taken as soon as they drop. Later ones are held. A large value
+    # disables the hold. VS_TUNE=chest_free_opens=9.
+    chest_free_opens: int = 3
+    # A held chest opens once a weapon is evolution-ready and the clock is here
+    # (10:00). all_maxed ignores the clock. VS_TUNE=chest_evo_after_s=600.
+    chest_evo_after_s: float = 600.0
+    # Steps that would enter this disc around a held chest are charged in the
+    # orbit costs. 0 disables. Emergencies do not consult it.
+    chest_hold_keepout: float = 110.0
     # Early Garlic engage: before early_engage_until_s, HP >= early_engage_hp, danger < safe_danger
     # and no gems waiting to be collected (early_engage_max_gems), pull toward enemies.
     engage_gain: float = 0.0
@@ -920,6 +936,11 @@ class Navigator:
         self._orbit_sign = 0  # +1 / -1 around the anchor, 0 until a side is chosen
         self._orbit_aim: tuple[float, float] | None = None
         self._step_in = False
+        self._chests_opened = 0
+        # Conservative until the level-up tracker calls set_build_state.
+        self._evolution_ready = False
+        self._all_maxed = False
+        self._policy = ""  # last logged open/hold decision for the current anchor
 
     @property
     def escaping(self) -> bool:
@@ -1477,9 +1498,90 @@ class Navigator:
     def _leash_enabled(self) -> bool:
         return self._leash is not None and self.tune.chest_gain > 0
 
+    def set_build_state(self, evolution_ready: bool, all_maxed: bool) -> None:
+        """Build progress from the level-up tracker. Logged only when it changes.
+
+        ``evolution_ready`` means some weapon is max level and its partner
+        passive is owned. ``all_maxed`` means every weapon is maxed or evolved.
+        Both stay false until that tracker reports them.
+        """
+        evolution_ready = bool(evolution_ready)
+        all_maxed = bool(all_maxed)
+        if evolution_ready == self._evolution_ready and all_maxed == self._all_maxed:
+            return
+        self._evolution_ready = evolution_ready
+        self._all_maxed = all_maxed
+        self.log(f"[build] evolution_ready={evolution_ready} all_maxed={all_maxed}")
+
+    def on_chest_opened(self) -> None:
+        """Treasure Found screen. Count the open, then drop the anchor."""
+        self._chests_opened += 1
+        self._drop_leash("opened")
+
     def note_chest_opened(self) -> None:
         """Treasure screen: the chest is open, so the anchor is done."""
-        self._drop_leash("opened")
+        self.on_chest_opened()
+
+    def _open_reason(self) -> str | None:
+        """Why the pending chest may be stepped on, or None while it is held."""
+        if self._all_maxed:
+            return "all-maxed"
+        if self._chests_opened < self.tune.chest_free_opens:
+            return "free"
+        if self._evolution_ready and self.game_s >= self.tune.chest_evo_after_s:
+            return "evolution"
+        return None
+
+    def _chest_open_allowed(self) -> bool:
+        return self._open_reason() is not None
+
+    def _note_open_policy(self) -> None:
+        """Log the edge between holding a chest and being allowed to open it."""
+        if self._leash is None:
+            self._policy = ""
+            return
+        reason = self._open_reason()
+        key = reason if reason is not None else "hold"
+        if key == self._policy:
+            return
+        self._policy = key
+        if reason is None:
+            self.log(
+                f"[chest] hold (opened={self._chests_opened} "
+                f"evo_ready={self._evolution_ready} t={self.game_s:.0f})"
+            )
+        else:
+            self.log(f"[chest] open-allowed ({reason})")
+
+    def _keepout_costs(self) -> np.ndarray:
+        """Cost for directions that would step into a held chest. Zeros otherwise."""
+        costs = np.zeros(len(DIRS), dtype=np.float32)
+        keep = self.tune.chest_hold_keepout
+        if keep <= 0 or self._leash is None or self._chest_open_allowed():
+            return costs
+        dist = self._leash_dist()
+        if dist < 1.0:
+            return costs
+        ox, oy = self._leash_offset()
+        ix, iy = ox / dist, oy / dist
+        step = max(float(self.tune.step_far), 1.0)
+        for i, (ux, uy) in enumerate(_UNIT):
+            inward = float(ux) * ix + float(uy) * iy
+            radial = dist - inward * step
+            if dist <= keep and inward > 0.05:
+                costs[i] = 12.0
+            elif inward > 0.0 and radial < keep:
+                costs[i] = 12.0 * (keep - radial) / keep
+        return costs
+
+    def _bias_keepout(self, dec: Decision) -> None:
+        pen = self._keepout_costs()
+        if float(pen.max()) <= 0.0:
+            return
+        for i, d in enumerate(DIRS):
+            if d in dec.scores:
+                dec.scores[d] -= float(pen[i])
+        dec.vector = _pick_best(dec.scores, list(DIRS), self._orbit_aim)
 
     def _drop_leash(self, reason: str) -> None:
         if self._leash is None:
@@ -1493,6 +1595,7 @@ class Navigator:
         self._leash = None
         self._leash_kind = ""
         self._leash_travel = 0.0
+        self._policy = ""
 
     def _arrow_offset(self, arrow: tuple[float, float], px: float, py: float) -> tuple[float, float] | None:
         """Direction of the arrow, extended past the playfield edge."""
@@ -1614,7 +1717,10 @@ class Navigator:
         extra = 0.0
         if t.chest_orbit_swell > 0 and t.chest_clear_danger > 0:
             extra = t.chest_orbit_swell * min(max(danger, 0.0), t.chest_clear_danger)
-        return t.chest_orbit_radius + extra
+        radius = t.chest_orbit_radius + extra
+        if t.chest_hold_keepout > 0 and not self._chest_open_allowed():
+            radius = max(radius, t.chest_hold_keepout)
+        return radius
 
     def _leash_chase(self, danger: float) -> str:
         """'orbit', 'step', or '' . Emergencies and a disabled orbit stay out of it."""
@@ -1627,6 +1733,12 @@ class Navigator:
             or self._flee_remaining > 0
             or self.breakout is not None
         ):
+            return ""
+        if not self._chest_open_allowed():
+            # Held: circle even when the corridor is clear. Danger at or past
+            # chest_clear_danger falls through to the normal kite.
+            if danger < self.tune.chest_clear_danger:
+                return "orbit"
             return ""
         opening = danger < self.tune.chest_danger or (
             self._chest_latched and danger < self.tune.chest_clear_danger
@@ -1675,6 +1787,8 @@ class Navigator:
         t_pos = (iy, -ix)
         t_neg = (-iy, ix)
         costs = corridor_costs(pts, px, py, self.tune.corridor_len, self.tune.corridor_width)
+        if not self._chest_open_allowed():
+            costs = costs + self._keepout_costs()
         sign = self._set_orbit_sign(
             self._heading_cost(costs, t_pos[0], t_pos[1]),
             self._heading_cost(costs, t_neg[0], t_neg[1]),
@@ -1738,6 +1852,7 @@ class Navigator:
         px, py = _ref_player(result)
         self._sight_leash(result, px, py)
         self._expire_leash()
+        self._note_open_policy()
         phase = self.phase
         kite = self._kite_direction(pts, px, py, dt)
         self._update_breakout(pts, px, py, dt, hp)
@@ -1749,6 +1864,9 @@ class Navigator:
         # Denser early XP: boost gem pull before the flower without changing late knobs.
         score_tune = gem_tune_for(self.tune, self.game_s)
         seen = self._chest_seen(result, escape, dt)
+        if seen is not None and not self._chest_open_allowed():
+            # The orbit keeps the chest. A seek here would walk onto it.
+            seen = None
         chest_kind = seen[0] if seen is not None else None
         chest_at = seen[1] if seen is not None else None
         cone: list[tuple[int, int]] | None = None
@@ -1859,6 +1977,7 @@ class Navigator:
                         gems=None if self._critical_on else result.gems, current=self.current, hp=hp,
                         tune=roam_tune, idle_ok=False, kite_floor=True, chest=None,
                     )
+                    self._bias_keepout(dec)
                 elif (
                     self._chase == "step" and allow_leash and this_chest is None and self._leash is not None
                 ):
