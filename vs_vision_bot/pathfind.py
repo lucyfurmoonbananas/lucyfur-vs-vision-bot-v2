@@ -41,8 +41,9 @@ instead of being boxed in. After a REVIVE, ``request_revive_escape`` (built on
 ``request_flee``) runs a committed ~3 s escape toward the least threat-dense
 side: steering stays within ~45 deg of that heading, the heading is only re-aimed
 early or when its corridor is clearly shut, and it never turns back. If the ring
-is still closed after that, the escape continues (up to 12 s) but the heading is
-re-picked toward the open corridor instead of staying on the first one.
+is still closed after that, or the crowd is still close, the escape continues
+(up to 12 s) but the heading is re-picked toward the open corridor only while
+the ring stays closed.
 A fast HP crash (e.g. Man-eater flower ring ~5:00) also forces that flee, and
 during the mid-run flower window the cover trigger is lowered so breakouts
 start earlier and last longer; there a ring-closing breakout is also run as the
@@ -80,6 +81,14 @@ DIRS = VECTORS_8[1:]
 _UNIT = np.array([(dx / math.hypot(dx, dy), dy / math.hypot(dx, dy)) for dx, dy in DIRS], dtype=np.float32)
 # Symmetric corridor costs match to float noise. A looser band would hide a real gap.
 _COST_TIE = 1e-3
+# Revive corridors this close are one choice. An empty frame is all zeros, and a
+# short northern ray a few tenths above an open diagonal is the same kind of tie.
+# A real gap (about 2 vs the next corridor near 5) stays unique.
+_REVIVE_CLOSE_ABS = 0.40
+_REVIVE_CLOSE_REL = 0.20
+# Chest or arrow must already lie along a tied runway (~30 deg). A hint on the
+# short side, or on a corridor outside the tie, does not pull the heading.
+_REVIVE_HINT_DOT = 0.85
 
 
 @dataclass
@@ -157,6 +166,11 @@ class Tuning:
     # flower_noreverse_s=4 alone still died ~5:36–5:42 in the real ring; enable both
     # as defaults (ring_commit_s=2.5, flower_noreverse_s=4). 0 disables either knob.
     ring_commit_s: float = 2.5        # 0 disables
+    # Surge commit only once the ring is mostly closed. cover_rising (0.40) plus
+    # a small EMA rise is ordinary density noise: test3 logged 87 ring commits
+    # in 11 minutes, 39 of them at cover 0.44, starting at game~1s. The wall
+    # this is for reached cover 0.88. Plain breakouts still start at cover_rising.
+    ring_commit_cover: float = 0.75
     # Flower window "no reversal" (Bob, Oct 6 3 AM logs: breakouts at game~300-340 s
     # flipped v=(1,..) -> (-1,..) every 3 s, walking back into the ring). Inside the
     # window a new breakout / ring escape, the 0.4 s corridor re-check, and the
@@ -821,6 +835,8 @@ class Navigator:
         self._escape_origin: tuple[float, float] | None = None  # heading after the early window
         self._escape_reason = "revive"  # "revive" or "ring" (flower-window commit)
         self._revive_held = False       # logged the surrounded-hold extension once
+        self._revive_ring = False       # this revive escape has seen a closed ring
+        self._aim_hint = None           # chest or arrow on the frame that picks a heading
         self._last_break_dir: tuple[float, float] | None = None  # heading of the last breakout
         self._last_break_end = -1e9     # game_s when it ended
         self._seek: tuple[str, tuple[float, float]] | None = None  # ("chest"|"arrow", xy) while seeking
@@ -875,10 +891,14 @@ class Navigator:
 
         For ``revive_escape_s`` (~3 s) of gameplay the navigator walks toward the
         lowest-threat-density direction (``escape_costs``), steering only within
-        ~45 deg of that heading. The heading may be re-picked during the first
-        ``escape_repick_s`` (stale first frames), afterwards only if that corridor
-        is clearly shut and never into a reversal. While cover stays at or above
-        ``cover_trigger`` the heading is held up to ``revive_escape_max_s``. An HP
+        ~45 deg of that heading. A flat cost vector takes the longest open edge
+        (east on a full tie) instead of repeating the pre-death heading. The
+        heading may be re-picked during the first ``escape_repick_s`` (stale
+        first frames). Until ``revive_escape_s`` a forward corridor that has
+        filled in (the plain breakout's 1.6x bar) also wins, still with no
+        reversal. While the ring stays closed,
+        or this escape has seen a closed ring and danger is still at or above
+        ``safe_danger``, the heading is held up to ``revive_escape_max_s``. An HP
         crash during the escape does not drop the heading. Calling it again while
         the REVIVE screen is up just restarts the same window. Returns the applied
         duration.
@@ -896,6 +916,7 @@ class Navigator:
         self._escape_s = 0.0
         self._escape_pending = True
         self._revive_held = False
+        self._revive_ring = False
         return dur
 
     def _end_breakout(self) -> None:
@@ -940,7 +961,10 @@ class Navigator:
             ecost = escape_costs(pts, px, py, t)
             if self._escape_reason == "ring":
                 ecost = self._no_reverse(ecost, self._recent_break_dir())
-            self.breakout = tuple(float(v) for v in _UNIT[_pick_min(ecost, self._roam_vec())])
+                pick = _pick_min(ecost, self._roam_vec())
+            else:
+                pick = self._revive_pick(ecost, px, py)
+            self.breakout = tuple(float(v) for v in _UNIT[pick])
             self._escape_origin = self.breakout
             self._breakout_origin = self.breakout
             self._breakout_s = 0.0
@@ -986,6 +1010,45 @@ class Navigator:
 
     def _roam_vec(self) -> tuple[float, float]:
         return (math.cos(self.heading), math.sin(self.heading))
+
+    def _revive_pick(self, costs: np.ndarray, px: float, py: float) -> int:
+        """Revive heading. Near-equal costs are not broken by DIRS order.
+
+        Directions within ``max(0.40, 20% of the best)`` are one corridor. The
+        longest runway to the screen edge wins, so a short northern ray does not
+        beat an equally open east or west. Exact ties on that runway prefer
+        east, unless this frame's chest or arrow already lies along one of them.
+        A unique gap stays the minimum.
+        """
+        costs = np.asarray(costs, dtype=np.float32)
+        finite = costs[np.isfinite(costs)]
+        if finite.size == 0:
+            return _pick_min(costs, self._roam_vec())
+        best = float(finite.min())
+        band = max(_REVIVE_CLOSE_ABS, _REVIVE_CLOSE_REL * max(best, 0.0))
+        close = np.flatnonzero(np.isfinite(costs) & (costs <= best + band))
+        if close.size <= 1:
+            return _pick_min(costs, self._roam_vec())
+        edges = np.array(
+            [_edge_distance(px, py, float(ux), float(uy)) for ux, uy in _UNIT],
+            dtype=np.float32,
+        )
+        longest = float(edges[close].max())
+        runway = close[edges[close] >= longest - 1.0]
+        cheap = float(costs[runway].min())
+        runway = runway[costs[runway] <= cheap + _COST_TIE]
+        prefer = (1.0, 0.0)
+        hint = self._aim_hint
+        if hint is not None and runway.size > 1:
+            hx, hy = float(hint[0]) - px, float(hint[1]) - py
+            hn = math.hypot(hx, hy)
+            if hn > 1e-3:
+                dots = _UNIT[runway, 0] * (hx / hn) + _UNIT[runway, 1] * (hy / hn)
+                if float(dots.max()) >= _REVIVE_HINT_DOT:
+                    prefer = (hx / hn, hy / hn)
+        masked = np.full(len(DIRS), np.inf, dtype=np.float32)
+        masked[runway] = 0.0
+        return _pick_min(masked, prefer)
 
     def _keep_orbit(self, vec: tuple[float, float]) -> None:
         """Aim the roam along ``vec`` without dropping the loop's accumulated turn."""
@@ -1117,6 +1180,8 @@ class Navigator:
             )
         cover, near = encirclement(pts, px, py, t.sector_radius, t.sector_thr)
         self.cover = cover
+        if self._escape_reason == "revive" and cover >= t.cover_trigger:
+            self._revive_ring = True
         if not self._near_init:
             # First frame: no trend yet (a full screen at unpause is not "rising").
             self._near_fast = self._near_slow = near
@@ -1170,22 +1235,33 @@ class Navigator:
             return
         if not closing:
             return
-        # A fast density rise is a wall closing, including past the flower window
-        # (run1 ~11:00: cells 105 -> 1746, cover 0.25 -> 0.88). Commit the thin
-        # side the same way a flower ring does, so it is not dropped after 1.1 s.
-        surge = cover >= t.cover_rising and rising >= t.rise_trigger
-        if (flower or surge) and t.ring_commit_s > 0:
+        # A fast density rise into a real ring is a wall closing, including past
+        # the flower window (run1 ~11:00: cells 105 -> 1746, cover 0.25 -> 0.88).
+        # Commit the thin side the same way a flower ring does, so it is not
+        # dropped after 1.1 s. cover just over cover_rising is not that wall.
+        commit = cover >= t.ring_commit_cover and rising >= t.rise_trigger
+        if (flower or commit) and t.ring_commit_s > 0:
             self._request_escape(t.ring_commit_s, "ring")
         self._start_breakout(pts, px, py)
 
-    def _hold_revive_escape(self, t: Tuning) -> bool:
-        """Keep a post-revive heading while the ring is still closed.
+    def _hold_revive_escape(self, t: Tuning, pts: np.ndarray, px: float, py: float) -> bool:
+        """Keep a post-revive heading until the crowd is actually clear.
 
-        A one-sided crowd (cover under ``cover_trigger``) still ends at
-        ``revive_escape_s``. A closed ring holds until it opens or
+        A closed ring (cover at or above ``cover_trigger``) holds. A revive that
+        started inside one also holds after the ring opens, while danger is
+        still at or above ``safe_danger`` (test3: cover fell 0.94 -> 0.31 and
+        the 12s hold never armed, then kite resumed at danger 0.7 and the ring
+        shut again). A crowd that was never a ring still ends at
+        ``revive_escape_s``. Open ground ends the hold. The cap is
         ``revive_escape_max_s``.
         """
-        if self._escape_reason != "revive" or self.cover < t.cover_trigger:
+        if self._escape_reason != "revive":
+            return False
+        danger = 0.0
+        if pts is not None and len(pts):
+            danger = float(_danger_at(pts, np.array([px]), np.array([py]), t.radius)[0])
+        opened_but_close = self._revive_ring and danger >= t.safe_danger
+        if self.cover < t.cover_trigger and not opened_but_close:
             return False
         room = t.revive_escape_max_s - self._escape_s
         if room <= 1e-3:
@@ -1196,7 +1272,8 @@ class Navigator:
             self._revive_held = True
             self.log(
                 f"[nav] revive escape holding {_nearest_dir(self.breakout)} "
-                f"(cover {self.cover:.2f}) up to {t.revive_escape_max_s:.0f}s game~{self.game_s:.0f}s"
+                f"(cover {self.cover:.2f} danger {danger:.2f}) "
+                f"up to {t.revive_escape_max_s:.0f}s game~{self.game_s:.0f}s"
             )
         return True
 
@@ -1234,7 +1311,7 @@ class Navigator:
         self._escape_remaining = max(0.0, self._escape_remaining - dt)
         self._flee_remaining = self._escape_remaining
         if self._escape_remaining <= 0:
-            if not self._hold_revive_escape(t):
+            if not self._hold_revive_escape(t, pts, px, py):
                 self._keep_orbit(self.breakout)
                 self.log(f"[nav] {self._escape_reason} escape done {_nearest_dir(self.breakout)} game~{self.game_s:.0f}s")
                 self._end_breakout()
@@ -1258,7 +1335,13 @@ class Navigator:
             org = np.asarray(self._escape_origin or self.breakout, dtype=np.float32)
             ahead = ((_UNIT @ _UNIT[cur]) >= -1e-6) & ((_UNIT @ org) >= -1e-6)
             best = _pick_min(np.where(ahead, costs, np.inf), self.breakout)
-            switch = best != cur and costs[cur] > t.escape_switch_ratio * costs[best] + 1.5
+            # Revive, before the hold: the picked corridor can fill without
+            # reaching 3x. Same bar as a plain breakout re-check, and still no
+            # reversal. Ring escapes, and a revive past its window, stay strict.
+            if self._escape_reason == "revive" and self._escape_s <= t.revive_escape_s:
+                switch = best != cur and costs[cur] > 1.6 * costs[best] + 0.5
+            else:
+                switch = best != cur and costs[cur] > t.escape_switch_ratio * costs[best] + 1.5
         if switch:
             self.breakout = tuple(float(v) for v in _UNIT[best])
             if early:
@@ -1377,6 +1460,8 @@ class Navigator:
         px, py = _ref_player(result)
         phase = self.phase
         kite = self._kite_direction(pts, px, py, dt)
+        spot = result.chest or result.chest_arrow
+        self._aim_hint = (float(spot[0]), float(spot[1])) if spot is not None else None
         self._update_breakout(pts, px, py, dt, hp)
         escape = self.breakout is not None and self._escape_remaining > 0
         # Denser early XP: boost gem pull before the flower without changing late knobs.

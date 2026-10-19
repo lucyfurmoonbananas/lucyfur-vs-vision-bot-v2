@@ -328,39 +328,80 @@ def read_hp_bar(frame: np.ndarray) -> float | None:
     return min(1.0, end / n)
 
 
+# A real bar is this many rows of the same columns. A damage number is a
+# shifting slash (test3 quit: 2 rows read as 1.0) or a 2px speck (0.06).
+_FALLBACK_MIN_ROWS = 4
+_FALLBACK_MIN_RUN = 4
+_FALLBACK_ALIGN = 2
+
+
+def _fallback_hp(frame: np.ndarray) -> float | None:
+    """HP from a bar-shaped red run when the fixed rect is occluded.
+
+    The search window also contains damage numbers and red sprites. Those are
+    not a bar unless the same run repeats for several rows. A tall solid sprite
+    still matches; one such frame stays a spike for the jump filter.
+    """
+    h, w = frame.shape[:2]
+    x0, x1 = int(w * 0.42), int(w * 0.58)
+    y0, y1 = int(h * 0.47), int(h * 0.56)
+    roi = frame[y0:y1, x0:x1].astype(np.int16)
+    if roi.size == 0:
+        return None
+    red = (roi[:, :, 2] > 200) & (roi[:, :, 1] < 50) & (roi[:, :, 0] < 50)
+    dark = roi.max(axis=2) < 45
+    nominal = HP_BAR_W_960 * w / 960.0
+    runs: list[tuple[int, int] | None] = []
+    for r in range(roi.shape[0]):
+        xs = np.flatnonzero(red[r])
+        if xs.size < _FALLBACK_MIN_RUN:
+            runs.append(None)
+            continue
+        parts = np.split(xs, np.flatnonzero(np.diff(xs) > 1) + 1)
+        run = max(parts, key=len)
+        if len(run) < _FALLBACK_MIN_RUN or len(run) > nominal * 1.3:
+            runs.append(None)
+            continue
+        runs.append((int(run[0]), int(run[-1])))
+    best: tuple[int, float] | None = None
+    i = 0
+    n = len(runs)
+    while i < n:
+        if runs[i] is None:
+            i += 1
+            continue
+        j = i
+        a0, b0 = runs[i]
+        while j + 1 < n and runs[j + 1] is not None:
+            a1, b1 = runs[j + 1]
+            if abs(a1 - a0) > _FALLBACK_ALIGN or abs(b1 - b0) > _FALLBACK_ALIGN:
+                break
+            j += 1
+        if j - i + 1 >= _FALLBACK_MIN_ROWS:
+            seg = [runs[k] for k in range(i, j + 1) if runs[k] is not None]
+            start = int(np.median([s[0] for s in seg]))
+            end = int(np.median([s[1] for s in seg])) + 1
+            length = end - start
+            mid = (i + j) // 2
+            missing = 0
+            while end + missing < roi.shape[1] and dark[mid, end + missing]:
+                missing += 1
+            total = length + missing
+            if total < nominal * 0.7:
+                total = nominal
+            frac = min(1.0, length / total) if total else 0.0
+            if best is None or length > best[0]:
+                best = (length, frac)
+        i = j + 1
+    return None if best is None else best[1]
+
+
 def read_hp_fraction(frame: np.ndarray) -> float | None:
     """Player HP from the red bar just under the centered character (None if not seen)."""
     anchored = read_hp_bar(frame)
     if anchored is not None:
         return anchored
-    h, w = frame.shape[:2]
-    x0, x1 = int(w * 0.42), int(w * 0.58)
-    y0, y1 = int(h * 0.47), int(h * 0.56)
-    roi = frame[y0:y1, x0:x1].astype(np.int16)
-    red = (roi[:, :, 2] > 200) & (roi[:, :, 1] < 50) & (roi[:, :, 0] < 50)
-    dark = roi.max(axis=2) < 45
-    nominal = HP_BAR_W_960 * w / 960.0
-    best = None
-    for r in range(roi.shape[0]):
-        xs = np.flatnonzero(red[r])
-        if xs.size < 2:
-            continue
-        runs = np.split(xs, np.flatnonzero(np.diff(xs) > 1) + 1)
-        run = max(runs, key=len)
-        if len(run) < 2 or len(run) > nominal * 1.3:
-            continue
-        # Missing HP shows as the dark rest of the bar to the right.
-        end = run[-1] + 1
-        missing = 0
-        while end + missing < roi.shape[1] and dark[r, end + missing]:
-            missing += 1
-        total = len(run) + missing
-        if total < nominal * 0.7:
-            total = nominal
-        frac = min(1.0, len(run) / total)
-        if best is None or len(run) > best[0]:
-            best = (len(run), frac)
-    return None if best is None else best[1]
+    return _fallback_hp(frame)
 
 
 # ---------------------------------------------------------------- OCR
@@ -844,6 +885,14 @@ HP_JUMP_AGREE = 0.15
 # Same band as Tuning.critical_hp. A read below it sticks across misses until the
 # accepted window itself recovers (run1 death 1: 0.06 then none, median still 0.92).
 HP_CRITICAL = 0.20
+# test3: critical turned off at a 0.25 median (10:17) and after three frames of
+# 0.95 / 0.96 / 1.00 (10:50), which was a damage flash, not a heal. Leave only
+# once several accepted readings sit at or above the exit, and a near-full flash
+# needs a longer streak than a normal heal (three 0.55s still count as one).
+HP_CRITICAL_EXIT = 0.40
+HP_RECOVER_N = 3
+HP_FULL_FLASH = 0.90
+HP_FULL_FLASH_N = 6
 
 
 class HpTracker:
@@ -859,10 +908,12 @@ class HpTracker:
         self.low_held = False
         self._anchor: float | None = None
         self._pending: list[float] = []
+        self._recover: list[float] = []
 
     def add(self, v: float | None) -> None:
         if v is None:
             self._pending.clear()
+            self._recover.clear()
             self.misses += 1
             if self.values and self.misses >= self.miss_limit:
                 self._anchor = self.value
@@ -890,7 +941,7 @@ class HpTracker:
         self.values.append(float(v))
         del self.values[: -self.window]
         self._anchor = self.value
-        self._sync_low(float(v))
+        self._sync_low([float(v)])
 
     def _accept_window(self, samples: list[float]) -> None:
         self.misses = 0
@@ -898,20 +949,47 @@ class HpTracker:
         self._pending.clear()
         self.values = [float(s) for s in samples[-self.window :]]
         self._anchor = self.value
-        self._sync_low(float(self._anchor))
+        self._sync_low([float(s) for s in self.values])
 
-    def _sync_low(self, v: float) -> None:
-        """Hold critical across unread frames until a trusted recovery.
+    def _sync_low(self, samples: list[float]) -> None:
+        """Hold critical until a heal is above the exit and several frames agree.
 
-        One accepted sample under ``HP_CRITICAL`` sticks even while the median
-        is still the previous high window. Misses and rejected spikes do not
-        clear it. It clears when an accepted sample and the median are both
-        back at or above the band (a confirmed heal replaces the window).
+        One accepted sample under ``HP_CRITICAL`` sticks across misses and
+        rejected spikes. A later median in the gap between enter and exit
+        (test3: 0.25) does not release it. Release takes ``HP_RECOVER_N``
+        accepted readings at or above ``HP_CRITICAL_EXIT`` that agree with each
+        other. A jump from critical into a near-full bar is the damage-flash
+        misread (0.95, 0.96, 1.00) and needs the longer streak.
         """
-        if v < HP_CRITICAL:
-            self.low_held = True
-        elif self.value is not None and self.value >= HP_CRITICAL:
-            self.low_held = False
+        for v in samples:
+            if v < HP_CRITICAL:
+                self.low_held = True
+                self._recover.clear()
+                continue
+            if not self.low_held:
+                continue
+            if v < HP_CRITICAL_EXIT:
+                self._recover.clear()
+                continue
+            self._recover.append(v)
+            del self._recover[: -HP_FULL_FLASH_N]
+            if self._recovered():
+                self.low_held = False
+                self._recover.clear()
+
+    def _recovered(self) -> bool:
+        if self.value is None or self.value < HP_CRITICAL_EXIT or not self._recover:
+            return False
+        if len(self._recover) >= HP_FULL_FLASH_N:
+            tail = self._recover[-HP_FULL_FLASH_N :]
+            if min(tail) >= HP_FULL_FLASH and max(tail) - min(tail) <= HP_JUMP_AGREE:
+                return True
+        if len(self._recover) < HP_RECOVER_N:
+            return False
+        tail = self._recover[-HP_RECOVER_N :]
+        if min(tail) >= HP_FULL_FLASH:
+            return False
+        return min(tail) >= HP_CRITICAL_EXIT and max(tail) - min(tail) <= HP_JUMP_AGREE
 
     def reset(self) -> None:
         self.values.clear()
@@ -920,6 +998,7 @@ class HpTracker:
         self.low_held = False
         self._anchor = None
         self._pending.clear()
+        self._recover.clear()
 
     @property
     def value(self) -> float | None:
