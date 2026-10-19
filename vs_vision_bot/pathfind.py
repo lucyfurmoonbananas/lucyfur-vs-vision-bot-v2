@@ -876,6 +876,9 @@ def format_gem_summary(nav: Navigator) -> str:
     )
 
 
+# OPEN prompt and the DONE reward of one chest. A later chest is a new open.
+_CHEST_REWARD_WINDOW_S = 45.0
+
 # HUD timer OCR plausibility (see Navigator._sync_timer).
 TIMER_JUMP_TOL_S = 8.0       # accept readings this close to the wall-clock estimate
 TIMER_RESYNC_N = 3           # consecutive agreeing out-of-range readings to resync
@@ -953,9 +956,11 @@ class Navigator:
         self._orbit_aim: tuple[float, float] | None = None
         self._step_in = False
         self._chests_opened = 0
+        self._chest_counted_at = -1e9  # wall clock of the last counted open
         # Conservative until the level-up tracker calls set_build_state.
         self._evolution_ready = False
         self._all_maxed = False
+        self._build_reported = False  # log the first report even while both stay false
         self._policy = ""  # last logged open/hold decision for the current anchor
 
     @property
@@ -1594,23 +1599,40 @@ class Navigator:
         return self._leash is not None and self.tune.chest_gain > 0
 
     def set_build_state(self, evolution_ready: bool, all_maxed: bool) -> None:
-        """Build progress from the level-up tracker. Logged only when it changes.
+        """Build progress from the level-up tracker. Logged when it changes.
 
+        The first report is logged even when both flags are still false, so a
+        live run shows the wire before anything is ready to evolve.
         ``evolution_ready`` means some weapon is max level and its partner
         passive is owned. ``all_maxed`` means every weapon is maxed or evolved.
-        Both stay false until that tracker reports them.
         """
         evolution_ready = bool(evolution_ready)
         all_maxed = bool(all_maxed)
-        if evolution_ready == self._evolution_ready and all_maxed == self._all_maxed:
+        if (
+            self._build_reported
+            and evolution_ready == self._evolution_ready
+            and all_maxed == self._all_maxed
+        ):
             return
         self._evolution_ready = evolution_ready
         self._all_maxed = all_maxed
+        self._build_reported = True
         self.log(f"[build] evolution_ready={evolution_ready} all_maxed={all_maxed}")
 
-    def on_chest_opened(self) -> None:
-        """Treasure Found screen. Count the open, then drop the anchor."""
+    def on_chest_opened(self, reward: bool = False) -> None:
+        """Treasure Found screen. Count the open, then drop the anchor.
+
+        The OPEN prompt and the DONE reward are one chest. ``reward`` is the
+        DONE page. It does not spend another free open when it follows the
+        prompt within ``_CHEST_REWARD_WINDOW_S``. A reward with no recent open
+        (the prompt was missed) still counts.
+        """
+        if reward and self.clock() - self._chest_counted_at < _CHEST_REWARD_WINDOW_S:
+            self.log(f"[chest] reward follows open {self._chests_opened} (not counted)")
+            return
         self._chests_opened += 1
+        self._chest_counted_at = self.clock()
+        self.log(f"[chest] opened {self._chests_opened}")
         self._drop_leash("opened")
 
     def note_chest_opened(self) -> None:
@@ -1646,7 +1668,7 @@ class Navigator:
                 f"evo_ready={self._evolution_ready} t={self.game_s:.0f})"
             )
         else:
-            self.log(f"[chest] open-allowed ({reason})")
+            self.log(f"[chest] open-allowed ({reason}) opened={self._chests_opened}")
 
     def _keepout_costs(self) -> np.ndarray:
         """Cost for directions that would step into a held chest. Zeros otherwise."""

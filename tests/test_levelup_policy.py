@@ -27,6 +27,7 @@ from vs_vision_bot.menus import (
     WEAPON_MAX_LEVEL,
     all_maxed,
     assess_inventory,
+    chest_text_is_reward,
     choose_card,
     choose_pick,
     evolution_ready,
@@ -36,6 +37,7 @@ from vs_vision_bot.menus import (
     levels_from_chest_text,
     low_hp_limit,
     match_name,
+    merge_card_levels,
     owned_weapon_slots,
     parse_level_text,
     read_critical_flag,
@@ -594,3 +596,89 @@ def test_fixture_owned_cards_read_a_level_and_new_cards_do_not():
     assert screen.cards[1].name == "Knife" and screen.cards[1].new and screen.cards[1].level is None
     assert screen.cards[2].name == "Lightning Ring" and screen.cards[2].level == 2
     assert screen.cards[3].new and screen.cards[3].level is None
+
+
+def test_a_card_two_levels_up_corrects_the_tracker_and_stays_on_garlic():
+    """Run 1 ended Garlic 8 on the results screen and 6 in the tracker.
+
+    A chest grants +1 with no item name. The next card's 'level N' is how the
+    tracker catches up. Two above is still the same weapon; four above is the
+    old wild misread and stays on the spreading rank.
+    """
+    levels = {"Garlic": 5, "Pummarola": 1}
+    cards = [_card("Garlic", False, level=7), _card("King Bible", True)]
+    eff, certain = assess_inventory(cards, levels)
+    assert certain is True and eff["Garlic"] == 7
+    pick = choose_pick(cards, owned=set(levels), levels=dict(levels))
+    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
+    # The results screen was two higher, at the cap. That read is the inventory,
+    # so the chest gate can see an evolution.
+    capped = {"Garlic": 6, "Pummarola": 1}
+    at_cap = [_card("Garlic", False, level=8), _card("Whip", True)]
+    eff, certain = assess_inventory(at_cap, capped)
+    assert certain is True and eff["Garlic"] == 8
+    merge_card_levels(capped, eff)
+    assert capped["Garlic"] == 8 and evolution_ready(capped)
+
+
+def test_uncertain_screen_levels_an_owned_weapon_before_a_new_crowd_weapon():
+    """A shaky extra card must not throw the plan onto Santa Water.
+
+    Static rank puts a new crowd weapon at tier 2 and a Garlic level at tier 3.
+    That is what took Fire Wand, Santa Water and King Bible in run 1.
+    """
+    levels = {"Garlic": 4, "Pummarola": 1}
+    cards = [
+        _card("Garlic", False, level=4),
+        _card("Santa Water", True),
+        _card("Candelabrador", True, score=0.7),
+    ]
+    pick = choose_pick(cards, owned=set(levels), levels=levels)
+    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
+
+
+def test_owned_weapon_level_beats_extra_armor_and_a_new_passive():
+    """Run 1 at 10:00 had Armor 3 beside Runetracer 4. Another Armor level,
+    and a new Hollow Heart / Tirajisú, lose to the weapon already being leveled.
+    """
+    levels = {"Garlic": 5, "Runetracer": 4, "Armor": 2, "Pummarola": 1}
+    cards = _offer(
+        [("Armor", False), ("Runetracer", False), ("Hollow Heart", True), ("Tirajisú", True)],
+        levels,
+    )
+    pick = choose_pick(cards, hp=1.0, owned=set(levels), levels=levels)
+    assert cards[pick.index].name == "Runetracer" and pick.reason == "fallback"
+
+
+def test_chest_armor_line_corrects_an_owned_level_and_a_generic_line_does_not():
+    text = "DONE -. level:3 Reduces incoming Denage by 1."
+    assert levels_from_chest_text(text) == {"Armor": 3}
+    generic = "DONE -- level:5 Cooldown reduced by 0.1 seconds. Base Damage up by 2."
+    assert levels_from_chest_text(generic) == {}
+    assert chest_text_is_reward("ad Treasure Found! ome OPEN") is False
+    assert chest_text_is_reward(generic) is True
+    pilot = MenuPilot(tap=lambda _k: None, log=lambda _m: None)
+    pilot.levels = {"Garlic": 4, "Armor": 1, "Pummarola": 1}
+    pilot._note_chest_reward(generic)
+    assert pilot.levels["Garlic"] == 4 and pilot.levels["Armor"] == 1
+    pilot._note_chest_reward(text)
+    assert pilot.levels["Armor"] == 3
+
+
+def test_done_page_is_marked_as_the_reward_followup(monkeypatch):
+    import numpy as np
+
+    monkeypatch.setattr("vs_vision_bot.menus.tesseract_available", lambda: True)
+    pilot = MenuPilot(tap=lambda _k: None, log=lambda _m: None, async_chest=True, settle_frames=1)
+    now = 1000.0
+    pilot.clock = lambda: now
+    frame = np.zeros((8, 8, 3), np.uint8)
+    pilot._last_scan = now
+    pilot._next_action = 0
+    pilot._chest_hit = (now, "ad Treasure Found! ome OPEN", "chest", None)
+    assert pilot._handle_chest(frame, now) == "chest"
+    assert pilot.chest_is_reward is False
+    pilot._next_action = 0
+    pilot._chest_hit = (now, "DONE -- level:5 Cooldown reduced by 0.1 seconds.", "chest", None)
+    assert pilot._handle_chest(frame, now) == "chest"
+    assert pilot.chest_is_reward is True

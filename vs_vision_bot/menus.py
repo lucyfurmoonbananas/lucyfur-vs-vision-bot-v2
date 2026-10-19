@@ -586,6 +586,10 @@ def match_name(raw: str) -> str:
 # the item is at now (OCR sometimes reads the next level, one higher).
 WEAPON_MAX_LEVEL = 8
 PASSIVE_MAX_LEVEL = 5
+# A chest grants +1, and the tag is occasionally one high. Adopt an upward gap
+# inside this bound so the tracker catches the chest. Wider than this (the live
+# misread of 2 vs 6) is not an inventory.
+LEVEL_RECONCILE = 2
 _LEVEL_RE = re.compile(r"l[e3]v[ae]l\s*[:;.]?\s*(\d+)", re.IGNORECASE)
 
 
@@ -1067,11 +1071,31 @@ def evolutions_from_chest_text(text: str) -> set[str]:
     return found
 
 
+# Armor's chest line is "Reduces incoming damage by N". OCR often reads "Denage".
+# Cooldown / base-damage text is shared by every weapon, so it names nothing.
+_ARMOR_CHEST_RE = re.compile(r"incoming\s+d[a-z]*ge", re.IGNORECASE)
+
+
+def chest_text_is_reward(text: str) -> bool:
+    """True for the DONE page after Treasure Found, false for the OPEN prompt.
+
+    One chest shows both. The prompt is the open that spends a free chest.
+    The reward page is the same chest.
+    """
+    low = (text or "").lower()
+    if "treasure" in low or re.search(r"\bopen\b", low):
+        return False
+    return "done" in low or parse_level_text(text or "") is not None
+
+
 def levels_from_chest_text(text: str) -> dict[str, int]:
     """One non-evolution item and one level tag. Empty when the screen is ambiguous."""
     level = parse_level_text(text or "")
     if level is None:
         return {}
+    if _ARMOR_CHEST_RE.search(text or ""):
+        # Named before the vocab pass: "damage" must not become a second item.
+        return {"Armor": level}
     hits = {name: score for name, score in _vocab_hits(text).items() if name not in EVOLUTIONS}
     names = list(hits)
     kept: list[str] = []
@@ -1102,10 +1126,12 @@ def assess_inventory(
     """Copy ``levels`` and fold in confident card reads.
 
     Certain when every confident card agrees with the tracker. A missing level
-    tag on a tracked item is fine. Off-by-one is fine (the tag is sometimes the
-    next level). A shaky name, a New! on something we own, an owned item we
-    have never seen a level for, or a level that disagrees by more than 1 is
-    not an inventory: the caller falls back to the static priority.
+    tag on a tracked item is fine. A tag up to ``LEVEL_RECONCILE`` higher is the
+    chest (or the occasional next-level read) and replaces the tracker. A tag
+    one lower stays on the plan without lowering it. A shaky name, a New! on
+    something we own, an owned item we have never seen a level for, or a wider
+    gap is not an inventory: the caller uses the static priority only when no
+    card still agrees.
     """
     if levels is None:
         return {}, False
@@ -1129,9 +1155,46 @@ def assess_inventory(
         if held <= 0:
             eff[c.name] = c.level
             continue
-        if abs(c.level - held) > 1:
+        if c.level > held + LEVEL_RECONCILE or held - c.level > 1:
             return eff, False
+        if c.level > held:
+            eff[c.name] = c.level
     return eff, True
+
+
+def merge_card_levels(levels: dict[str, int], eff: dict[str, int]) -> None:
+    """Write a certain read into the tracker. Higher card levels replace stale ones."""
+    for name, lv in eff.items():
+        if name in FILLER:
+            continue
+        held = levels.get(name, 0)
+        if held <= 0 or lv > held:
+            levels[name] = lv
+
+
+def _card_tracks(card: Card, levels: dict[str, int]) -> bool:
+    """This card agrees with the tracker closely enough to pick from it."""
+    if not card.name or card.name in FILLER:
+        return False
+    if card.score and card.score < NAME_RETRY_BELOW:
+        return False
+    held = levels.get(card.name, 0)
+    if card.new:
+        return held <= 0
+    if card.level is None:
+        return held > 0
+    if held <= 0:
+        return True
+    if card.level > held + LEVEL_RECONCILE or held - card.level > 1:
+        return False
+    return True
+
+
+def _missing_partner_name(name: str, levels: dict[str, int]) -> bool:
+    """``name`` is the evolution partner of a weapon we already own, and we lack it."""
+    if levels.get(name, 0) > 0:
+        return False
+    return any(lv > 0 and partner_of(weapon) == name for weapon, lv in levels.items())
 
 
 def _second_weapon(levels: dict[str, int], main: str) -> str | None:
@@ -1272,6 +1335,17 @@ def _choose_static(
     return min(range(len(cards)), key=lambda i: _card_rank(cards[i], i, hp, weapons, early))
 
 
+def _owned_weapon_level_offered(cards: list[Card], levels: dict[str, int]) -> bool:
+    """An owned weapon that is not yet at 8 is on this screen."""
+    for card in cards:
+        if card.new or not card.name or card.name not in WEAPONS:
+            continue
+        held = levels.get(card.name, 0)
+        if 0 < held < WEAPON_MAX_LEVEL:
+            return True
+    return False
+
+
 def _focused_rank(
     c: Card,
     idx: int,
@@ -1279,6 +1353,7 @@ def _focused_rank(
     weapons: int,
     early: bool,
     levels: dict[str, int],
+    protect_weapons: bool = False,
 ) -> tuple[int, int, str]:
     """Lower tier wins. Reasons are main / partner / second / fallback.
 
@@ -1333,6 +1408,16 @@ def _focused_rank(
         held = 0 if levels.get(partner_of(name) or "", 0) > 0 else 1
         order = SECOND_ORDER.index(name) if name in SECOND_ORDER else 50
         return (6, held * 100 + order, "second")
+    # A weapon level is on the screen and the main is not finished. Do not spend
+    # it on another passive level, or on a new passive that is not some owned
+    # weapon's partner. New Armor still beats a new weapon when no weapon level
+    # is offered (that screen has nothing owned to protect).
+    if protect_weapons and name not in WEAPONS and name not in EVOLUTIONS:
+        if not _missing_partner_name(name, levels):
+            if c.new:
+                return (27, idx, "fallback")
+            if levels.get(name, 0) > 0:
+                return (12, idx, "fallback")
     if name in SURVIVAL:
         return (7, SURVIVAL.index(name), "fallback")
     if not c.new:
@@ -1410,7 +1495,10 @@ def _choose_focused(
         return filler, "fallback"
     weapons = owned_weapon_count(set(levels))
     early = is_early_run(game_s, weapons)
-    ranked = [_focused_rank(cards[i], i, hp, weapons, early, levels) for i in range(len(cards))]
+    protect = _owned_weapon_level_offered(cards, levels)
+    ranked = [
+        _focused_rank(cards[i], i, hp, weapons, early, levels, protect) for i in range(len(cards))
+    ]
     idx = min(range(len(cards)), key=lambda i: ranked[i][:2])
     return idx, ranked[idx][2]
 
@@ -1432,7 +1520,12 @@ def choose_pick(
     critical: bool = False,
     low_held: bool = False,
 ) -> CardPick:
-    """Card to take, and why. Uncertain inventory uses the static priority.
+    """Card to take, and why.
+
+    A certain inventory follows the evolution plan. A contradictory read still
+    uses that plan for every card that agrees with the tracker (owned levels
+    and missing partners). The static priority, which prefers a new crowd
+    weapon, runs only when nothing owned agrees.
 
     ``hp`` is the HpTracker median, or None when the bar is blind. Filler
     (coin bag vs Floor Chicken) uses that number only once every owned weapon
@@ -1442,6 +1535,20 @@ def choose_pick(
         return CardPick(0, "fallback")
     eff, certain = assess_inventory(cards, levels)
     if not certain:
+        if levels is not None:
+            usable = [c for c in cards if _card_tracks(c, levels)]
+            preferred = [
+                c
+                for c in usable
+                if (not c.new and levels.get(c.name, 0) > 0) or _missing_partner_name(c.name, levels)
+            ]
+            if preferred:
+                low = hp_is_low(hp, blind_low=blind_low, critical=critical, low_held=low_held)
+                idx, reason = _choose_focused(
+                    usable, hp, dict(levels), game_s, low=low, evolved=evolved
+                )
+                reason = reason if reason in PICK_REASONS else "fallback"
+                return CardPick(cards.index(usable[idx]), reason)
         return CardPick(_choose_static(cards, hp, owned, game_s), "fallback")
     low = hp_is_low(hp, blind_low=blind_low, critical=critical, low_held=low_held)
     idx, reason = _choose_focused(cards, hp, eff, game_s, low=low, evolved=evolved)
@@ -1860,6 +1967,7 @@ class MenuPilot:
         self._inventory_certain = True
         self._evol_logged = False
         self._build_state = (False, False)
+        self.chest_is_reward = False
         self._hp = HpTracker()
         self.saved_results: list[str] = []
         self.tap = tap
@@ -1936,7 +2044,7 @@ class MenuPilot:
             if held <= 0:
                 self.levels[name] = lv
                 self.owned.add(name)
-            elif lv > held and abs(lv - held) <= 1:
+            elif lv > held and lv - held <= LEVEL_RECONCILE:
                 self.levels[name] = min(level_cap(name), lv)
         self._publish_build()
 
@@ -2085,17 +2193,14 @@ class MenuPilot:
                 eff, certain = assess_inventory(screen.cards, self.levels)
                 self._inventory_certain = certain
                 if certain:
-                    for name, lv in eff.items():
-                        if name in FILLER or name in self.levels:
-                            continue
-                        self.levels[name] = lv
-                        self.owned.add(name)
+                    merge_card_levels(self.levels, eff)
+                    self.owned |= {n for n in eff if n not in FILLER and self.levels.get(n, 0) > 0}
                 pick = choose_pick(
                     screen.cards,
                     hp=None if self.hp_blind else self.hp,
                     owned=self.owned,
                     game_s=game_s,
-                    levels=self.levels if certain else None,
+                    levels=self.levels,
                     evolved=self.evolved,
                     blind_low=self.hp_blind and self._hp.blind_after_low(low_hp_limit()),
                     critical=self._critical_now(),
@@ -2362,6 +2467,8 @@ class MenuPilot:
             return None
         kind, where = hit[2], hit[3]
         shown = (hit[1] or "")[:80]
+        if kind == "chest":
+            self.chest_is_reward = chest_text_is_reward(hit[1] or "")
         if now >= self._next_action:
             if kind == "results":
                 self._save_results(frame)

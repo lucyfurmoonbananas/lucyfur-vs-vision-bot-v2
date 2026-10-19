@@ -424,8 +424,10 @@ def main(argv: list[str] | None = None) -> int:
                     # no small-gap re-picks, heuristic menu hints ignored).
                     nav.request_revive_escape()
                 elif menu_kind == "chest" and prev_menu != "chest":
-                    # One Treasure Found screen spans several frames. Count the open once.
-                    nav.on_chest_opened()
+                    # One Treasure Found screen spans several frames. The OPEN
+                    # prompt spends one free chest; the DONE reward is the same
+                    # open (chest_is_reward) and must not spend a second.
+                    nav.on_chest_opened(reward=bool(getattr(pilot, "chest_is_reward", False)))
             prev_menu = menu_kind
             in_menu = menu_kind is not None
             if not cfg.demo and not bus.paused and not menu_kind:
