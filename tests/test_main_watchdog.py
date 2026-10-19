@@ -201,3 +201,54 @@ def test_revive_escape_ignores_heuristic_menu_until_frames_agree(frozen_game, ca
     # ... the third agreeing frame freezes like before.
     assert " v=(0, 0)" in lines[3] and "ignored" not in lines[3]
     assert "[nav] revive escape" in out
+
+
+class _PickingPilot:
+    """One level-up pick, then plain gameplay. Reports a weapon ready to evolve."""
+
+    def __init__(self, **_kw) -> None:
+        self.hp = 1.0
+        self.revives = 0
+        self._quit_pressed = False
+        self.finished = False
+        self.status = ""
+        self.picks: list[str] = []
+        self.chest_presses = 0
+        self.evolution_ready = False
+        self.all_maxed = False
+        self.calls = 0
+
+    def step(self, _frame, screen=None):
+        self.calls += 1
+        if self.calls == 1:
+            self.picks.append("Garlic")
+            self.evolution_ready = True
+            return "levelup"
+        return None
+
+    def reset_run(self):
+        pass
+
+    def new_run(self):
+        self.picks.clear()
+        self.evolution_ready = False
+        self.all_maxed = False
+
+
+def test_main_pushes_build_state_after_a_pick_when_the_navigator_accepts_it(frozen_game):
+    seen: list[tuple[bool, bool]] = []
+
+    class _RecordingNav(m.Navigator):
+        def set_build_state(self, evolution_ready: bool, all_maxed: bool) -> None:
+            seen.append((bool(evolution_ready), bool(all_maxed)))
+
+    frozen_game.setenv("VS_AUTO_MENUS", "1")
+    frozen_game.setattr(m, "tesseract_available", lambda: True)
+    frozen_game.setattr(m, "detect_level_up", lambda frame: None)
+    frozen_game.setattr(m, "MenuPilot", _PickingPilot)
+    frozen_game.setattr(m, "Navigator", _RecordingNav)
+    frozen_game.setattr(m, "ScreenCapture", FakeCapture)
+    assert m.main(["--dry-run"]) == m.EXIT_WATCHDOG
+    assert seen[0] == (False, False)
+    assert (True, False) in seen
+    assert seen.count((True, False)) == 1
