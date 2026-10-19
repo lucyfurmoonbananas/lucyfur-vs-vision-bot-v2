@@ -145,6 +145,7 @@ class Card:
     raw: str = ""
     new: bool = False
     score: float = 0.0  # similarity of ``raw`` to ``name`` (match_name_score)
+    level: int | None = None  # parsed "level N" for an owned card; None if New! or unread
 
     @property
     def cy(self) -> int:
@@ -538,6 +539,24 @@ def match_name(raw: str) -> str:
     return match_name_score(raw)[0]
 
 
+# Weapons stop at 8. Passives stop at 5. The level tag on a card is the level
+# the item is at now (OCR sometimes reads the next level, one higher).
+WEAPON_MAX_LEVEL = 8
+PASSIVE_MAX_LEVEL = 5
+_LEVEL_RE = re.compile(r"l[e3]v[ae]l\s*[:;.]?\s*(\d+)", re.IGNORECASE)
+
+
+def parse_level_text(raw: str) -> int | None:
+    """Pull a weapon/passive level out of an OCR tag. None when it is not a level."""
+    m = _LEVEL_RE.search(raw or "")
+    if not m:
+        return None
+    n = int(m.group(1))
+    if 1 <= n <= WEAPON_MAX_LEVEL:
+        return n
+    return None
+
+
 # A name read below this similarity is re-OCR'd at other white thresholds (Oct 6:
 # "Armor" read as "Axrer" at 190 -> snapped to Axe, the avoid list; 200/210 read "Armor").
 NAME_RETRY_BELOW = 0.85
@@ -565,6 +584,13 @@ def read_card(frame: np.ndarray, card: Card) -> Card:
     tag = frame[ny0:ny1, card.x0 + int(0.6 * cw) : card.x1].astype(np.int16)
     yellow = (tag[:, :, 2] > 180) & (tag[:, :, 1] > 180) & (tag[:, :, 0] < 90)
     card.new = int(yellow.sum()) >= 6
+    # Owned cards print "level:N" in white on that same title row. New! is yellow
+    # and has no level. A failed read leaves level None; the tracker still stands.
+    card.level = None
+    if not card.new:
+        lvl = frame[ny0:ny1, card.x0 + int(0.55 * cw) : card.x1]
+        if lvl.size:
+            card.level = parse_level_text(ocr_image(_white_text(lvl)))
     return card
 
 
@@ -642,7 +668,169 @@ def owned_weapon_count(owned: set[str] | frozenset[str]) -> int:
     return sum(1 for n in owned if n in WEAPONS)
 
 
+# Base evolution pairs (Mad Forest). The passive can be any level. Peachone and
+# Ebony Wings are the exception: both weapons have to reach 8, no passive.
+EVOLUTION_PAIRS: dict[str, tuple[str, str]] = {
+    "Garlic": ("Pummarola", "Soul Eater"),
+    "Magic Wand": ("Empty Tome", "Holy Wand"),
+    "King Bible": ("Spellbinder", "Unholy Vespers"),
+    "Santa Water": ("Attractorb", "La Borra"),
+    "Runetracer": ("Armor", "NO FUTURE"),
+    "Lightning Ring": ("Duplicator", "Thunder Loop"),
+    "Fire Wand": ("Spinach", "Hellfire"),
+    "Axe": ("Candelabrador", "Death Spiral"),
+    "Cross": ("Clover", "Heaven Sword"),
+    "Knife": ("Bracer", "Thousand Edge"),
+    "Whip": ("Hollow Heart", "Bloody Tear"),
+    "Pentagram": ("Crown", "Gorgeous Moon"),
+    "Peachone": ("Ebony Wings", "Vandalier"),
+    "Ebony Wings": ("Peachone", "Vandalier"),
+}
+BIRD_WEAPONS: frozenset[str] = frozenset({"Peachone", "Ebony Wings"})
+# Next weapon to max once the main is done. Avoid-list weapons stay last.
+SECOND_ORDER: tuple[str, ...] = (
+    "Garlic",
+    "Magic Wand",
+    "King Bible",
+    "Santa Water",
+    "Runetracer",
+    "Lightning Ring",
+    "Fire Wand",
+    "Cross",
+    "Peachone",
+    "Ebony Wings",
+    "Axe",
+    "Knife",
+    "Whip",
+    "Pentagram",
+)
+# After the evolution partner is owned: healing / armor / max-HP, then the extra revival.
+SURVIVAL: tuple[str, ...] = ("Pummarola", "Armor", "Hollow Heart", "Tirajisú", "Tiragisú")
+PICK_REASONS: tuple[str, ...] = ("main", "partner", "second", "fallback")
+
+
+def partner_of(weapon: str | None) -> str | None:
+    if not weapon:
+        return None
+    pair = EVOLUTION_PAIRS.get(weapon)
+    return None if pair is None else pair[0]
+
+
+def main_weapon_name(levels: dict[str, int] | None) -> str | None:
+    """Garlic if it is held, otherwise Magic Wand. None when neither is held."""
+    if not levels:
+        return None
+    if levels.get("Garlic", 0) > 0:
+        return "Garlic"
+    if levels.get("Magic Wand", 0) > 0:
+        return "Magic Wand"
+    return None
+
+
+def evolution_ready(levels: dict[str, int] | None) -> bool:
+    """Main weapon is at 8 and its evolution partner is owned.
+
+    Boss chests (and the 1:00 Glowing Bat chest) are what actually evolve it.
+    This flag only reports that the build is ready. Pathing is unchanged.
+    """
+    main = main_weapon_name(levels)
+    if main is None or levels is None or levels.get(main, 0) < WEAPON_MAX_LEVEL:
+        return False
+    partner = partner_of(main)
+    return partner is not None and levels.get(partner, 0) > 0
+
+
+def format_inventory(levels: dict[str, int] | None) -> str:
+    if not levels:
+        return "-"
+    main = main_weapon_name(levels)
+    names = sorted((n for n, lv in levels.items() if lv > 0), key=lambda n: (n != main, n))
+    return ",".join(f"{n}:{levels[n]}" for n in names)
+
+
+def level_cap(name: str) -> int:
+    return WEAPON_MAX_LEVEL if name in WEAPONS else PASSIVE_MAX_LEVEL
+
+
+def assess_inventory(
+    cards: list[Card], levels: dict[str, int] | None
+) -> tuple[dict[str, int], bool]:
+    """Copy ``levels`` and fold in confident card reads.
+
+    Certain when every confident card agrees with the tracker. A missing level
+    tag on a tracked item is fine. Off-by-one is fine (the tag is sometimes the
+    next level). A shaky name, a New! on something we own, an owned item we
+    have never seen a level for, or a level that disagrees by more than 1 is
+    not an inventory: the caller falls back to the static priority.
+    """
+    if levels is None:
+        return {}, False
+    eff = {k: int(v) for k, v in levels.items() if int(v) > 0}
+    for c in cards:
+        if not c.name:
+            continue
+        if c.score and c.score < NAME_RETRY_BELOW:
+            return eff, False
+        held = eff.get(c.name, 0)
+        if c.new:
+            if held > 0:
+                return eff, False
+            continue
+        if c.level is None:
+            if held <= 0:
+                return eff, False
+            continue
+        if held <= 0:
+            eff[c.name] = c.level
+            continue
+        if abs(c.level - held) > 1:
+            return eff, False
+    return eff, True
+
+
+def _second_weapon(levels: dict[str, int], main: str) -> str | None:
+    """Unfinished weapon we already own, after ``main``. Highest level, then SECOND_ORDER."""
+    best: str | None = None
+    best_key: tuple[int, int, int] | None = None
+    for name, lv in levels.items():
+        if name == main or lv <= 0 or name not in EVOLUTION_PAIRS or name in EVOLUTIONS:
+            continue
+        other = partner_of(name)
+        unfinished = lv < WEAPON_MAX_LEVEL
+        partner_open = bool(other) and levels.get(other, 0) <= 0
+        bird_open = name in BIRD_WEAPONS and bool(other) and levels.get(other, 0) < WEAPON_MAX_LEVEL
+        if not unfinished and not partner_open and not bird_open:
+            continue
+        has_partner = 0 if other and levels.get(other, 0) > 0 else 1
+        order = SECOND_ORDER.index(name) if name in SECOND_ORDER else 99
+        key = (-lv, has_partner, order)
+        if best_key is None or key < best_key:
+            best, best_key = name, key
+    return best
+
+
+def _level_targets(levels: dict[str, int], second: str | None) -> list[str]:
+    if not second:
+        return []
+    out: list[str] = []
+    if levels.get(second, 0) < WEAPON_MAX_LEVEL:
+        out.append(second)
+    if second in BIRD_WEAPONS:
+        other = partner_of(second)
+        if (
+            other
+            and levels.get(second, 0) >= WEAPON_MAX_LEVEL
+            and 0 < levels.get(other, 0) < WEAPON_MAX_LEVEL
+        ):
+            out.append(other)
+    return out
+
+
 def _card_rank(c: Card, idx: int, hp: float | None, weapons: int, early: bool = False) -> tuple[int, int]:
+    """Static priority. This is what spreads levels: a new crowd weapon is tier 2
+    and any other new weapon is tier 4, while a Garlic level is tier 3 and every
+    other owned weapon level is tier 6. Used only when the inventory is unknown.
+    """
     name = c.name
     # OCR garbage (empty / unmatched after match_name): worse than AVOID-new (40)
     # so a real named card always wins. If every card is junk, choose_card still
@@ -688,13 +876,27 @@ def _card_rank(c: Card, idx: int, hp: float | None, weapons: int, early: bool = 
     return (15, idx)
 
 
-def choose_card(
+def _only_filler_index(cards: list[Card], hp: float | None) -> int | None:
+    names = [c.name for c in cards]
+    filler = {CHICKEN, *COINS}
+    if any(n in filler for n in names) and all(n in filler or not n for n in names):
+        chicken = [i for i, n in enumerate(names) if n == CHICKEN]
+        coins = [i for i, n in enumerate(names) if n in COINS]
+        if chicken and hp is not None and hp < LOW_HP:
+            return chicken[0]
+        if coins:
+            return coins[0]
+        return chicken[0]
+    return None
+
+
+def _choose_static(
     cards: list[Card],
     hp: float | None = None,
     owned: set[str] | None = None,
     game_s: float | None = None,
 ) -> int:
-    """Index of the card to take.
+    """Old priority list. Still the pick when ``levels`` is missing or the read disagrees.
 
     * Maxed-out build (only Floor Chicken / coin bag offered): chicken when HP is
       below ~60 %, otherwise the coin bag.
@@ -714,21 +916,156 @@ def choose_card(
     """
     if not cards:
         return 0
-    names = [c.name for c in cards]
-    filler = {CHICKEN, *COINS}
-    if any(n in filler for n in names) and all(n in filler or not n for n in names):
-        chicken = [i for i, n in enumerate(names) if n == CHICKEN]
-        coins = [i for i, n in enumerate(names) if n in COINS]
-        if chicken and hp is not None and hp < LOW_HP:
-            return chicken[0]
-        if coins:
-            return coins[0]
-        return chicken[0]
+    filler = _only_filler_index(cards, hp)
+    if filler is not None:
+        return filler
     known = set(owned or ())
     known |= {c.name for c in cards if c.name and not c.new}
     weapons = owned_weapon_count(known)
     early = is_early_run(game_s, weapons)
     return min(range(len(cards)), key=lambda i: _card_rank(cards[i], i, hp, weapons, early))
+
+
+def _focused_rank(
+    c: Card,
+    idx: int,
+    hp: float | None,
+    weapons: int,
+    early: bool,
+    levels: dict[str, int],
+) -> tuple[int, int, str]:
+    """Lower tier wins. Reasons are main / partner / second / fallback.
+
+    The main weapon takes every level until 8. Its partner is taken the moment
+    it is offered, including on a screen that also has a main level (a partner
+    may not come back; the owned weapon will). A second paired weapon is opened
+    only after the main is maxed, and is maxed the same way. New weapons before
+    that are a last resort. Pummarola / Armor / Hollow Heart come next.
+    """
+    name = c.name
+    low = hp is not None and hp < DEFENSIVE_HP
+    main = main_weapon_name(levels)
+    main_lv = levels.get(main, 0) if main else 0
+    main_maxed = main is not None and main_lv >= WEAPON_MAX_LEVEL
+    second = _second_weapon(levels, main) if main_maxed and main else None
+    if not name:
+        return (45, idx, "fallback")
+    if name in EVOLUTIONS and not c.new:
+        evo = EVOLUTION_PAIRS.get(main, (None, ""))[1] if main else ""
+        return (0, EVOLUTIONS.index(name), "main" if name == evo else "second")
+    if low and name in DEFENSE:
+        missing = main is not None and name == partner_of(main) and levels.get(name, 0) <= 0
+        return (1, DEFENSE.index(name), "partner" if missing else "fallback")
+    if early and c.new and name in EARLY_AVOID_NEW:
+        return (EARLY_AVOID_RANK, idx, "fallback")
+    if main is None and name in ("Garlic", "Magic Wand"):
+        return (2, 0 if name == "Garlic" else 1, "main")
+    if main and name == partner_of(main) and levels.get(name, 0) <= 0:
+        return (3, 0, "partner")
+    if main and name == main and not c.new and main_lv < WEAPON_MAX_LEVEL:
+        return (4, 0, "main")
+    if main_maxed and second:
+        other = partner_of(second)
+        if (
+            other
+            and name == other
+            and levels.get(other, 0) <= 0
+            and not (c.new and name in WEAPONS and weapons >= MAX_WEAPONS)
+        ):
+            return (3, 1, "partner")
+        if name in _level_targets(levels, second) and not c.new:
+            return (5, 0, "second")
+    if (
+        main_maxed
+        and second is None
+        and c.new
+        and name in EVOLUTION_PAIRS
+        and name != main
+        and weapons < MAX_WEAPONS
+        and not (early and name in EARLY_AVOID_NEW)
+    ):
+        held = 0 if levels.get(partner_of(name) or "", 0) > 0 else 1
+        order = SECOND_ORDER.index(name) if name in SECOND_ORDER else 50
+        return (6, held * 100 + order, "second")
+    if name in SURVIVAL:
+        return (7, SURVIVAL.index(name), "fallback")
+    if not c.new:
+        pri = PRIORITY.index(name) if name in PRIORITY else 100 + idx
+        if low and name in LUXURY:
+            return (28, pri, "fallback")
+        return (10, pri, "fallback")
+    if c.new and name in WEAPONS and weapons >= MAX_WEAPONS:
+        return (36, idx, "fallback")
+    if (
+        c.new
+        and name in EVOLUTION_PAIRS
+        and name not in AVOID
+        and not (early and name in EARLY_AVOID_NEW)
+    ):
+        order = SECOND_ORDER.index(name) if name in SECOND_ORDER else 50
+        return (20, order, "fallback")
+    if name in AVOID and c.new:
+        return (40, idx, "fallback")
+    if c.new and name in PRIORITY:
+        pri = PRIORITY.index(name)
+        if low and name in LUXURY:
+            return (32, pri, "fallback")
+        return (25, pri, "fallback")
+    if name == CHICKEN or name in COINS:
+        return (50, idx, "fallback")
+    if c.new:
+        return (34, idx, "fallback")
+    return (15, idx, "fallback")
+
+
+def _choose_focused(
+    cards: list[Card],
+    hp: float | None,
+    levels: dict[str, int],
+    game_s: float | None,
+) -> tuple[int, str]:
+    filler = _only_filler_index(cards, hp)
+    if filler is not None:
+        return filler, "fallback"
+    weapons = owned_weapon_count(set(levels))
+    early = is_early_run(game_s, weapons)
+    ranked = [_focused_rank(cards[i], i, hp, weapons, early, levels) for i in range(len(cards))]
+    idx = min(range(len(cards)), key=lambda i: ranked[i][:2])
+    return idx, ranked[idx][2]
+
+
+@dataclass(frozen=True)
+class CardPick:
+    index: int
+    reason: str  # main, partner, second, or fallback
+
+
+def choose_pick(
+    cards: list[Card],
+    hp: float | None = None,
+    owned: set[str] | None = None,
+    game_s: float | None = None,
+    levels: dict[str, int] | None = None,
+) -> CardPick:
+    """Card to take, and why. Uncertain inventory uses the static priority."""
+    if not cards:
+        return CardPick(0, "fallback")
+    eff, certain = assess_inventory(cards, levels)
+    if not certain:
+        return CardPick(_choose_static(cards, hp, owned, game_s), "fallback")
+    idx, reason = _choose_focused(cards, hp, eff, game_s)
+    return CardPick(idx, reason if reason in PICK_REASONS else "fallback")
+
+
+def choose_card(
+    cards: list[Card],
+    hp: float | None = None,
+    owned: set[str] | None = None,
+    game_s: float | None = None,
+    levels: dict[str, int] | None = None,
+) -> int:
+    """Index of the card to take. See ``choose_pick`` for the evolution policy."""
+    return choose_pick(cards, hp=hp, owned=owned, game_s=game_s, levels=levels).index
 
 
 # ---------------------------------------------------------------- banish (one exception)
@@ -1056,6 +1393,12 @@ class MenuPilot:
         self.results_dir = results_dir
         self.start_items = tuple(start_items)
         self.owned: set[str] = set(self.start_items)
+        # Levels come from our own picks, checked against "level N" on the card.
+        # Poe starts with Garlic at 1. A contradictory OCR read does not overwrite this.
+        self.levels: dict[str, int] = {n: 1 for n in self.start_items if n}
+        self._pick_reason = "fallback"
+        self._inventory_certain = True
+        self._evol_logged = False
         self._hp = HpTracker()
         self.saved_results: list[str] = []
         self.tap = tap
@@ -1090,6 +1433,20 @@ class MenuPilot:
         self.status = ""
 
     @property
+    def evolution_ready(self) -> bool:
+        """Main weapon is maxed and its partner is owned. Chests are not retargeted."""
+        return evolution_ready(self.levels)
+
+    def _log_evolution_ready(self) -> None:
+        if self._evol_logged or not self.evolution_ready:
+            return
+        main = main_weapon_name(self.levels)
+        partner = partner_of(main)
+        self._evol_logged = True
+        lv = self.levels.get(main or "", 0)
+        self.log(f"[levelup] evolution ready: {main} L{lv} + {partner}")
+
+    @property
     def hp(self) -> float | None:
         """Smoothed HP fraction (median of recent bar readings), None until seen or when the bar is lost."""
         return self._hp.value
@@ -1115,6 +1472,10 @@ class MenuPilot:
         self.revives = 0
         self._hp_ignore_until = 0.0
         self.owned = set(self.start_items)
+        self.levels = {n: 1 for n in self.start_items if n}
+        self._pick_reason = "fallback"
+        self._inventory_certain = True
+        self._evol_logged = False
         self._hp.reset()
         self.picks = []
         self.banished = set()
@@ -1203,7 +1564,22 @@ class MenuPilot:
                 if self._try_start_banish(frame, screen):
                     return
                 game_s = self._game_s()
-                self._target = choose_card(screen.cards, hp=self.hp, owned=self.owned, game_s=game_s)
+                eff, certain = assess_inventory(screen.cards, self.levels)
+                self._inventory_certain = certain
+                if certain:
+                    for name, lv in eff.items():
+                        if name not in self.levels:
+                            self.levels[name] = lv
+                            self.owned.add(name)
+                pick = choose_pick(
+                    screen.cards,
+                    hp=self.hp,
+                    owned=self.owned,
+                    game_s=game_s,
+                    levels=self.levels if certain else None,
+                )
+                self._target = pick.index
+                self._pick_reason = pick.reason
                 self._chosen = screen.cards[self._target].name
                 self._presses = 0
                 self._unknown_sel = 0
@@ -1386,9 +1762,21 @@ class MenuPilot:
     def _record_pick(self, target: int) -> None:
         name = self._names[target] if target < len(self._names) else "?"
         self.picks.append(name)
-        if self._chosen:
-            self.owned.add(self._chosen)
-        self.log(f"[levelup] picked #{target + 1} {name} (total picks {len(self.picks)})")
+        taken = self._chosen or (name if name in VOCAB else "")
+        if taken:
+            self.owned.add(taken)
+            self.levels[taken] = min(level_cap(taken), self.levels.get(taken, 0) + 1)
+        shown = taken or name
+        inv = format_inventory(self.levels)
+        if not self._inventory_certain:
+            inv = f"{inv} (uncertain)"
+        reason = self._pick_reason if self._pick_reason in PICK_REASONS else "fallback"
+        self.log(
+            f"[levelup] picked {shown} (reason: {reason}) inv={inv} "
+            f"(total picks {len(self.picks)})"
+        )
+        if self._inventory_certain:
+            self._log_evolution_ready()
         self._target = None
         self._sig = None
 

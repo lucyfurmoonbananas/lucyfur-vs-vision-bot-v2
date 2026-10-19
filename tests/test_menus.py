@@ -672,12 +672,16 @@ def test_match_name_score():
 def test_read_card_retries_weak_match_with_other_thresholds(monkeypatch):
     frame = load("levelup_4cards_sel4.png")
     card = detect_level_up(frame).cards[0]
-    reads = iter(["Axrer", "Armor"])
+    # Name retries stop at a strong match (2 calls). The card is not New!, so a
+    # third call reads the "level:N" tag. That read is why a tracked inventory
+    # can check the screen instead of guessing.
+    reads = iter(["Axrer", "Armor", "level:2"])
     calls: list[int] = []
     monkeypatch.setattr(menus, "ocr_image", lambda img, psm=7: (calls.append(1), next(reads))[1])
     menus.read_card(frame, card)
     assert card.name == "Armor" and card.raw == "Armor"
-    assert len(calls) == 2  # stops once a strong match is found
+    assert card.level == 2
+    assert len(calls) == 3
 
 
 def _hanging_tesseract(tmp_path, monkeypatch) -> Path:
@@ -738,13 +742,16 @@ def test_hung_tesseract_does_not_block_the_menu_read(tmp_path, monkeypatch):
     assert [c.name for c in screen.cards] == ["", "", "", ""]
 
 
-def test_read_card_strong_match_needs_one_ocr(monkeypatch):
+def test_read_card_strong_match_needs_one_name_ocr(monkeypatch):
+    """The name is one OCR when the match is already strong. An owned card (no
+    New! badge) then OCRs the level tag as well; the mock has no level digits."""
     frame = load("levelup_4cards_sel4.png")
     card = detect_level_up(frame).cards[0]
     calls: list[int] = []
     monkeypatch.setattr(menus, "ocr_image", lambda img, psm=7: (calls.append(1), "Garlic")[1])
     menus.read_card(frame, card)
-    assert card.name == "Garlic" and len(calls) == 1
+    assert card.name == "Garlic" and card.level is None
+    assert len(calls) == 2
 
 
 def test_read_card_keeps_first_read_when_retries_are_worse(monkeypatch):
