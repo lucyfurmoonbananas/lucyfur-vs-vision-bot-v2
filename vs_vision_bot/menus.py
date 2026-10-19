@@ -98,9 +98,11 @@ OTHER: list[str] = [
     "Torrona's Box",
     "Pako Battiliar",
     "Floor Chicken",
-    "Gold Coins",
-    "Coin Bag",
     "Big Coin Bag",
+    "Gold Coin Bag",
+    "Gold Coins",
+    "Gold Coin",
+    "Coin Bag",
     "Bloody Tear",
     "Unholy Vespers",
     "Hellfire",
@@ -605,8 +607,13 @@ def read_cards(frame: np.ndarray, screen: LevelUpScreen) -> LevelUpScreen:
 
 
 CHICKEN = "Floor Chicken"
-COINS = ("Gold Coins", "Coin Bag", "Big Coin Bag")
-LOW_HP = 0.6        # maxed build: chicken below this, otherwise coins
+# Level-up filler once every owned weapon and passive is capped. The card the
+# game shows is Big Coin Bag (wiki COINBAG2). Gold Coin / Gold Coin Bag are the
+# names Lucyfur uses and the strings OCR may return; the ground pickups stay
+# too so a misread still counts as gold.
+COINS = ("Big Coin Bag", "Gold Coin Bag", "Coin Bag", "Gold Coins", "Gold Coin")
+FILLER: frozenset[str] = frozenset((CHICKEN, *COINS))
+LOW_HP = 0.6        # only-filler screen before the build is capped: chicken below this
 DEFENSIVE_HP = 0.5  # below this, healing / defense items come first
 MAX_WEAPONS = 6
 
@@ -895,6 +902,85 @@ def all_maxed(
     return not wants_new_weapon(levels, done)
 
 
+def items_fully_maxed(
+    levels: dict[str, int] | None, evolved: set[str] | frozenset[str] | None = None
+) -> bool:
+    """Every owned weapon and passive is at its cap, and no new weapon is wanted.
+
+    That is when the level-up screen offers Floor Chicken and a coin bag. A
+    weapon still under 8, a passive under 5, or an open second weapon is not
+    this, so the gold/chicken rule stays off.
+    """
+    if not levels:
+        return False
+    done = evolved or set()
+    weapons: list[str] = []
+    passives: list[str] = []
+    for name, lv in levels.items():
+        if int(lv) <= 0 or name in EVOLUTIONS or name in FILLER:
+            continue
+        if name in WEAPONS:
+            weapons.append(name)
+        else:
+            passives.append(name)
+    if not weapons or not passives:
+        return False
+    for name in weapons:
+        if name in done:
+            continue
+        if levels.get(name, 0) < WEAPON_MAX_LEVEL:
+            return False
+    for name in passives:
+        if levels.get(name, 0) < PASSIVE_MAX_LEVEL:
+            return False
+    return not wants_new_weapon(levels, done)
+
+
+def low_hp_limit() -> float:
+    """``Tuning.low_hp`` (0.5). Cached so a pick does not rebuild the navigator."""
+    cached = getattr(low_hp_limit, "_value", None)
+    if cached is None:
+        from vs_vision_bot.pathfind import Tuning
+
+        cached = float(Tuning().low_hp)
+        setattr(low_hp_limit, "_value", cached)
+    return float(cached)
+
+
+def read_critical_flag(nav: object) -> bool:
+    """Sticky critical on the navigator, if that build has the flag.
+
+    PR #26 holds critical HP across a bad bar read. The attribute is not on
+    every branch, so a missing flag is just false. ``_critical_on`` is the
+    flag this tree already keeps.
+    """
+    for name in ("critical_held", "hp_critical", "sticky_critical", "_critical_on"):
+        flag = getattr(nav, name, None)
+        if flag is True:
+            return True
+    return False
+
+
+def hp_is_low(
+    hp: float | None,
+    *,
+    blind_low: bool = False,
+    critical: bool = False,
+    low_held: bool = False,
+) -> bool:
+    """Low for the filler pick.
+
+    A number under ``Tuning.low_hp`` is low. So is the navigator's critical
+    flag, and the tracker's held critical. Blind with no prior low is not low;
+    blind right after a low reading is.
+    """
+    if critical or low_held:
+        return True
+    if hp is None:
+        return bool(blind_low)
+    return hp < low_hp_limit()
+
+
 def format_inventory(
     levels: dict[str, int] | None, evolved: set[str] | frozenset[str] | None = None
 ) -> str:
@@ -988,6 +1074,8 @@ def assess_inventory(
             continue
         if c.score and c.score < NAME_RETRY_BELOW:
             return eff, False
+        if c.name in FILLER:
+            continue
         held = eff.get(c.name, 0)
         if c.new:
             if held > 0:
@@ -1235,12 +1323,47 @@ def _focused_rank(
     return (15, idx, "fallback")
 
 
+def _coin_index(cards: list[Card]) -> int | None:
+    """Best gold card on the screen. Big Coin Bag beats a smaller bag."""
+    best_i: int | None = None
+    best_rank: int | None = None
+    for i, card in enumerate(cards):
+        if card.name not in COINS:
+            continue
+        rank = COINS.index(card.name)
+        if best_rank is None or rank < best_rank:
+            best_i, best_rank = i, rank
+    return best_i
+
+
+def _filler_choice(cards: list[Card], low: bool) -> int | None:
+    """Gold, unless HP is low and Floor Chicken is offered."""
+    coins = _coin_index(cards)
+    chicken = next((i for i, card in enumerate(cards) if card.name == CHICKEN), None)
+    if coins is None and chicken is None:
+        return None
+    if low and chicken is not None:
+        return chicken
+    if coins is not None:
+        return coins
+    return chicken
+
+
 def _choose_focused(
     cards: list[Card],
     hp: float | None,
     levels: dict[str, int],
     game_s: float | None,
+    *,
+    low: bool = False,
+    evolved: set[str] | frozenset[str] | None = None,
 ) -> tuple[int, str]:
+    # Only after every owned weapon and passive is capped. Before that, gold
+    # must not beat a level the build still wants.
+    if items_fully_maxed(levels, evolved):
+        filler = _filler_choice(cards, low)
+        if filler is not None:
+            return filler, "fallback"
     filler = _only_filler_index(cards, hp)
     if filler is not None:
         return filler, "fallback"
@@ -1263,14 +1386,24 @@ def choose_pick(
     owned: set[str] | None = None,
     game_s: float | None = None,
     levels: dict[str, int] | None = None,
+    evolved: set[str] | frozenset[str] | None = None,
+    blind_low: bool = False,
+    critical: bool = False,
+    low_held: bool = False,
 ) -> CardPick:
-    """Card to take, and why. Uncertain inventory uses the static priority."""
+    """Card to take, and why. Uncertain inventory uses the static priority.
+
+    ``hp`` is the HpTracker median, or None when the bar is blind. Filler
+    (coin bag vs Floor Chicken) uses that number only once every owned weapon
+    and passive is capped.
+    """
     if not cards:
         return CardPick(0, "fallback")
     eff, certain = assess_inventory(cards, levels)
     if not certain:
         return CardPick(_choose_static(cards, hp, owned, game_s), "fallback")
-    idx, reason = _choose_focused(cards, hp, eff, game_s)
+    low = hp_is_low(hp, blind_low=blind_low, critical=critical, low_held=low_held)
+    idx, reason = _choose_focused(cards, hp, eff, game_s, low=low, evolved=evolved)
     return CardPick(idx, reason if reason in PICK_REASONS else "fallback")
 
 
@@ -1280,9 +1413,23 @@ def choose_card(
     owned: set[str] | None = None,
     game_s: float | None = None,
     levels: dict[str, int] | None = None,
+    evolved: set[str] | frozenset[str] | None = None,
+    blind_low: bool = False,
+    critical: bool = False,
+    low_held: bool = False,
 ) -> int:
     """Index of the card to take. See ``choose_pick`` for the evolution policy."""
-    return choose_pick(cards, hp=hp, owned=owned, game_s=game_s, levels=levels).index
+    return choose_pick(
+        cards,
+        hp=hp,
+        owned=owned,
+        game_s=game_s,
+        levels=levels,
+        evolved=evolved,
+        blind_low=blind_low,
+        critical=critical,
+        low_held=low_held,
+    ).index
 
 
 # ---------------------------------------------------------------- banish (one exception)
@@ -1475,6 +1622,17 @@ class HpTracker:
         self._anchor = None
         self._pending.clear()
 
+    def blind_after_low(self, limit: float) -> bool:
+        """Blind, and the last reading was under ``limit`` or still held critical.
+
+        Blind with no prior low reading is false.
+        """
+        if not self.blind:
+            return False
+        if self.low_held:
+            return True
+        return self._anchor is not None and self._anchor < limit
+
     @property
     def value(self) -> float | None:
         if not self.values:
@@ -1595,6 +1753,7 @@ class MenuPilot:
         start_items: tuple[str, ...] = ("Garlic",),
         levelup_click: bool = True,
         game_clock: Callable[[], float | None] | None = None,
+        critical_hp: Callable[[], bool] | None = None,
         stage: str = "",
     ) -> None:
         # Stage being played (session sets VS_STAGE; play_run.sh only starts Mad Forest).
@@ -1606,6 +1765,8 @@ class MenuPilot:
         self._banish_skip_screen = False  # gave up on this level-up screen: pick normally
         # Current game time (s) for time-dependent picks (early Pentagram avoid); None = unknown.
         self.game_clock = game_clock
+        # Navigator critical flag, if that build has one. Missing means not low.
+        self.critical_hp = critical_hp
         self.levelup_click = levelup_click
         self.results_dir = results_dir
         self.start_items = tuple(start_items)
@@ -1749,6 +1910,28 @@ class MenuPilot:
             return None
         return None if v is None else float(v)
 
+    def _critical_now(self) -> bool:
+        fn = self.critical_hp
+        if not callable(fn):
+            return False
+        try:
+            return bool(fn())
+        except Exception:
+            return False
+
+    def pick_is_low(self) -> bool:
+        """Low HP for a capped build's Floor Chicken vs coin bag choice.
+
+        The number passed into the pick is the median, or None while blind.
+        """
+        blind = self.hp_blind
+        return hp_is_low(
+            None if blind else self.hp,
+            blind_low=self._hp.blind_after_low(low_hp_limit()) if blind else False,
+            critical=self._critical_now(),
+            low_held=self.hp_low_held,
+        )
+
     def _press(self, key: str, cooldown: float) -> None:
         self.refocus()
         self.tap(key)
@@ -1824,15 +2007,20 @@ class MenuPilot:
                 self._inventory_certain = certain
                 if certain:
                     for name, lv in eff.items():
-                        if name not in self.levels:
-                            self.levels[name] = lv
-                            self.owned.add(name)
+                        if name in FILLER or name in self.levels:
+                            continue
+                        self.levels[name] = lv
+                        self.owned.add(name)
                 pick = choose_pick(
                     screen.cards,
-                    hp=self.hp,
+                    hp=None if self.hp_blind else self.hp,
                     owned=self.owned,
                     game_s=game_s,
                     levels=self.levels if certain else None,
+                    evolved=self.evolved,
+                    blind_low=self.hp_blind and self._hp.blind_after_low(low_hp_limit()),
+                    critical=self._critical_now(),
+                    low_held=self.hp_low_held,
                 )
                 self._target = pick.index
                 self._pick_reason = pick.reason
@@ -2019,7 +2207,8 @@ class MenuPilot:
         name = self._names[target] if target < len(self._names) else "?"
         self.picks.append(name)
         taken = self._chosen or (name if name in VOCAB else "")
-        if taken:
+        # Coin bags and Floor Chicken are not a weapon or a passive slot.
+        if taken and taken not in FILLER:
             self.owned.add(taken)
             self.levels[taken] = min(level_cap(taken), self.levels.get(taken, 0) + 1)
         shown = taken or name
@@ -2119,6 +2308,9 @@ class MenuPilot:
                     self.finished = True
                     self.log("[menus] run finished (QUIT + DONE); the bot stops acting until p is pressed")
             else:
+                # Treasure Found grants the item. It does not ask the bot to
+                # choose Floor Chicken vs a coin bag, so the filler rule stays
+                # on the level-up screen.
                 self._press("enter", self.chest_cooldown_s)
                 self.chest_presses += 1
                 self.log(f"[chest] Enter on chest screen ({shown!r})")

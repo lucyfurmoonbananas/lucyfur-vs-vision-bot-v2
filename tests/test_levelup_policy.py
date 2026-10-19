@@ -22,6 +22,7 @@ from vs_vision_bot.menus import (
     PASSIVE_MAX_LEVEL,
     WEAPONS,
     Card,
+    HpTracker,
     MenuPilot,
     WEAPON_MAX_LEVEL,
     all_maxed,
@@ -30,10 +31,16 @@ from vs_vision_bot.menus import (
     choose_pick,
     evolution_ready,
     evolutions_from_chest_text,
+    hp_is_low,
+    items_fully_maxed,
     levels_from_chest_text,
+    low_hp_limit,
+    match_name,
     owned_weapon_slots,
     parse_level_text,
+    read_critical_flag,
 )
+from vs_vision_bot.pathfind import Tuning
 
 from test_menus import needs_tesseract, load
 
@@ -426,6 +433,126 @@ def test_chest_level_adopts_an_unknown_item_and_ignores_a_wild_jump():
     assert pilot.levels["Garlic"] == 8  # not lowered
     pilot._note_chest_reward("Pummarola level:2 DONE")
     assert pilot.levels["Pummarola"] == 2
+
+
+def _capped() -> dict[str, int]:
+    """Main and second weapon at 8, both passives at 5. Nothing left to level."""
+    return {"Garlic": 8, "Pummarola": 5, "Magic Wand": 8, "Empty Tome": 5}
+
+
+def test_filler_names_match_the_level_up_cards():
+    """The capped screen offers Big Coin Bag and Floor Chicken."""
+    assert match_name("Big Coin Bag") == "Big Coin Bag"
+    assert match_name("Floor Chicken") == "Floor Chicken"
+    assert match_name("Gold Coin Bag") == "Gold Coin Bag"
+    assert match_name("Gold Coin") == "Gold Coin"
+    assert low_hp_limit() == Tuning().low_hp
+
+
+def test_capped_build_takes_gold_unless_hp_is_low():
+    levels = _capped()
+    assert items_fully_maxed(levels)
+    cards = [
+        _card("Big Coin Bag", True),
+        _card("Floor Chicken", True),
+        _card("King Bible", True),
+    ]
+    high = choose_pick(cards, hp=0.9, owned=set(levels), levels=levels)
+    assert cards[high.index].name == "Big Coin Bag"
+    low = choose_pick(cards, hp=low_hp_limit() - 0.01, owned=set(levels), levels=levels)
+    assert cards[low.index].name == "Floor Chicken"
+    # The band is exclusive: exactly Tuning.low_hp is not low.
+    edge = choose_pick(cards, hp=low_hp_limit(), owned=set(levels), levels=levels)
+    assert cards[edge.index].name == "Big Coin Bag"
+    # Lucyfur's names are the same gold pick.
+    alias = [_card("Gold Coin Bag", True), _card("Floor Chicken", True)]
+    pick = choose_pick(alias, hp=0.8, owned=set(levels), levels=levels)
+    assert alias[pick.index].name == "Gold Coin Bag"
+    # Blind with no prior low is not low. Blind after a low reading is.
+    blind = choose_pick(cards, hp=None, owned=set(levels), levels=levels)
+    assert cards[blind.index].name == "Big Coin Bag"
+    after = choose_pick(cards, hp=None, blind_low=True, owned=set(levels), levels=levels)
+    assert cards[after.index].name == "Floor Chicken"
+    # Navigator critical flag forces the chicken even when the median looks healthy.
+    flagged = choose_pick(cards, hp=0.9, critical=True, owned=set(levels), levels=levels)
+    assert cards[flagged.index].name == "Floor Chicken"
+    assert not read_critical_flag(object())
+
+    class _Nav:
+        _critical_on = True
+
+    assert read_critical_flag(_Nav())
+    assert hp_is_low(0.9, critical=True)
+    assert not hp_is_low(None)
+    assert hp_is_low(None, blind_low=True)
+
+
+def test_filler_rule_stays_off_until_weapons_and_passives_are_capped():
+    """Gold does not replace a weapon or a passive the build still needs."""
+    opening = {"Garlic": 8, "Pummarola": 5}
+    assert not items_fully_maxed(opening)
+    cards = [
+        _card("Big Coin Bag", True),
+        _card("Floor Chicken", True),
+        _card("Magic Wand", True),
+    ]
+    pick = choose_pick(cards, hp=0.95, owned=set(opening), levels=opening)
+    assert cards[pick.index].name == "Magic Wand" and pick.reason == "second"
+    # Passive still under 5: take the level, not the coin bag.
+    levels = _capped()
+    levels["Pummarola"] = 4
+    assert not items_fully_maxed(levels)
+    cards = [
+        _card("Big Coin Bag", True),
+        _card("Floor Chicken", True),
+        _card("Pummarola", False, level=4),
+    ]
+    pick = choose_pick(cards, hp=0.95, owned=set(levels), levels=levels)
+    assert cards[pick.index].name == "Pummarola"
+
+
+def test_hp_tracker_blind_after_a_low_reading_counts_as_low():
+    limit = low_hp_limit()
+    low = HpTracker(miss_limit=3)
+    low.add(0.4)
+    low.add(0.4)
+    low.add(0.4)
+    assert low.value == 0.4 and not low.blind
+    for _ in range(3):
+        low.add(None)
+    assert low.blind and low.value is None and low.blind_after_low(limit)
+
+    healthy = HpTracker(miss_limit=3)
+    healthy.add(0.8)
+    healthy.add(0.8)
+    healthy.add(0.8)
+    for _ in range(3):
+        healthy.add(None)
+    assert healthy.blind and healthy.value is None and not healthy.blind_after_low(limit)
+
+    pilot = MenuPilot(tap=lambda _k: None, log=lambda _m: None, critical_hp=lambda: False)
+    for _ in range(3):
+        pilot._hp.add(0.8)
+    assert pilot.hp == 0.8 and not pilot.hp_blind and not pilot.pick_is_low()
+    for _ in range(3):
+        pilot._hp.add(None)
+    assert pilot.hp is None and pilot.hp_blind and not pilot.pick_is_low()
+
+    crashed = MenuPilot(tap=lambda _k: None, log=lambda _m: None)
+    for _ in range(3):
+        crashed._hp.add(0.4)
+    for _ in range(3):
+        crashed._hp.add(None)
+    assert crashed.hp is None and crashed.pick_is_low()
+
+    sticky = MenuPilot(
+        tap=lambda _k: None,
+        log=lambda _m: None,
+        critical_hp=lambda: True,
+    )
+    for _ in range(3):
+        sticky._hp.add(0.9)
+    assert sticky.hp == 0.9 and sticky.pick_is_low()
 
 
 def test_sync_build_state_skips_a_navigator_without_the_method():
