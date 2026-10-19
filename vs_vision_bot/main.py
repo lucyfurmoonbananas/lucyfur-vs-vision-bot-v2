@@ -387,6 +387,8 @@ def main(argv: list[str] | None = None) -> int:
                     # Committed ~3 s escape out of the death crowd (no gem pull,
                     # no small-gap re-picks, heuristic menu hints ignored).
                     nav.request_revive_escape()
+                elif menu_kind == "chest":
+                    nav.note_chest_opened()
             in_menu = menu_kind is not None
             if not cfg.demo and not bus.paused and not menu_kind:
                 now_box = time.monotonic()

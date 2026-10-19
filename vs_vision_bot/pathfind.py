@@ -29,6 +29,16 @@ Per frame, every one of the 8 WASD directions is scored:
   (0.6 s, about three frames at the live ~5 fps). Flees and committed escapes
   skip it. ``chest_gain`` 0
   disables. Seek transitions are logged as ``[chest]``.
+  A sighting is also a world anchor (``[leash]``). The camera follows the
+  player, so the anchor is dead-reckoned from the bot's own steps and
+  re-anchored on every re-sight. An arrow is a direction past the playfield
+  edge. Kite, breakout, and plain-flee headings lean toward it as distance
+  grows; past ``chest_leash_radius`` the bot walks back while danger stays
+  under ``chest_clear_danger``. Committed escapes and critical HP are not
+  pulled. When escape costs are close, the corridor toward the anchor wins
+  by ``chest_leash_tie``. The anchor drops once the chest is reached, after
+  ``chest_leash_forget_s`` without a re-sight, or after ``chest_leash_slip``
+  of travel since the last sight.
 * inertia - hysteresis: the current direction gets a bonus and a minimum
   dwell time so the chord does not jitter frame to frame.
 
@@ -65,7 +75,7 @@ from dataclasses import dataclass, field, fields, replace
 import numpy as np
 
 from vs_vision_bot.config import Config
-from vs_vision_bot.vision import VisionResult
+from vs_vision_bot.vision import PLAYFIELD_X0, PLAYFIELD_X1, REF_H_DEFAULT, VisionResult
 
 VECTORS_8 = (
     (0, 0),
@@ -82,6 +92,8 @@ DIRS = VECTORS_8[1:]
 _UNIT = np.array([(dx / math.hypot(dx, dy), dy / math.hypot(dx, dy)) for dx, dy in DIRS], dtype=np.float32)
 # Symmetric corridor costs match to float noise. A looser band would hide a real gap.
 _COST_TIE = 1e-3
+# On-screen chest this close to the player counts as reached.
+_LEASH_REACH = 48.0
 
 
 @dataclass
@@ -222,6 +234,22 @@ class Tuning:
     # one (test3 on 3c8c971: 205 seek/clear pairs, 168 with no tick between).
     # VS_TUNE=chest_hold_s=0.10 restores that short window.
     chest_hold_s: float = 0.6
+    # World anchor so a seen chest is not walked away from between sightings.
+    # The hard pull starts past this (~1.5 reference-frame widths). 0 disables
+    # the pull and the heading bias. VS_TUNE=chest_leash_radius=0.
+    chest_leash_radius: float = 1440.0
+    # Heading component added at the radius (linear in distance, capped at 1).
+    # Kept under 1 so a breakout aimed away does not flip sign.
+    chest_leash_bias: float = 0.55
+    # An arrow anchor sits this far past the playfield edge, along the ray.
+    chest_leash_beyond: float = 160.0
+    # Drop the anchor after this long with no re-sight. 0 disables.
+    chest_leash_forget_s: float = 90.0
+    # Drop it after this much travel since the last sight (dead-reckon went stale).
+    chest_leash_slip: float = 2880.0
+    # Escape-cost shaved off corridors aligned with the anchor. A clearly
+    # cheaper corridor still wins. 0 disables.
+    chest_leash_tie: float = 0.4
     # Early Garlic engage: before early_engage_until_s, HP >= early_engage_hp, danger < safe_danger
     # and no gems waiting to be collected (early_engage_max_gems), pull toward enemies.
     engage_gain: float = 0.0
@@ -665,6 +693,21 @@ def score_directions(
 _SHORT_SIDE_FILL = 1.0
 
 
+def _playfield_edge(px: float, py: float, ux: float, uy: float) -> float:
+    """Pixels from (px, py) to the playfield border along a unit ray."""
+    hits: list[float] = []
+    if ux > 1e-8:
+        hits.append((PLAYFIELD_X1 - px) / ux)
+    elif ux < -1e-8:
+        hits.append((PLAYFIELD_X0 - px) / ux)
+    if uy > 1e-8:
+        hits.append((float(REF_H_DEFAULT) - py) / uy)
+    elif uy < -1e-8:
+        hits.append((0.0 - py) / uy)
+    ahead = [t for t in hits if t > 1.0]
+    return min(ahead) if ahead else 0.0
+
+
 def _edge_distance(px: float, py: float, ux: float, uy: float) -> float:
     """Pixels from (px, py) to the 960x540 border along a unit heading."""
     tx = 1e9 if abs(ux) < 1e-8 else ((-px) / ux if ux < 0 else (960.0 - px) / ux)
@@ -852,6 +895,11 @@ class Navigator:
         self._tie_bias = 0.0  # orbit radians kept across breakout-heading snaps
         self._spun = 0.0      # orbit radians since the last snap
         self._critical_on = False
+        self._world = (0.0, 0.0)  # player position; the camera follows, so this is dead-reckoned
+        self._leash: tuple[float, float] | None = None  # last chest, same coordinates
+        self._leash_kind = ""
+        self._leash_seen = 0.0
+        self._leash_travel = 0.0  # px moved since the last sight
 
     @property
     def escaping(self) -> bool:
@@ -956,6 +1004,7 @@ class Navigator:
             ecost = escape_costs(pts, px, py, t)
             if self._escape_reason == "ring":
                 ecost = self._no_reverse(ecost, self._recent_break_dir())
+            ecost = self._nudge_leash(ecost)
             self.breakout = tuple(float(v) for v in _UNIT[_pick_min(ecost, self._roam_vec())])
             self._escape_origin = self.breakout
             self._breakout_origin = self.breakout
@@ -1256,7 +1305,7 @@ class Navigator:
                 self._end_breakout()
                 self._flee_remaining = 0.0
                 return
-        costs = escape_costs(pts, px, py, t)
+        costs = self._nudge_leash(escape_costs(pts, px, py, t))
         cur_d = _nearest_dir(self.breakout)
         cur = DIRS.index(cur_d)
         if self._revive_hold_repick(costs, cur):
@@ -1382,6 +1431,159 @@ class Navigator:
             self.game_s = max(expected, reading)
             self._timer_cands.clear()
 
+    def _advance_world(self, dt: float) -> None:
+        """Dead-reckon the player from the chord just walked. The camera follows."""
+        if dt <= 0.0 or self.current == (0, 0):
+            return
+        n = math.hypot(self.current[0], self.current[1])
+        if n < 1e-6:
+            return
+        step = self.tune.player_speed * dt
+        self._world = (
+            self._world[0] + self.current[0] / n * step,
+            self._world[1] + self.current[1] / n * step,
+        )
+        if self._leash is not None:
+            self._leash_travel += step
+
+    def _leash_offset(self) -> tuple[float, float]:
+        return (self._leash[0] - self._world[0], self._leash[1] - self._world[1])
+
+    def _leash_dist(self) -> float:
+        if self._leash is None:
+            return 0.0
+        return math.hypot(*self._leash_offset())
+
+    def _leash_enabled(self) -> bool:
+        return self._leash is not None and self.tune.chest_gain > 0
+
+    def note_chest_opened(self) -> None:
+        """Treasure screen: the chest is open, so the anchor is done."""
+        self._drop_leash("opened")
+
+    def _drop_leash(self, reason: str) -> None:
+        if self._leash is None:
+            return
+        self.log(f"[leash] drop {reason} {self._leash_kind} game~{self.game_s:.0f}s")
+        self._leash = None
+        self._leash_kind = ""
+        self._leash_travel = 0.0
+
+    def _arrow_offset(self, arrow: tuple[float, float], px: float, py: float) -> tuple[float, float] | None:
+        """Direction of the arrow, extended past the playfield edge."""
+        dx, dy = float(arrow[0]) - px, float(arrow[1]) - py
+        n = math.hypot(dx, dy)
+        if n < 1e-3:
+            return None
+        ux, uy = dx / n, dy / n
+        dist = _playfield_edge(px, py, ux, uy) + self.tune.chest_leash_beyond
+        return (ux * dist, uy * dist)
+
+    def _sight_leash(self, result: VisionResult, px: float, py: float) -> None:
+        """Re-anchor from a raw chest or arrow. A chest in reach counts as arrived."""
+        if result.chest is not None:
+            off = (float(result.chest[0]) - px, float(result.chest[1]) - py)
+            kind = "chest"
+            if math.hypot(*off) <= _LEASH_REACH:
+                self._drop_leash("reached")
+                return
+        elif result.chest_arrow is not None:
+            off = self._arrow_offset(result.chest_arrow, px, py)
+            if off is None:
+                return
+            kind = "arrow"
+        else:
+            return
+        world = (self._world[0] + off[0], self._world[1] + off[1])
+        first = self._leash is None
+        self._leash = world
+        self._leash_kind = kind
+        self._leash_seen = self.game_s
+        self._leash_travel = 0.0
+        if first:
+            self.log(
+                f"[leash] {kind} ({world[0]:.0f},{world[1]:.0f}) "
+                f"dist={math.hypot(*off):.0f} game~{self.game_s:.0f}s"
+            )
+
+    def _expire_leash(self) -> None:
+        if self._leash is None:
+            return
+        if self._leash_dist() <= _LEASH_REACH:
+            self._drop_leash("reached")
+            return
+        t = self.tune
+        unseen = self.game_s - self._leash_seen
+        if t.chest_leash_forget_s > 0 and unseen > t.chest_leash_forget_s:
+            self._drop_leash("stale")
+            return
+        if t.chest_leash_slip > 0 and self._leash_travel > t.chest_leash_slip:
+            self._drop_leash("slip")
+
+    def _bias_heading(self, heading: tuple[float, float]) -> tuple[float, float]:
+        """Lean ``heading`` toward the anchor. The lean grows with distance and stays < 1."""
+        if (
+            not self._leash_enabled()
+            or self.tune.chest_leash_radius <= 0
+            or self.tune.chest_leash_bias <= 0
+        ):
+            return heading
+        ox, oy = self._leash_offset()
+        dist = math.hypot(ox, oy)
+        if dist < 1.0:
+            return heading
+        w = self.tune.chest_leash_bias * min(1.0, dist / self.tune.chest_leash_radius)
+        hx, hy = float(heading[0]), float(heading[1])
+        hn = math.hypot(hx, hy) or 1.0
+        bx = hx / hn + w * ox / dist
+        by = hy / hn + w * oy / dist
+        bn = math.hypot(bx, by)
+        if bn < 1e-6:
+            return heading
+        return (bx / bn, by / bn)
+
+    def _hard_pull(self) -> bool:
+        if not self._leash_enabled() or self.tune.chest_leash_radius <= 0 or self.tune.chest_gain <= 0:
+            return False
+        return self._leash_dist() > self.tune.chest_leash_radius
+
+    def _leash_screen(self, px: float, py: float) -> tuple[float, float]:
+        ox, oy = self._leash_offset()
+        return (px + ox, py + oy)
+
+    def _aim_leash(
+        self,
+        heading: tuple[float, float],
+        live: tuple[float, float] | None,
+        px: float,
+        py: float,
+        tune: Tuning,
+        *,
+        allow: bool,
+    ) -> tuple[tuple[float, float], tuple[float, float] | None, Tuning, bool]:
+        """Bias ``heading``. Past the radius, chase the dead-reckoned point.
+
+        A live chest or arrow already in ``live`` wins, so this does not feed
+        the off-screen point into the seek latch. The pull fades at
+        ``chest_clear_danger`` instead of ``chest_danger``.
+        """
+        aim = self._bias_heading(heading) if allow else heading
+        if live is not None or not allow or not self._hard_pull():
+            return aim, live, tune, False
+        far = replace(tune, chest_danger=max(tune.chest_danger, self.tune.chest_clear_danger))
+        return aim, self._leash_screen(px, py), far, True
+
+    def _nudge_leash(self, costs: np.ndarray) -> np.ndarray:
+        """Shave a little cost off corridors facing the anchor. No leash: same array."""
+        if not self._leash_enabled() or self.tune.chest_leash_tie <= 0:
+            return costs
+        ox, oy = self._leash_offset()
+        dist = math.hypot(ox, oy)
+        if dist < 1.0:
+            return costs
+        dots = _UNIT[:, 0] * (ox / dist) + _UNIT[:, 1] * (oy / dist)
+        return costs - np.float32(self.tune.chest_leash_tie) * np.clip(dots, 0.0, None)
+
     def step(self, result: VisionResult, hp: float | None = None) -> Decision:
         now = self.clock()
         dt = 0.0 if self._last_t is None else min(0.5, max(0.0, now - self._last_t))
@@ -1397,6 +1599,7 @@ class Navigator:
             self.current = (0, 0)
             self.last = Decision((0, 0), {}, 0.0, "menu")
             return self.last
+        self._advance_world(dt)
         self._note_critical(hp)
         self._note_xp(result.xp)
         self._since_change += dt
@@ -1406,6 +1609,8 @@ class Navigator:
             pts = _points_from_detections(result)
         pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
         px, py = _ref_player(result)
+        self._sight_leash(result, px, py)
+        self._expire_leash()
         phase = self.phase
         kite = self._kite_direction(pts, px, py, dt)
         self._update_breakout(pts, px, py, dt, hp)
@@ -1428,6 +1633,7 @@ class Navigator:
             self._chest_miss_s = 0.0
             self._chest_miss_n = 0
         dec: Decision | None = None
+        leash_pull = False
         # A latched seek that scores into a real flee (danger >= chest_clear_danger)
         # is thrown away and rescored with no chest, so the commit cannot walk
         # into that crowd.
@@ -1435,6 +1641,7 @@ class Navigator:
             gem_seek_on = False
             cone = None
             this_chest = None if drop_chest else chest_at
+            pulled = False
             base = score_tune
             if self._chest_latched and this_chest is not None and self.tune.chest_commit_fade > base.chest_danger:
                 base = replace(base, chest_danger=self.tune.chest_commit_fade)
@@ -1458,10 +1665,16 @@ class Navigator:
                         over["gem_target_gain"] = t.gem_seek_gain
                     if over:
                         btune = replace(btune, **over)
+                # Plain flee and breakout lean toward a pending chest. A committed
+                # escape does not; its corridor pick already took the tie nudge.
+                allow_leash = not drop_chest and not self._critical_on and not escape
+                aim, score_chest, btune, pulled = self._aim_leash(
+                    self.breakout, this_chest if plain else None, px, py, btune, allow=allow_leash,
+                )
                 dec = score_directions(
-                    pts, (px, py), self.breakout, self.tune.breakout_weight,
+                    pts, (px, py), aim, self.tune.breakout_weight,
                     gems=bgems, current=self.current, hp=hp, tune=btune, idle_ok=False,
-                    kite_floor=True, chest=this_chest if plain else None,
+                    kite_floor=True, chest=score_chest,
                     gem_forward=bool(in_late and not in_early and bgems),
                 )
                 walked_chest = dec.mode == "chest"
@@ -1505,12 +1718,17 @@ class Navigator:
                     ):
                         roam_tune = replace(roam_tune, gem_danger=self.tune.late_gem_danger)
                     gem_seek_on = True
+                allow_leash = not drop_chest and not self._critical_on
+                aim, score_chest, roam_tune, pulled = self._aim_leash(
+                    kite, this_chest, px, py, roam_tune, allow=allow_leash,
+                )
                 dec = score_directions(
-                    pts, (px, py), kite, phase.kite_weight,
+                    pts, (px, py), aim, phase.kite_weight,
                     gems=None if self._critical_on else result.gems, current=self.current, hp=hp,
                     tune=roam_tune, idle_ok=phase.idle_ok,
-                    chest=this_chest,
+                    chest=score_chest,
                 )
+            leash_pull = pulled
             if (
                 drop_chest
                 or this_chest is None
@@ -1520,6 +1738,8 @@ class Navigator:
                 break
             self._chest_latched = False
         assert dec is not None
+        if leash_pull and dec.mode == "chest":
+            dec.mode = "leash"
 
         # Flip the orbit when the field keeps overruling it (the loop runs into
         # a crowd): kiting the other way round stops the two fighting.
