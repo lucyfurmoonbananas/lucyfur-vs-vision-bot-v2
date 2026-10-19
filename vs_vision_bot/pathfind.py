@@ -156,6 +156,8 @@ class Tuning:
     low_hp: float = 0.5
     # Below this, wider berth and no gem or chest chase. 0 disables.
     critical_hp: float = 0.20
+    # Same exit as menus.HP_CRITICAL_EXIT. A 0.25 median does not leave critical.
+    critical_exit_hp: float = 0.40
     # Encirclement breakout.
     sector_radius: float = 260.0   # crowd within this radius counts for encirclement
     sector_thr: float = 0.30       # per-sector density that counts as "occupied"
@@ -925,6 +927,7 @@ class Navigator:
         self._escape_reason = "revive"  # "revive" or "ring" (flower-window commit)
         self._revive_held = False       # logged the surrounded-hold extension once
         self._revive_ring = False       # this revive escape has seen a closed ring
+        self._revive_clear_s = 0.0      # how long the post-hold field has stayed clear
         self._aim_hint = None           # chest or arrow on the frame that picks a heading
         self._last_break_dir: tuple[float, float] | None = None  # heading of the last breakout
         self._last_break_end = -1e9     # game_s when it ended
@@ -1022,6 +1025,7 @@ class Navigator:
         self._escape_pending = True
         self._revive_held = False
         self._revive_ring = False
+        self._revive_clear_s = 0.0
         return dur
 
     def _end_breakout(self) -> None:
@@ -1359,7 +1363,7 @@ class Navigator:
             self._request_escape(t.ring_commit_s, "ring")
         self._start_breakout(pts, px, py)
 
-    def _hold_revive_escape(self, t: Tuning, pts: np.ndarray, px: float, py: float) -> bool:
+    def _hold_revive_escape(self, t: Tuning, pts: np.ndarray, px: float, py: float, dt: float) -> bool:
         """Keep a post-revive heading until the crowd is actually clear.
 
         A closed ring (cover at or above ``cover_trigger``) holds. A revive that
@@ -1367,17 +1371,36 @@ class Navigator:
         still at or above ``safe_danger`` (test3: cover fell 0.94 -> 0.31 and
         the 12s hold never armed, then kite resumed at danger 0.7 and the ring
         shut again). A crowd that was never a ring still ends at
-        ``revive_escape_s``. Open ground ends the hold. The cap is
-        ``revive_escape_max_s``.
+        ``revive_escape_s`` once HP is a trusted reading. While HP is critical
+        (the post-revive blind, or a real low read) the escape continues until
+        danger and cover are both down, up to ``revive_escape_max_s``. One
+        quiet frame is not that clearance.
         """
         if self._escape_reason != "revive":
             return False
         danger = 0.0
         if pts is not None and len(pts):
             danger = float(_danger_at(pts, np.array([px]), np.array([py]), t.radius)[0])
-        opened_but_close = self._revive_ring and danger >= t.safe_danger
-        if self.cover < t.cover_trigger and not opened_but_close:
-            return False
+        clear = danger < t.safe_danger and self.cover < t.cover_trigger
+        surrounded = self.cover >= t.cover_trigger or (
+            self._revive_ring and danger >= t.safe_danger
+        )
+        if self._critical_on and not clear:
+            surrounded = True
+        if not surrounded:
+            # A hold that has started waits out one quiet frame, then rechecks.
+            # Granting the usual half second here would swallow the empty-field
+            # tests before a second clear sample arrived.
+            if not self._revive_held or self._revive_clear_s > 0:
+                return False
+            self._revive_clear_s = dt
+            room = t.revive_escape_max_s - self._escape_s
+            if room <= 1e-3:
+                return False
+            self._escape_remaining = min(1e-3, room)
+            self._flee_remaining = self._escape_remaining
+            return True
+        self._revive_clear_s = 0.0
         room = t.revive_escape_max_s - self._escape_s
         if room <= 1e-3:
             return False
@@ -1426,7 +1449,7 @@ class Navigator:
         self._escape_remaining = max(0.0, self._escape_remaining - dt)
         self._flee_remaining = self._escape_remaining
         if self._escape_remaining <= 0:
-            if not self._hold_revive_escape(t, pts, px, py):
+            if not self._hold_revive_escape(t, pts, px, py, dt):
                 self._keep_orbit(self.breakout)
                 self.log(f"[nav] {self._escape_reason} escape done {_nearest_dir(self.breakout)} game~{self.game_s:.0f}s")
                 self._end_breakout()
@@ -2164,13 +2187,47 @@ class Navigator:
         self.last = dec
         return dec
 
+    def _hot_crowd(self) -> bool:
+        if self.cover >= self.tune.cover_rising:
+            return True
+        last = self.last
+        return last is not None and last.danger_here >= self.tune.safe_danger
+
+    def _crowd_hp_caution(self, hp: float) -> bool:
+        """HP still above 0.20, but falling or already under the exit, in a crowd.
+
+        test4 nav lines sit at 0.31–0.50 with danger 2–4, then the latch logs
+        0.00 about 2s before death. The upward spike filter is not dropping
+        those reads; the enter line is. Unknown HP is not a reading.
+        """
+        if hp >= self.tune.low_hp or not self._hot_crowd():
+            return False
+        if hp < self.tune.critical_exit_hp:
+            return True
+        if not self._hp_hist:
+            return False
+        peak = max(h for _, h in self._hp_hist)
+        return peak - hp >= 0.15
+
     def _note_critical(self, hp: float | None) -> None:
-        """Log the edges of the critical-HP band. The [nav] mode carries the tag."""
-        on = hp is not None and self.tune.critical_hp > 0 and hp < self.tune.critical_hp
+        """Log the edges of the critical-HP band. The [nav] mode carries the tag.
+
+        An unknown bar does not change the latch. Leaving takes a reading at
+        or above ``critical_exit_hp``, and not while the crowd caution holds.
+        """
+        if self.tune.critical_hp <= 0:
+            return
+        if hp is None:
+            return
+        caution = self._crowd_hp_caution(hp)
+        if self._critical_on:
+            on = hp < self.tune.critical_exit_hp or caution
+        else:
+            on = hp < self.tune.critical_hp or caution
         if on == self._critical_on:
             return
         self._critical_on = on
-        shown = "?" if hp is None else f"{hp:.2f}"
+        shown = f"{hp:.2f}"
         self.log(f"[nav] critical HP {'on' if on else 'off'} hp={shown} game~{self.game_s:.0f}s")
 
 
