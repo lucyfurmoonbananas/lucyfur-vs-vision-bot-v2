@@ -433,3 +433,74 @@ def test_chest_free_opens_is_a_vs_tune_knob():
     assert any(ln.startswith("[chest] hold (opened=0 ") for ln in logs)
     assert not any(ln.startswith("[leash] step-in ") for ln in logs)
     assert nav._leash_dist() > dist - held.chest_orbit_band
+
+
+def test_pilot_evolution_ready_after_ten_minutes_opens_a_held_chest():
+    """The level-up tracker reaches set_build_state through sync_build_state.
+
+    Reporting a ready evolution before 10:00 keeps the hold. At 10:00 the same
+    flags let the chest open. Pushing the flags does not count another chest.
+    """
+    from vs_vision_bot.main import sync_build_state
+    from vs_vision_bot.menus import MenuPilot
+
+    tune = tuning_from_env("chest_orbit_swell=0", log=lambda *_: None)
+    clock = Clock()
+    logs: list[str] = []
+    nav = Navigator(tune=tune, clock=clock, log=logs.append)
+    for _ in range(tune.chest_free_opens):
+        nav.on_chest_opened()
+    pilot = MenuPilot(tap=lambda _k: None, log=lambda _m: None)
+    pilot.levels = {"Garlic": 8, "Pummarola": 1}
+    assert pilot.evolution_ready and not pilot.all_maxed
+
+    nav.game_s = 540.0
+    sync_build_state(nav, pilot)
+    assert nav._evolution_ready and not nav._all_maxed
+    assert nav._chests_opened == tune.chest_free_opens
+    _anchor(nav, clock, chest=CHEST_RIGHT)
+    _park_west_of(nav, tune.chest_orbit_radius)
+    nav._since_change = 1.0
+    held = nav._leash_dist()
+    run(nav, clock, result([]), 8, hp=1.0)
+    assert any(ln.startswith("[chest] hold (opened=3 evo_ready=True t=540)") for ln in logs)
+    assert not any(ln.startswith("[leash] step-in ") for ln in logs)
+    assert nav._leash_dist() > held - tune.chest_orbit_band
+
+    # A second chest-screen confirm updates flags only. It must not count again.
+    pilot.chest_presses = 1
+    sync_build_state(nav, pilot)
+    assert nav._chests_opened == tune.chest_free_opens
+
+    nav.game_s = 600.0
+    dist = nav._leash_dist()
+    run(nav, clock, result([]), 18, hp=1.0)
+    assert any(ln.startswith("[chest] open-allowed (evolution)") for ln in logs)
+    assert any(ln.startswith("[leash] step-in ") for ln in logs)
+    assert nav._leash_dist() < dist - 100.0
+
+
+def test_critical_hp_and_a_wall_commit_override_a_held_chest():
+    """Critical HP and a cover >= 0.75 wall leave the orbit. The wall takes its gap."""
+    tune = tuning_from_env("chest_orbit_swell=0", log=lambda *_: None)
+    clock = Clock()
+    nav = Navigator(tune=tune, clock=clock, log=lambda *_: None)
+    for _ in range(tune.chest_free_opens):
+        nav.on_chest_opened()
+    _anchor(nav, clock, chest=CHEST_RIGHT)
+    _park_west_of(nav, tune.chest_orbit_radius)
+    nav._since_change = 1.0
+    vecs = run(nav, clock, result([]), 4, hp=0.12)
+    assert nav._critical_on and nav.last.mode.endswith("critical")
+    assert not nav.last.mode.startswith("leash-orbit")
+    assert all(v[0] <= 0 for v in vecs)
+
+    wall = Navigator(tune=tune, clock=Clock(), log=lambda *_: None)
+    for _ in range(tune.chest_free_opens):
+        wall.on_chest_opened()
+    wall.game_s = 660.0
+    _anchor(wall, wall.clock, chest=(240.0, 256.0))
+    run(wall, wall.clock, result(blob(700, 256, n=8, spread=30)), 8, hp=0.80)
+    run(wall, wall.clock, result(ring(480, 256, 150, 48, gap_deg=(-1, 25))), 4, hp=0.80)
+    assert wall.escaping and wall.last.mode.startswith("ring-escape")
+    assert wall.breakout is not None and wall.breakout[0] > 0

@@ -16,7 +16,14 @@ from vs_vision_bot.controller import MoveController
 from vs_vision_bot.debug_window import DebugWindow
 from vs_vision_bot.hotkeys import CommandBus, HotkeyService
 from vs_vision_bot.input_backend import make_backend
-from vs_vision_bot.menus import MenuPilot, detect_level_up, hp_for_nav, read_hp_fraction, tesseract_available
+from vs_vision_bot.menus import (
+    MenuPilot,
+    detect_level_up,
+    hp_for_nav,
+    read_critical_flag,
+    read_hp_fraction,
+    tesseract_available,
+)
 from vs_vision_bot.pathfind import Navigator, chest_status, gem_status, tuning_from_env
 from vs_vision_bot.vision import Vision, draw_synthetic_arena
 from vs_vision_bot.watchdog import (
@@ -153,6 +160,24 @@ class DeathTrace:
         return paths
 
 
+def _pilot_progress(pilot: object) -> tuple[int, int]:
+    """(level-up picks, chest confirms) seen so far. Stubs may omit both."""
+    return (len(getattr(pilot, "picks", ())), int(getattr(pilot, "chest_presses", 0)))
+
+
+def sync_build_state(nav: object, pilot: object) -> None:
+    """Push evolution flags to the navigator when it accepts them.
+
+    Parallel chest gating adds ``Navigator.set_build_state(evolution_ready,
+    all_maxed)``. This loop calls it after a level-up pick and after a chest
+    screen. Missing the method (that change not merged yet) is a no-op.
+    """
+    fn = getattr(nav, "set_build_state", None)
+    if not callable(fn):
+        return
+    fn(bool(getattr(pilot, "evolution_ready", False)), bool(getattr(pilot, "all_maxed", False)))
+
+
 def gate_heuristic_menu(
     menu: bool, menu_kind: str | None, escaping: bool, streak: int,
     need: int = ESCAPE_HEURISTIC_MENU_FRAMES,
@@ -278,6 +303,8 @@ def main(argv: list[str] | None = None) -> int:
                 nav.reset()
                 pilot.new_run()
                 pilot_new_run[0] = False
+                sync_build_state(nav, pilot)
+                build_seen[0], build_seen[1] = _pilot_progress(pilot)
 
     def release_before_menu_key() -> bool:
         # Lift WASD/arrows (this also re-focuses the game window) before a menu tap.
@@ -293,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         click=click_in_capture,
         results_dir=os.environ.get("VS_RESULTS_DIR", "/workspace/vsbot-check/results"),
         game_clock=lambda: nav.game_s,  # nav is created just below; only called on a level-up
+        critical_hp=lambda: read_critical_flag(nav),
         # Stage for the Mad-Forest-only Pentagram banish; play_run.sh only starts Mad Forest.
         stage=os.environ.get("VS_STAGE", ""),
     )
@@ -300,6 +328,9 @@ def main(argv: list[str] | None = None) -> int:
     # The movement game clock restarts only after a finished run (QUIT + DONE),
     # not on every manual pause.
     pilot_new_run = [False]
+    # picks and chest confirms already pushed via set_build_state.
+    build_seen = list(_pilot_progress(pilot))
+    sync_build_state(nav, pilot)
     auto_menus = not cfg.demo and os.environ.get("VS_AUTO_MENUS", "1").strip() not in ("0", "false", "no")
     if auto_menus and not tesseract_available():
         print("[menus] tesseract not found: level-ups pick by position only, chest screens not handled")
@@ -381,6 +412,10 @@ def main(argv: list[str] | None = None) -> int:
                 if screen is not None and not in_menu:
                     mover.release_and_clear()
                 menu_kind = pilot.step(frame, screen)
+                picks_n, chests_n = _pilot_progress(pilot)
+                if picks_n != build_seen[0] or chests_n != build_seen[1]:
+                    build_seen[0], build_seen[1] = picks_n, chests_n
+                    sync_build_state(nav, pilot)
                 if menu_kind:
                     result.menu = True
                     result.note = pilot.status
