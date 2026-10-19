@@ -32,13 +32,16 @@ Per frame, every one of the 8 WASD directions is scored:
   A sighting is also a world anchor (``[leash]``). The camera follows the
   player, so the anchor is dead-reckoned from the bot's own steps and
   re-anchored on every re-sight. An arrow is a direction past the playfield
-  edge. Kite, breakout, and plain-flee headings lean toward it as distance
-  grows; past ``chest_leash_radius`` the bot walks back while danger stays
-  under ``chest_clear_danger``. Committed escapes and critical HP are not
-  pulled. When escape costs are close, the corridor toward the anchor wins
-  by ``chest_leash_tie``. The anchor drops once the chest is reached, after
+  edge. While the anchor is pending and danger is moderate, the bot orbits
+  it: tangent to the circle, plus a radial correction toward
+  ``chest_orbit_radius`` (wider as danger rises). The orbit sign is whichever
+  tangent corridor is more open, and it flips when the other side opens up.
+  A low-danger corridor toward the chest (the same gate as a chest seek)
+  steps in. Committed escapes, flees, and critical HP are not pulled. When
+  escape costs are close, the corridor toward the anchor wins by
+  ``chest_leash_tie``. The anchor drops once the chest is reached, after
   ``chest_leash_forget_s`` without a re-sight, or after ``chest_leash_slip``
-  of travel since the last sight.
+  of travel since the last sight. Orbit enter/exit and step-in are logged.
 * inertia - hysteresis: the current direction gets a bonus and a minimum
   dwell time so the chord does not jitter frame to frame.
 
@@ -250,6 +253,18 @@ class Tuning:
     # Escape-cost shaved off corridors aligned with the anchor. A clearly
     # cheaper corridor still wins. 0 disables.
     chest_leash_tie: float = 0.4
+    # Circle this far from the anchor while danger is between chest_danger and
+    # chest_clear_danger. 0 disables the orbit (the straight leash pull remains).
+    chest_orbit_radius: float = 280.0
+    # Radial error that counts as a full correction. Also the hold band.
+    chest_orbit_band: float = 60.0
+    # Extra px of radius per unit of danger, capped at chest_clear_danger. 0 holds the radius fixed.
+    chest_orbit_swell: float = 40.0
+    # Weight of the orbit heading. High enough to beat a moderate crowd, under chest_gain.
+    chest_orbit_gain: float = 6.0
+    # The other tangent takes the orbit when its corridor cost is below this
+    # fraction of the current side. Ties keep the way the body is already pointed.
+    chest_orbit_switch: float = 0.7
     # Early Garlic engage: before early_engage_until_s, HP >= early_engage_hp, danger < safe_danger
     # and no gems waiting to be collected (early_engage_max_gems), pull toward enemies.
     engage_gain: float = 0.0
@@ -900,6 +915,11 @@ class Navigator:
         self._leash_kind = ""
         self._leash_seen = 0.0
         self._leash_travel = 0.0  # px moved since the last sight
+        self._chase = ""  # "" | "orbit" | "step" for this frame
+        self._orbit_on = False
+        self._orbit_sign = 0  # +1 / -1 around the anchor, 0 until a side is chosen
+        self._orbit_aim: tuple[float, float] | None = None
+        self._step_in = False
 
     @property
     def escaping(self) -> bool:
@@ -1464,6 +1484,11 @@ class Navigator:
     def _drop_leash(self, reason: str) -> None:
         if self._leash is None:
             return
+        if self._orbit_on:
+            self._orbit_on = False
+            self.log(f"[leash] orbit exit game~{self.game_s:.0f}s")
+        self._step_in = False
+        self._orbit_sign = 0
         self.log(f"[leash] drop {reason} {self._leash_kind} game~{self.game_s:.0f}s")
         self._leash = None
         self._leash_kind = ""
@@ -1584,6 +1609,108 @@ class Navigator:
         dots = _UNIT[:, 0] * (ox / dist) + _UNIT[:, 1] * (oy / dist)
         return costs - np.float32(self.tune.chest_leash_tie) * np.clip(dots, 0.0, None)
 
+    def _orbit_radius(self, danger: float) -> float:
+        t = self.tune
+        extra = 0.0
+        if t.chest_orbit_swell > 0 and t.chest_clear_danger > 0:
+            extra = t.chest_orbit_swell * min(max(danger, 0.0), t.chest_clear_danger)
+        return t.chest_orbit_radius + extra
+
+    def _leash_chase(self, danger: float) -> str:
+        """'orbit', 'step', or '' . Emergencies and a disabled orbit stay out of it."""
+        if (
+            not self._leash_enabled()
+            or self.tune.chest_leash_radius <= 0
+            or self.tune.chest_orbit_radius <= 0
+            or self._critical_on
+            or self.escaping
+            or self._flee_remaining > 0
+            or self.breakout is not None
+        ):
+            return ""
+        opening = danger < self.tune.chest_danger or (
+            self._chest_latched and danger < self.tune.chest_clear_danger
+        )
+        if opening:
+            return "step"
+        if danger < self.tune.chest_clear_danger:
+            return "orbit"
+        return ""
+
+    def _heading_cost(self, costs: np.ndarray, hx: float, hy: float) -> float:
+        dots = _UNIT[:, 0] * hx + _UNIT[:, 1] * hy
+        w = np.clip(dots, 0.0, None) ** 2
+        total = float(w.sum())
+        if total < 1e-6:
+            return float(np.min(costs))
+        return float((costs * w).sum() / total)
+
+    def _set_orbit_sign(self, c_pos: float, c_neg: float, t_pos: tuple[float, float], t_neg: tuple[float, float]) -> int:
+        """Pick the open tangent. A tie keeps the sign, or follows the current heading."""
+        margin = self.tune.chest_orbit_switch if self.tune.chest_orbit_switch > 0 else 1.0
+        if self._orbit_sign == 0:
+            if c_neg < c_pos * margin:
+                self._orbit_sign = -1
+            elif c_pos < c_neg * margin:
+                self._orbit_sign = 1
+            else:
+                hx, hy = math.cos(self.heading), math.sin(self.heading)
+                dp = hx * t_pos[0] + hy * t_pos[1]
+                dn = hx * t_neg[0] + hy * t_neg[1]
+                self._orbit_sign = 1 if dp >= dn else -1
+        else:
+            cur = c_pos if self._orbit_sign > 0 else c_neg
+            other = c_neg if self._orbit_sign > 0 else c_pos
+            if other < cur * margin:
+                self._orbit_sign = -self._orbit_sign
+        return self._orbit_sign
+
+    def _orbit_heading(self, pts: np.ndarray, px: float, py: float, danger: float) -> tuple[float, float]:
+        """Tangent around the anchor plus a pull back to the orbit radius."""
+        ox, oy = self._leash_offset()
+        dist = math.hypot(ox, oy)
+        if dist < 1.0:
+            return (1.0, 0.0)
+        ix, iy = ox / dist, oy / dist
+        t_pos = (iy, -ix)
+        t_neg = (-iy, ix)
+        costs = corridor_costs(pts, px, py, self.tune.corridor_len, self.tune.corridor_width)
+        sign = self._set_orbit_sign(
+            self._heading_cost(costs, t_pos[0], t_pos[1]),
+            self._heading_cost(costs, t_neg[0], t_neg[1]),
+            t_pos, t_neg,
+        )
+        tx, ty = t_pos if sign > 0 else t_neg
+        band = max(self.tune.chest_orbit_band, 1.0)
+        err = max(-1.0, min(1.0, (dist - self._orbit_radius(danger)) / band))
+        hx = tx * (1.0 - abs(err)) + ix * err
+        hy = ty * (1.0 - abs(err)) + iy * err
+        n = math.hypot(hx, hy)
+        if n < 1e-6:
+            return (tx, ty)
+        return (hx / n, hy / n)
+
+    def _note_leash_chase(self, danger: float) -> None:
+        dist = self._leash_dist() if self._leash is not None else 0.0
+        if self._chase == "orbit":
+            if not self._orbit_on:
+                self._orbit_on = True
+                self.log(
+                    f"[leash] orbit r={self._orbit_radius(danger):.0f} dist={dist:.0f} "
+                    f"side={self._orbit_sign:+d} game~{self.game_s:.0f}s"
+                )
+            self._step_in = False
+            return
+        if self._orbit_on:
+            self._orbit_on = False
+            self.log(f"[leash] orbit exit game~{self.game_s:.0f}s")
+        if self._chase == "step":
+            if not self._step_in:
+                self._step_in = True
+                self.log(f"[leash] step-in dist={dist:.0f} game~{self.game_s:.0f}s")
+            return
+        self._step_in = False
+
     def step(self, result: VisionResult, hp: float | None = None) -> Decision:
         now = self.clock()
         dt = 0.0 if self._last_t is None else min(0.5, max(0.0, now - self._last_t))
@@ -1615,6 +1742,10 @@ class Navigator:
         kite = self._kite_direction(pts, px, py, dt)
         self._update_breakout(pts, px, py, dt, hp)
         escape = self.breakout is not None and self._escape_remaining > 0
+        here = float(_danger_at(pts, np.array([px]), np.array([py]), self.tune.radius)[0])
+        self._chase = self._leash_chase(here)
+        self._orbit_aim = self._orbit_heading(pts, px, py, here) if self._chase == "orbit" else None
+        self._note_leash_chase(here)
         # Denser early XP: boost gem pull before the flower without changing late knobs.
         score_tune = gem_tune_for(self.tune, self.game_s)
         seen = self._chest_seen(result, escape, dt)
@@ -1705,6 +1836,7 @@ class Navigator:
                 roam_tune = base
                 if (
                     not self._critical_on
+                    and self._chase == ""
                     and this_chest is None
                     and result.gems
                     and self.tune.gem_seek_gain > base.gem_target_gain
@@ -1719,15 +1851,34 @@ class Navigator:
                         roam_tune = replace(roam_tune, gem_danger=self.tune.late_gem_danger)
                     gem_seek_on = True
                 allow_leash = not drop_chest and not self._critical_on
-                aim, score_chest, roam_tune, pulled = self._aim_leash(
-                    kite, this_chest, px, py, roam_tune, allow=allow_leash,
-                )
-                dec = score_directions(
-                    pts, (px, py), aim, phase.kite_weight,
-                    gems=None if self._critical_on else result.gems, current=self.current, hp=hp,
-                    tune=roam_tune, idle_ok=phase.idle_ok,
-                    chest=score_chest,
-                )
+                if self._chase == "orbit" and allow_leash and self._orbit_aim is not None:
+                    # Circle the anchor. No straight chest pull; the heading carries it.
+                    pulled = False
+                    dec = score_directions(
+                        pts, (px, py), self._orbit_aim, self.tune.chest_orbit_gain,
+                        gems=None if self._critical_on else result.gems, current=self.current, hp=hp,
+                        tune=roam_tune, idle_ok=False, kite_floor=True, chest=None,
+                    )
+                elif (
+                    self._chase == "step" and allow_leash and this_chest is None and self._leash is not None
+                ):
+                    pulled = True
+                    dec = score_directions(
+                        pts, (px, py), kite, phase.kite_weight,
+                        gems=None if self._critical_on else result.gems, current=self.current, hp=hp,
+                        tune=roam_tune, idle_ok=phase.idle_ok,
+                        chest=self._leash_screen(px, py),
+                    )
+                else:
+                    aim, score_chest, roam_tune, pulled = self._aim_leash(
+                        kite, this_chest, px, py, roam_tune, allow=allow_leash,
+                    )
+                    dec = score_directions(
+                        pts, (px, py), aim, phase.kite_weight,
+                        gems=None if self._critical_on else result.gems, current=self.current, hp=hp,
+                        tune=roam_tune, idle_ok=phase.idle_ok,
+                        chest=score_chest,
+                    )
             leash_pull = pulled
             if (
                 drop_chest
@@ -1738,7 +1889,11 @@ class Navigator:
                 break
             self._chest_latched = False
         assert dec is not None
-        if leash_pull and dec.mode == "chest":
+        if self._chase == "orbit" and dec.mode != "escape":
+            dec.mode = "leash-orbit"
+        elif self._chase == "step" and leash_pull and dec.mode == "chest":
+            dec.mode = "leash-step"
+        elif leash_pull and dec.mode == "chest":
             dec.mode = "leash"
 
         # Flip the orbit when the field keeps overruling it (the loop runs into
