@@ -151,7 +151,8 @@ def test_seek_logs_red_and_counts_it():
 
 def test_synthetic_red_and_green_rims_are_classified():
     frame = _grass()
-    _paint_rim(frame, 300, 300, (38, 38, 228))   # red rim, hue-shifted blue core
+    # Real red crystal, Oct 19 frames: BGR (156, 38, 225), not pure red.
+    _paint_rim(frame, 300, 300, (156, 38, 225))
     _paint_rim(frame, 700, 300, (38, 228, 38))  # green rim
     gems = _colored(frame, enemy_mask(frame))
     assert _near(gems, 300, 300, "red")
@@ -165,7 +166,8 @@ def test_recolored_real_gem_is_found_and_blue_mask_ignores_it():
     win = frame[y - 16 : y + 16, x - 16 : x + 16].copy()
     hsv = cv2.cvtColor(win, cv2.COLOR_BGR2HSV)
     sel = (hsv[:, :, 0] >= 90) & (hsv[:, :, 0] <= 110) & (hsv[:, :, 1] > 80)
-    hsv[:, :, 0] = np.where(sel, (hsv[:, :, 0].astype(np.int16) - 98) % 180, hsv[:, :, 0]).astype(np.uint8)
+    # Blue gems sit at OpenCV hue ~98. The real red crystal is about +63.
+    hsv[:, :, 0] = np.where(sel, (hsv[:, :, 0].astype(np.int16) + 63) % 180, hsv[:, :, 0]).astype(np.uint8)
     shifted = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
     red = frame.copy()
     red[y - 16 : y + 16, x - 16 : x + 16] = np.where(sel[:, :, None], shifted, win)
@@ -176,6 +178,24 @@ def test_recolored_real_gem_is_found_and_blue_mask_ignores_it():
     # The blue mask does not claim the recolored crystal.
     blues = detect_gems(red, enemy_mask(red))
     assert not any(abs(gx - 591) < 12 and abs(gy - 249) < 12 for gx, gy in blues)
+
+
+def _assert_only_crystal_reds(shot, name: str) -> None:
+    found = _colored(shot, enemy_mask(shot))
+    assert not any(c == "green" for *_, c in found), name
+    h, w = shot.shape[:2]
+    for x, y, color in found:
+        if color != "red":
+            continue
+        # The centroid can sit in the dark hole. A rim pixel next to it is the crystal.
+        y0, y1 = max(0, y - 4), min(h, y + 5)
+        x0, x1 = max(0, x - 4), min(w, x + 5)
+        win = shot[y0:y1, x0:x1]
+        bb = win[:, :, 0].astype(np.int16)
+        gg = win[:, :, 1].astype(np.int16)
+        rr = win[:, :, 2].astype(np.int16)
+        crystal = (rr >= 180) & (bb >= 100) & (bb <= 220) & (gg <= 100)
+        assert crystal.any(), (name, x, y)
 
 
 def test_heart_foliage_chicken_blood_and_red_sprites_are_not_gems():
@@ -197,17 +217,45 @@ def test_heart_foliage_chicken_blood_and_red_sprites_are_not_gems():
     gems = _colored(frame, enemy_mask(frame))
     assert gems == []
 
+    # Older gameplay shots do contain the red crystal (same BGR as the Oct 19
+    # frames). They must not contain a green gem or a pure-red sprite.
     for name in _REAL:
         shot = cv2.imread(str(FIX / name))
         assert shot is not None, name
-        found = _colored(shot, enemy_mask(shot))
-        extra = [(x, y, c) for x, y, c in found if c != "blue"]
-        assert extra == [], (name, extra)
+        _assert_only_crystal_reds(shot, name)
     for path in sorted((FIX / "chest_real").glob("*.png")):
         shot = cv2.imread(str(path))
+        _assert_only_crystal_reds(shot, path.name)
+
+
+def test_oct19_frames_keep_red_crystals_and_drop_enemies():
+    """Poe on Mad Forest, 19 Oct. Green hits in the runner notes are Mantichana.
+
+    frame_g140405 has a Red Death-like sprite on the player; none of it is a gem.
+    Red crystals are BGR about (156, 38, 225). There is no green crystal in these five.
+    """
+    root = FIX / "gems"
+    expect = {
+        "frame_g134558.png": {"blue": 14, "green": 0, "red": 20},
+        "frame_g134659.png": {"blue": 0, "green": 0, "red": 0},
+        "frame_g140204.png": {"blue": 5, "green": 0, "red": 15},
+        "frame_g140304.png": {"blue": 3, "green": 0, "red": 0},
+        "frame_g140405.png": {"blue": 3, "green": 0, "red": 0},
+    }
+    for name, counts in expect.items():
+        shot = cv2.imread(str(root / name))
+        assert shot is not None and shot.shape[:2] == (540, 960), name
         found = _colored(shot, enemy_mask(shot))
-        extra = [(x, y, c) for x, y, c in found if c != "blue"]
-        assert extra == [], (path.name, extra)
+        got = {c: sum(col == c for *_, col in found) for c in ("blue", "green", "red")}
+        assert got == counts, (name, got)
+        _assert_only_crystal_reds(shot, name)
+    # A known crystal, and the Red Death wing that used to pass the pure-red gate.
+    first = cv2.imread(str(root / "frame_g134558.png"))
+    assert _near(_colored(first, enemy_mask(first)), 293, 272, "red", tol=12)
+    death = cv2.imread(str(root / "frame_g140405.png"))
+    found = _colored(death, enemy_mask(death))
+    assert not any(c == "red" and abs(x - 469) < 40 and abs(y - 208) < 40 for x, y, c in found)
+    assert not any(c == "red" and abs(x - 480) < 50 and abs(y - 245) < 50 for x, y, c in found)
 
 
 def test_real_blue_gems_keep_their_centers():

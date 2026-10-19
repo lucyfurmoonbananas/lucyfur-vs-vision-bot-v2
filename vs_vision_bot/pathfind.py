@@ -1936,6 +1936,10 @@ class Navigator:
 
     def _leash_chase(self, danger: float) -> str:
         """'orbit', 'step', or '' . Emergencies and a disabled orbit stay out of it."""
+        # A plain breakout is not one of these. run1 at game~590s logged
+        # "orbit exit" while chest=(210,465) was still on screen: cover 0.62
+        # started a breakout, danger 2.12 was still inside the orbit band.
+        # Wall commits set escaping, and a flower-window breakout still leaves.
         if (
             not self._leash_enabled()
             or self.tune.chest_leash_radius <= 0
@@ -1943,7 +1947,7 @@ class Navigator:
             or self._critical_on
             or self.escaping
             or self._flee_remaining > 0
-            or self.breakout is not None
+            or (self.breakout is not None and self._in_flower())
         ):
             return ""
         if not self._chest_open_allowed():
@@ -2110,7 +2114,16 @@ class Navigator:
             base = score_tune
             if self._chest_latched and this_chest is not None and self.tune.chest_commit_fade > base.chest_danger:
                 base = replace(base, chest_danger=self.tune.chest_commit_fade)
-            if self.breakout is not None:
+            # Same case as the chase guard: a short encirclement breakout must
+            # not steer off a chest that is still inside the orbit band.
+            keep_orbit = (
+                self._chase == "orbit"
+                and self.breakout is not None
+                and not escape
+                and self._flee_remaining <= 0
+                and not self._in_flower()
+            )
+            if self.breakout is not None and not keep_orbit:
                 t = self.tune
                 plain = not escape and self._flee_remaining <= 0
                 in_early = plain and t.breakout_gem_until_s > 0 and self.game_s < t.breakout_gem_until_s

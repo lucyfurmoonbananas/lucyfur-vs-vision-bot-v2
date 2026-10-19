@@ -480,6 +480,49 @@ def test_pilot_evolution_ready_after_ten_minutes_opens_a_held_chest():
     assert nav._leash_dist() < dist - 100.0
 
 
+def test_plain_breakout_keeps_a_held_orbit_while_the_chest_is_visible():
+    """run1 game~590s: orbit exit while chest=(210,465) was still detected.
+
+    Cover 0.62 starts a plain breakout. Danger stays under chest_clear_danger,
+    so the orbit should keep the chest. A wall (cover >= 0.75) still leaves.
+    """
+    tune = tuning_from_env("chest_orbit_swell=0", log=lambda *_: None)
+    clock = Clock()
+    logs: list[str] = []
+    nav = Navigator(tune=tune, clock=clock, log=logs.append)
+    for _ in range(tune.chest_free_opens):
+        nav.on_chest_opened()
+    nav.game_s = 500.0
+    _anchor(nav, clock, chest=CHEST_RIGHT)
+    _park_west_of(nav, tune.chest_orbit_radius)
+    nav.current = (0, 1)
+    nav._since_change = 1.0
+    # Gap wide enough that cover stays under the wall commit.
+    crowd = result(ring(480, 256, 160, 36, gap_deg=(0, 140)))
+    crowd.chest = (210.0, 465.0)
+    before = len(logs)
+    run(nav, clock, crowd, 8, hp=0.97)
+    fresh = logs[before:]
+    assert nav.breakouts >= 1 and not nav.escaping
+    assert nav.cover < tune.ring_commit_cover
+    assert nav._orbit_on
+    assert nav.last.mode.startswith("leash-orbit")
+    assert not any(ln.startswith("[leash] orbit exit") for ln in fresh)
+
+    wall = Navigator(tune=tune, clock=Clock(), log=lambda *_: None)
+    for _ in range(tune.chest_free_opens):
+        wall.on_chest_opened()
+    wall.game_s = 500.0
+    _anchor(wall, wall.clock, chest=CHEST_RIGHT)
+    _park_west_of(wall, tune.chest_orbit_radius)
+    wall._since_change = 1.0
+    closing = result(ring(480, 256, 160, 36, gap_deg=(0, 90)))
+    closing.chest = (210.0, 465.0)
+    run(wall, wall.clock, closing, 6, hp=0.97)
+    assert wall.escaping and wall.last.mode.startswith("ring-escape")
+    assert not wall._orbit_on
+
+
 def test_critical_hp_and_a_wall_commit_override_a_held_chest():
     """Critical HP and a cover >= 0.75 wall leave the orbit. The wall takes its gap."""
     tune = tuning_from_env("chest_orbit_swell=0", log=lambda *_: None)

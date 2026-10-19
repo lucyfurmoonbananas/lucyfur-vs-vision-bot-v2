@@ -412,19 +412,22 @@ def detect_gems(frame: np.ndarray, enemies: np.ndarray | None = None) -> list[tu
 def _hue_gem_mask(frame: np.ndarray, color: str) -> np.ndarray:
     """Bright rim of a green or red XP gem.
 
-    A real blue core is BGR about (228, 180, 38). Moving that hue to green
-    (~60) or red (~0) puts the rim at green BGR (38, 228, 38) and red BGR
-    (38, 38, 228): one channel high, the other two low and nearly equal.
+    A real blue core is exactly BGR (228, 180, 38): one channel high, one
+    mid, one low. The red crystal in the Oct 19 frames is that sprite with
+    the hue moved by about +63 (OpenCV), BGR (156, 38, 225): red high, blue
+    still the mid channel, green low. A pure red pixel (both other channels
+    near 0) is a Red Death wing, a damage streak, or a spark, not a gem.
+    Green gems would be the same shape at BGR about (38, 228, 38). Mantichana
+    greens are dimmer and muddier, about (87, 196, 64), and fail the gaps.
     Orange (the winged heart, red flowers, Floor Chicken) has green well
-    above blue. Foliage and yellow-green sprites have red and blue apart,
-    or red too high to be a pure green rim.
+    above blue.
     """
     b = frame[:, :, 0].astype(np.int16)
     g = frame[:, :, 1].astype(np.int16)
     r = frame[:, :, 2].astype(np.int16)
     if color == "red":
-        # r >= 190, g < 80, b < 80, |g - b| <= 35, and both gaps >= 150.
-        m = (r >= 190) & (r - g >= 150) & (r - b >= 150) & (g < 80) & (b < 80) & (np.abs(g - b) <= 35)
+        # Real rim BGR (156, 38, 225). Blue stays the mid channel (130-210).
+        m = (r >= 200) & (b >= 130) & (b <= 210) & (g <= 90) & (r > b) & (r - g >= 140) & (b - g >= 70)
     else:
         m = (g >= 190) & (g - r >= 150) & (g - b >= 150) & (r < 70) & (b < 70) & (np.abs(r - b) <= 35)
     h, w = frame.shape[:2]
@@ -439,7 +442,11 @@ def _loose_body(frame: np.ndarray, color: str) -> np.ndarray:
     g = frame[:, :, 1].astype(np.int16)
     r = frame[:, :, 2].astype(np.int16)
     if color == "red":
-        m = (r >= 160) & (r >= g + 80) & (r >= b + 80)
+        # Pure-red sprite body, and the crystal rim itself. The rim's blue
+        # channel is ~156, so r - b is only ~70 and the pure-red test misses it.
+        # Including it makes a large magenta sprite one blob.
+        crystal = (r >= 200) & (b >= 130) & (g <= 90) & (r > b)
+        m = ((r >= 160) & (r >= g + 80) & (r >= b + 80)) | crystal
     else:
         m = (g >= 160) & (g >= r + 80) & (g >= b + 80)
     h, w = frame.shape[:2]
@@ -459,12 +466,20 @@ def _hue_gems(frame: np.ndarray, color: str, enemies: np.ndarray | None) -> list
     h, w = frame.shape[:2]
     scale = (w * h) / (REF_W * REF_H)
     sx, sy = w / float(REF_W), h / float(REF_H)
-    min_area = max(8, int(round(12 * scale)))
     max_area = max(8, int(round(40 * scale)))
     bw_min = max(3, int(round(4 * sx)))
     bw_max = max(bw_min, int(round(10 * sx)))
-    bh_min = max(5, int(round(7 * sy)))
-    bh_max = max(bh_min, int(round(12 * sy)))
+    bh_max = max(5, int(round(12 * sy)))
+    if color == "red":
+        # Real red rims are often the short half of the crystal (about 5x4,
+        # area 8-18). Green stays on the taller gate: a 4x4 leaf speck is not a gem.
+        min_area = max(6, int(round(8 * scale)))
+        bh_min = max(3, int(round(4 * sy)))
+        dark_limit = 0.30
+    else:
+        min_area = max(8, int(round(12 * scale)))
+        bh_min = max(5, int(round(7 * sy)))
+        dark_limit = 0.12
     slack = max(4, int(round(8 * scale)))
     loose = _loose_body(frame, color).astype(np.uint8)
     _ln, llabels, lstats, _lc = cv2.connectedComponentsWithStats(loose, connectivity=8)
@@ -487,7 +502,9 @@ def _hue_gems(frame: np.ndarray, color: str, enemies: np.ndarray | None) -> list
         by = int(stats[i, cv2.CC_STAT_TOP])
         roi_mx = frame[by : by + bh, bx : bx + bw].max(axis=2)
         dark_frac = float((roi_mx < DARK_MAX).sum()) / float(max(1, bw * bh))
-        if dark_frac > 0.12:
+        # A red rim is a thin arc, so the bbox holds more of the dark outline
+        # than a blue core does (measured about 0.15-0.22 on the real crystals).
+        if dark_frac > dark_limit:
             continue
         touched = np.unique(llabels[labels == i])
         touched = touched[touched > 0]
@@ -498,7 +515,11 @@ def _hue_gems(frame: np.ndarray, color: str, enemies: np.ndarray | None) -> list
         if enemies is not None:
             y0, y1, x0, x1 = max(0, cy - ry), cy + ry, max(0, cx - rx), cx + rx
             dark = int(np.count_nonzero(enemies[y0:y1, x0:x1]))
-            if dark > 70 * scale:
+            # Red crystals drop inside the pack that just died. Their own dark
+            # outline plus that pack is well over the blue-gem limit (measured
+            # 74-180 vs 70), and this palette is not the Red Death wing.
+            limit = 400 * scale if color == "red" else 70 * scale
+            if dark > limit:
                 continue
             enemies[y0:y1, x0:x1] = False
         out.append((cx, cy))
