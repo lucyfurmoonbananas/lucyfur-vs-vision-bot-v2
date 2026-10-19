@@ -687,6 +687,17 @@ EVOLUTION_PAIRS: dict[str, tuple[str, str]] = {
     "Ebony Wings": ("Peachone", "Vandalier"),
 }
 BIRD_WEAPONS: frozenset[str] = frozenset({"Peachone", "Ebony Wings"})
+
+
+def _evolution_bases() -> dict[str, frozenset[str]]:
+    """Evolution name -> base weapon(s). Vandalier is both birds."""
+    out: dict[str, set[str]] = {}
+    for base, (_partner, evo) in EVOLUTION_PAIRS.items():
+        out.setdefault(evo, set()).add(base)
+    return {evo: frozenset(bases) for evo, bases in out.items()}
+
+
+EVOLUTION_BASES: dict[str, frozenset[str]] = _evolution_bases()
 # Next weapon to max once the main is done. Avoid-list weapons stay last.
 SECOND_ORDER: tuple[str, ...] = (
     "Garlic",
@@ -727,25 +738,231 @@ def main_weapon_name(levels: dict[str, int] | None) -> str | None:
     return None
 
 
-def evolution_ready(levels: dict[str, int] | None) -> bool:
-    """Main weapon is at 8 and its evolution partner is owned.
-
-    Boss chests (and the 1:00 Glowing Bat chest) are what actually evolve it.
-    This flag only reports that the build is ready. Pathing is unchanged.
-    """
-    main = main_weapon_name(levels)
-    if main is None or levels is None or levels.get(main, 0) < WEAPON_MAX_LEVEL:
+def _partner_ready(weapon: str, levels: dict[str, int]) -> bool:
+    """Passive owned at any level, or the other bird already at 8."""
+    partner = partner_of(weapon)
+    if partner is None:
         return False
-    partner = partner_of(main)
-    return partner is not None and levels.get(partner, 0) > 0
+    if weapon in BIRD_WEAPONS:
+        return levels.get(partner, 0) >= WEAPON_MAX_LEVEL
+    return levels.get(partner, 0) > 0
 
 
-def format_inventory(levels: dict[str, int] | None) -> str:
+def ready_evolution_labels(
+    levels: dict[str, int] | None, evolved: set[str] | frozenset[str] | None = None
+) -> list[str]:
+    """Weapons a chest could evolve right now, main first.
+
+    A passive pair needs the weapon at 8 and the partner owned. Peachone and
+    Ebony Wings need both at 8. Anything already evolved is skipped. The two
+    birds produce one label.
+    """
+    if not levels:
+        return []
+    done = evolved or set()
+    main = main_weapon_name(levels)
+    names = [n for n, lv in levels.items() if lv > 0 and n in EVOLUTION_PAIRS]
+
+    def sort_key(name: str) -> tuple[int, int, str]:
+        if name == main:
+            return (0, 0, name)
+        if name in SECOND_ORDER:
+            return (1, SECOND_ORDER.index(name), name)
+        return (2, 99, name)
+
+    labels: list[str] = []
+    birds_logged = False
+    for name in sorted(names, key=sort_key):
+        if name in done or levels.get(name, 0) < WEAPON_MAX_LEVEL:
+            continue
+        if name in BIRD_WEAPONS:
+            if birds_logged:
+                continue
+            other = partner_of(name)
+            if (
+                other
+                and other not in done
+                and levels.get(other, 0) >= WEAPON_MAX_LEVEL
+            ):
+                birds_logged = True
+                labels.append(f"{name} L{levels[name]} + {other} L{levels[other]}")
+            continue
+        partner = partner_of(name)
+        if partner and levels.get(partner, 0) > 0:
+            labels.append(f"{name} L{levels[name]} + {partner}")
+    return labels
+
+
+def evolution_ready(
+    levels: dict[str, int] | None, evolved: set[str] | frozenset[str] | None = None
+) -> bool:
+    """Some owned weapon can evolve, and has not evolved yet.
+
+    That is a weapon at 8 whose passive is owned, or both birds at 8. Boss
+    chests (and the 1:00 Glowing Bat chest) are what actually evolve it.
+    Pathing is unchanged; the navigator reads this flag when it has one.
+    """
+    return bool(ready_evolution_labels(levels, evolved))
+
+
+def owned_weapon_slots(
+    levels: dict[str, int] | None, evolved: set[str] | frozenset[str] | None = None
+) -> list[str]:
+    """Owned weapon slots. Evolution results are not a second slot.
+
+    Peachone and Ebony Wings become one Vandalier slot once both are evolved.
+    Until that chest, they are still two weapons.
+    """
+    if not levels:
+        return []
+    done = evolved or set()
+    names = [n for n, lv in levels.items() if int(lv) > 0 and n in WEAPONS and n not in EVOLUTIONS]
+    if "Peachone" in names and "Ebony Wings" in names and "Peachone" in done and "Ebony Wings" in done:
+        names = [n for n in names if n != "Ebony Wings"]
+    return names
+
+
+def _plan_settled(
+    name: str, levels: dict[str, int], evolved: set[str] | frozenset[str]
+) -> bool:
+    """Evolved, or at 8 with its partner. A maxed weapon still missing the partner is open."""
+    if name in evolved:
+        return True
+    if levels.get(name, 0) < WEAPON_MAX_LEVEL:
+        return False
+    if name not in EVOLUTION_PAIRS:
+        return True
+    return _partner_ready(name, levels)
+
+
+def wants_new_weapon(
+    levels: dict[str, int] | None, evolved: set[str] | frozenset[str] | None = None
+) -> bool:
+    """True while the plan still wants another weapon slot filled.
+
+    The plan is one main and one second weapon. A free slot does not by itself
+    mean a new weapon is wanted: finish the weapon already in hand first, and
+    stop once the main and every other held weapon are settled. Six full slots
+    never want another weapon.
+    """
+    done = evolved or set()
+    slots = owned_weapon_slots(levels, done)
+    if len(slots) >= MAX_WEAPONS:
+        return False
+    if not levels:
+        return True
+    main = main_weapon_name(levels)
+    if main is None or not _plan_settled(main, levels, done):
+        # No main yet: we do want Garlic (or the wand). Main unfinished: do not
+        # open another weapon until this one is settled.
+        return main is None
+    others = [n for n in slots if n != main]
+    if not others:
+        return True
+    # A second weapon is already in hand. Finish it, or stop once it is settled.
+    # Either way another new weapon is not the plan.
+    return False
+
+
+def all_maxed(
+    levels: dict[str, int] | None, evolved: set[str] | frozenset[str] | None = None
+) -> bool:
+    """Every owned weapon is maxed or evolved, and we are not still filling slots.
+
+    A weapon at 8 whose partner is missing is not finished while a slot is
+    free. Calling that all-maxed would open every chest before the evolution
+    exists. Once all six slots are full, a maxed loadout counts even if a
+    partner never showed up.
+    """
+    if not levels:
+        return False
+    done = evolved or set()
+    slots = owned_weapon_slots(levels, done)
+    if not slots:
+        return False
+    for name in slots:
+        if name in done:
+            continue
+        if levels.get(name, 0) < WEAPON_MAX_LEVEL:
+            return False
+    if len(slots) >= MAX_WEAPONS:
+        return True
+    for name in slots:
+        if name in done or name not in EVOLUTION_PAIRS:
+            continue
+        if not _partner_ready(name, levels):
+            return False
+    return not wants_new_weapon(levels, done)
+
+
+def format_inventory(
+    levels: dict[str, int] | None, evolved: set[str] | frozenset[str] | None = None
+) -> str:
     if not levels:
         return "-"
+    done = evolved or set()
     main = main_weapon_name(levels)
     names = sorted((n for n, lv in levels.items() if lv > 0), key=lambda n: (n != main, n))
-    return ",".join(f"{n}:{levels[n]}" for n in names)
+    return ",".join(f"{n}:{levels[n]}{'*' if n in done else ''}" for n in names)
+
+
+def _vocab_hits(text: str, min_score: float = NAME_RETRY_BELOW) -> dict[str, float]:
+    """Best vocabulary match for each 1-3 word window, at or above ``min_score``."""
+    words = re.findall(r"[A-Za-z']+", text or "")
+    best: dict[str, float] = {}
+    for width in (1, 2, 3):
+        if len(words) < width:
+            continue
+        for i in range(len(words) - width + 1):
+            name, score = match_name_score(" ".join(words[i : i + width]))
+            if name and score >= min_score and score > best.get(name, 0.0):
+                best[name] = score
+    return best
+
+
+def evolutions_from_chest_text(text: str) -> set[str]:
+    """Base weapons this chest evolved, when the evolution name is readable.
+
+    Matches the evolution's letters in a row (6 or more) or a vocabulary hit
+    at the card-name threshold. Vandalier returns both birds. An empty or
+    speed-up chest returns nothing.
+    """
+    if not text or not text.strip():
+        return set()
+    found: set[str] = set()
+    letters = re.sub(r"[^a-z]", "", text.lower())
+    for evo, bases in EVOLUTION_BASES.items():
+        key = re.sub(r"[^a-z]", "", evo.lower())
+        if len(key) >= 6 and key in letters:
+            found.update(bases)
+    for name in _vocab_hits(text):
+        found.update(EVOLUTION_BASES.get(name, ()))
+    return found
+
+
+def levels_from_chest_text(text: str) -> dict[str, int]:
+    """One non-evolution item and one level tag. Empty when the screen is ambiguous."""
+    level = parse_level_text(text or "")
+    if level is None:
+        return {}
+    hits = {name: score for name, score in _vocab_hits(text).items() if name not in EVOLUTIONS}
+    names = list(hits)
+    kept: list[str] = []
+    for name in names:
+        words = set(name.lower().split())
+        dominated = False
+        for other in names:
+            if other == name:
+                continue
+            other_words = set(other.lower().split())
+            if words < other_words and hits[other] >= hits[name]:
+                dominated = True
+                break
+        if not dominated:
+            kept.append(name)
+    if len(kept) != 1:
+        return {}
+    return {kept[0]: level}
 
 
 def level_cap(name: str) -> int:
@@ -1396,9 +1613,13 @@ class MenuPilot:
         # Levels come from our own picks, checked against "level N" on the card.
         # Poe starts with Garlic at 1. A contradictory OCR read does not overwrite this.
         self.levels: dict[str, int] = {n: 1 for n in self.start_items if n}
+        # Base weapons a chest has already evolved. Soul Eater marks Garlic;
+        # Vandalier marks both birds. Not a second weapon slot.
+        self.evolved: set[str] = set()
         self._pick_reason = "fallback"
         self._inventory_certain = True
         self._evol_logged = False
+        self._build_state = (False, False)
         self._hp = HpTracker()
         self.saved_results: list[str] = []
         self.tap = tap
@@ -1434,17 +1655,50 @@ class MenuPilot:
 
     @property
     def evolution_ready(self) -> bool:
-        """Main weapon is maxed and its partner is owned. Chests are not retargeted."""
-        return evolution_ready(self.levels)
+        """Some owned weapon is at 8 with its partner and has not evolved yet."""
+        return evolution_ready(self.levels, self.evolved)
+
+    @property
+    def all_maxed(self) -> bool:
+        """Every owned weapon is maxed or evolved, and no new weapon is wanted."""
+        return all_maxed(self.levels, self.evolved)
 
     def _log_evolution_ready(self) -> None:
         if self._evol_logged or not self.evolution_ready:
             return
-        main = main_weapon_name(self.levels)
-        partner = partner_of(main)
+        labels = ready_evolution_labels(self.levels, self.evolved)
+        if not labels:
+            return
         self._evol_logged = True
-        lv = self.levels.get(main or "", 0)
-        self.log(f"[levelup] evolution ready: {main} L{lv} + {partner}")
+        self.log("[levelup] evolution ready: " + ", ".join(labels))
+
+    def _publish_build(self) -> None:
+        """Log the chest-gate flags when they change. Inventory is the snapshot."""
+        flags = (bool(self.evolution_ready), bool(self.all_maxed))
+        if flags == self._build_state:
+            return
+        self._build_state = flags
+        evo, mx = flags
+        inv = format_inventory(self.levels, self.evolved)
+        self.log(f"[build] evo_ready={int(evo)} all_maxed={int(mx)} inv={inv}")
+
+    def _note_chest_reward(self, text: str) -> None:
+        """Mark evolutions, and adopt a single confident level, from chest OCR."""
+        evolved_now = evolutions_from_chest_text(text)
+        for base in evolved_now:
+            self.evolved.add(base)
+            self.owned.add(base)
+            self.levels[base] = max(WEAPON_MAX_LEVEL, self.levels.get(base, 0))
+        for name, lv in levels_from_chest_text(text).items():
+            if name in evolved_now or name in self.evolved:
+                continue
+            held = self.levels.get(name, 0)
+            if held <= 0:
+                self.levels[name] = lv
+                self.owned.add(name)
+            elif lv > held and abs(lv - held) <= 1:
+                self.levels[name] = min(level_cap(name), lv)
+        self._publish_build()
 
     @property
     def hp(self) -> float | None:
@@ -1473,6 +1727,7 @@ class MenuPilot:
         self._hp_ignore_until = 0.0
         self.owned = set(self.start_items)
         self.levels = {n: 1 for n in self.start_items if n}
+        self.evolved = set()
         self._pick_reason = "fallback"
         self._inventory_certain = True
         self._evol_logged = False
@@ -1482,6 +1737,7 @@ class MenuPilot:
         self._banish = None
         self._banish_fails = 0
         self._banish_skip_screen = False
+        self._publish_build()
 
     # -- helpers
     def _game_s(self) -> float | None:
@@ -1767,7 +2023,7 @@ class MenuPilot:
             self.owned.add(taken)
             self.levels[taken] = min(level_cap(taken), self.levels.get(taken, 0) + 1)
         shown = taken or name
-        inv = format_inventory(self.levels)
+        inv = format_inventory(self.levels, self.evolved)
         if not self._inventory_certain:
             inv = f"{inv} (uncertain)"
         reason = self._pick_reason if self._pick_reason in PICK_REASONS else "fallback"
@@ -1777,6 +2033,7 @@ class MenuPilot:
         )
         if self._inventory_certain:
             self._log_evolution_ready()
+        self._publish_build()
         self._target = None
         self._sig = None
 
@@ -1816,7 +2073,7 @@ class MenuPilot:
             if self._chest_streak >= 2:  # two scans in a row: not OCR noise
                 target = {"revive": "revive", "quit": "quit", "results": "done"}.get(kind)
                 where = find_word(words, target) if target else None
-                self._chest_hit = (self.clock(), text[:80], kind, where)
+                self._chest_hit = (self.clock(), text, kind, where)
         else:
             self._chest_streak = 0
             self._chest_hit = None
@@ -1836,6 +2093,7 @@ class MenuPilot:
         if hit is None or now - hit[0] > 2.0 * self.chest_scan_s:
             return None
         kind, where = hit[2], hit[3]
+        shown = (hit[1] or "")[:80]
         if now >= self._next_action:
             if kind == "results":
                 self._save_results(frame)
@@ -1845,11 +2103,11 @@ class MenuPilot:
                     self.refocus()
                     self.click(*where)
                     self._next_action = self.clock() + self.chest_cooldown_s
-                    self.log(f"[{kind}] clicked {label} at {where} ({hit[1]!r})")
+                    self.log(f"[{kind}] clicked {label} at {where} ({shown!r})")
                 else:
                     # The only / highlighted button on these screens.
                     self._press("enter", self.chest_cooldown_s)
-                    self.log(f"[{kind}] Enter on {label} ({hit[1]!r})")
+                    self.log(f"[{kind}] Enter on {label} ({shown!r})")
                 if kind == "revive":
                     self.revives += 1
                     # Pre-death readings are stale; start HP over from the revived bar.
@@ -1863,7 +2121,8 @@ class MenuPilot:
             else:
                 self._press("enter", self.chest_cooldown_s)
                 self.chest_presses += 1
-                self.log(f"[chest] Enter on chest screen ({hit[1]!r})")
+                self.log(f"[chest] Enter on chest screen ({shown!r})")
+                self._note_chest_reward(hit[1] or "")
             self._chest_hit = None
             self._chest_streak = 0  # the next screen must be confirmed by two fresh scans
         self.status = kind.upper()

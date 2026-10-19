@@ -18,15 +18,20 @@ from __future__ import annotations
 import pytest
 
 from vs_vision_bot.menus import (
+    MAX_WEAPONS,
     PASSIVE_MAX_LEVEL,
     WEAPONS,
     Card,
     MenuPilot,
     WEAPON_MAX_LEVEL,
+    all_maxed,
     assess_inventory,
     choose_card,
     choose_pick,
     evolution_ready,
+    evolutions_from_chest_text,
+    levels_from_chest_text,
+    owned_weapon_slots,
     parse_level_text,
 )
 
@@ -218,6 +223,7 @@ def test_birds_are_a_second_project_after_the_main_is_maxed():
 
 
 def test_evolution_ready_is_main_at_8_plus_its_partner():
+    """Main-weapon cases. A side weapon or the birds are covered by the broader flag test."""
     assert not evolution_ready({"Garlic": 7, "Pummarola": 1})
     assert not evolution_ready({"Garlic": 8})
     assert evolution_ready({"Garlic": 8, "Pummarola": 1})
@@ -268,6 +274,179 @@ def test_pilot_logs_the_pick_reason_and_raises_evolution_ready(monkeypatch):
     assert sum(1 for m in logs if m.startswith("[levelup] evolution ready:")) == 1
     pilot.new_run()
     assert pilot.levels == {"Garlic": 1} and pilot.evolution_ready is False and pilot.picks == []
+
+
+def test_evolution_ready_is_any_settled_weapon_not_already_evolved():
+    """Broader than the main weapon: a side weapon at 8 with its passive counts."""
+    bible = {"Garlic": 2, "King Bible": 8, "Spellbinder": 1}
+    assert evolution_ready(bible)
+    assert not all_maxed(bible)  # Garlic is still short of 8
+    assert not evolution_ready({"Garlic": 8, "Pummarola": 1}, {"Garlic"})
+    assert evolution_ready({"Peachone": 8, "Ebony Wings": 8})
+    assert not evolution_ready({"Peachone": 8, "Ebony Wings": 7})
+    assert not evolution_ready({"Peachone": 8, "Ebony Wings": 8}, {"Peachone", "Ebony Wings"})
+    # One label for the union, not one per bird.
+    from vs_vision_bot.menus import ready_evolution_labels
+
+    assert ready_evolution_labels({"Peachone": 8, "Ebony Wings": 8}) == [
+        "Peachone L8 + Ebony Wings L8"
+    ]
+
+
+def test_all_maxed_waits_for_a_partner_unless_the_slots_are_full():
+    """A maxed weapon with no partner is not done while a slot is free.
+
+    Otherwise the chest gate would open every chest before the evolution
+    exists. Six full slots are the exception the flag was defined with.
+    """
+    assert not all_maxed({"Garlic": 8})
+    assert not all_maxed({"Garlic": 8, "Pummarola": 1})  # still wants a second weapon
+    assert not evolution_ready({"Garlic": 8})
+    finished = {"Garlic": 8, "Pummarola": 1, "Magic Wand": 8, "Empty Tome": 1}
+    assert evolution_ready(finished) and all_maxed(finished)
+    assert all_maxed(finished, {"Garlic", "Magic Wand"})
+    assert not evolution_ready(finished, {"Garlic", "Magic Wand"})
+    full = {
+        name: 8
+        for name in (
+            "Garlic",
+            "Magic Wand",
+            "King Bible",
+            "Santa Water",
+            "Runetracer",
+            "Lightning Ring",
+        )
+    }
+    assert len(full) == MAX_WEAPONS
+    assert all_maxed(full) and not evolution_ready(full)
+    birds = {"Garlic": 8, "Pummarola": 1, "Peachone": 8, "Ebony Wings": 8}
+    assert len(owned_weapon_slots(birds, {"Peachone", "Ebony Wings"})) == 2
+    assert evolution_ready(birds, {"Peachone", "Ebony Wings"})
+
+
+def test_chest_text_marks_the_evolved_base_and_ignores_a_stat_chest():
+    assert evolutions_from_chest_text("Treasure Found Soul Eater DONE") == {"Garlic"}
+    assert evolutions_from_chest_text("You got Holy Wand") == {"Magic Wand"}
+    assert evolutions_from_chest_text("Vandalier") == {"Peachone", "Ebony Wings"}
+    assert evolutions_from_chest_text("01:04 bv DONE level:2 [ALL] Base Speed up by 108.") == set()
+    assert evolutions_from_chest_text("01:17 - DONE Lever:3") == set()
+    assert evolutions_from_chest_text("") == set()
+    assert levels_from_chest_text("01:04 bv DONE level:2 [ALL] Base Speed up by 108.") == {}
+    assert levels_from_chest_text("01:17 - DONE Lever:3") == {}
+    assert levels_from_chest_text("Treasure Found Pummarola level:1 DONE") == {"Pummarola": 1}
+    assert levels_from_chest_text("Garlic Armor level:3 DONE") == {}
+    # A wild jump is decided by the pilot; the parser only reports the one item.
+    assert levels_from_chest_text("Garlic level:2 DONE") == {"Garlic": 2}
+
+
+def test_build_flags_and_log_across_a_simulated_run():
+    """Garlic ready, then both weapons maxed, then each chest evolution clears one."""
+    logs: list[str] = []
+    pilot = MenuPilot(tap=lambda _k: None, log=logs.append, settle_frames=1)
+
+    def grant(name: str, times: int = 1) -> None:
+        pilot._names = [name]
+        pilot._chosen = name
+        pilot._pick_reason = "main"
+        pilot._inventory_certain = True
+        for _ in range(times):
+            pilot._record_pick(0)
+
+    assert pilot.evolution_ready is False and pilot.all_maxed is False
+    grant("Pummarola")
+    grant("Garlic", 7)  # 1 -> 8
+    assert [m for m in logs if m.startswith("[build]")] == [
+        "[build] evo_ready=1 all_maxed=0 inv=Garlic:8,Pummarola:1"
+    ]
+    assert pilot.evolution_ready and not pilot.all_maxed
+
+    grant("Magic Wand", 8)
+    grant("Empty Tome")
+    assert [m for m in logs if m.startswith("[build]")] == [
+        "[build] evo_ready=1 all_maxed=0 inv=Garlic:8,Pummarola:1",
+        "[build] evo_ready=1 all_maxed=1 inv=Garlic:8,Empty Tome:1,Magic Wand:8,Pummarola:1",
+    ]
+
+    pilot._note_chest_reward("Treasure Found Soul Eater DONE")
+    assert pilot.evolved == {"Garlic"}
+    assert pilot.levels["Garlic"] == 8
+    assert pilot.evolution_ready and pilot.all_maxed  # the wand can still evolve
+    assert len([m for m in logs if m.startswith("[build]")]) == 2
+
+    pilot._note_chest_reward("You got Holy Wand")
+    assert pilot.evolved == {"Garlic", "Magic Wand"}
+    assert not pilot.evolution_ready and pilot.all_maxed
+    assert [m for m in logs if m.startswith("[build]")][-1] == (
+        "[build] evo_ready=0 all_maxed=1 inv=Garlic:8*,Empty Tome:1,Magic Wand:8*,Pummarola:1"
+    )
+
+    pilot.new_run()
+    assert pilot.evolved == set() and pilot.levels == {"Garlic": 1}
+    assert not pilot.evolution_ready and not pilot.all_maxed
+    assert [m for m in logs if m.startswith("[build]")][-1] == (
+        "[build] evo_ready=0 all_maxed=0 inv=Garlic:1"
+    )
+    # The same flags do not log again.
+    pilot._publish_build()
+    assert sum(m.startswith("[build] evo_ready=0 all_maxed=0") for m in logs) == 1
+
+
+@needs_tesseract
+def test_chest_confirm_parses_an_evolution_past_the_log_snippet():
+    import numpy as np
+
+    logs: list[str] = []
+    pilot = MenuPilot(tap=lambda _k: None, log=logs.append, async_chest=True, settle_frames=1)
+    pilot.levels = {"Garlic": 8, "Pummarola": 1}
+    pilot._publish_build()
+    now = pilot.clock()
+    pilot._last_scan = now
+    pilot._next_action = 0
+    text = ("pad " * 30) + "Soul Eater treasure open"
+    assert len(text) > 80
+    pilot._chest_hit = (now, text, "chest", None)
+    assert pilot._handle_chest(np.zeros((8, 8, 3), np.uint8), now) == "chest"
+    assert "Garlic" in pilot.evolved
+    assert pilot.chest_presses == 1
+    chest_logs = [m for m in logs if m.startswith("[chest]")]
+    assert len(chest_logs) == 1 and "Soul Eater" not in chest_logs[0]
+    assert any(m.startswith("[build] evo_ready=0 all_maxed=0") for m in logs)
+
+
+def test_chest_level_adopts_an_unknown_item_and_ignores_a_wild_jump():
+    logs: list[str] = []
+    pilot = MenuPilot(tap=lambda _k: None, log=logs.append)
+    pilot._note_chest_reward("01:17 - DONE Lever:3")
+    pilot._note_chest_reward("01:04 bv DONE level:2 [ALL] Base Speed up by 108.")
+    assert pilot.levels == {"Garlic": 1} and pilot.evolved == set()
+    pilot._note_chest_reward("Treasure Found Pummarola level:1 DONE")
+    assert pilot.levels["Pummarola"] == 1
+    pilot.levels["Garlic"] = 8
+    pilot._note_chest_reward("Garlic level:2 DONE treasure")
+    assert pilot.levels["Garlic"] == 8  # not lowered
+    pilot._note_chest_reward("Pummarola level:2 DONE")
+    assert pilot.levels["Pummarola"] == 2
+
+
+def test_sync_build_state_skips_a_navigator_without_the_method():
+    from vs_vision_bot.main import sync_build_state
+
+    pilot = MenuPilot(tap=lambda _k: None, log=lambda _m: None)
+    pilot.levels = {"Garlic": 8, "Pummarola": 1}
+    sync_build_state(object(), pilot)  # no set_build_state: the PR still runs
+
+    seen: list[tuple[bool, bool]] = []
+
+    class _Nav:
+        def set_build_state(self, evolution_ready: bool, all_maxed: bool) -> None:
+            seen.append((evolution_ready, all_maxed))
+
+    sync_build_state(_Nav(), pilot)
+    assert seen == [(True, False)]
+    pilot.levels["Magic Wand"] = 8
+    pilot.levels["Empty Tome"] = 1
+    sync_build_state(_Nav(), pilot)
+    assert seen[-1] == (True, True)
 
 
 @pytest.mark.parametrize(
