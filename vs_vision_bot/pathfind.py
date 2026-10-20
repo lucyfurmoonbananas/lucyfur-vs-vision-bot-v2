@@ -62,7 +62,9 @@ continues from that heading, so the character keeps sweeping in big loops
 instead of being boxed in. After a REVIVE, ``request_revive_escape`` (built on
 ``request_flee``) runs a committed ~3 s escape toward the least threat-dense
 side: steering stays within ~45 deg of that heading, the heading is only re-aimed
-early or when its corridor is clearly shut, and it never turns back. If the ring
+early or when its corridor is clearly shut, and it never turns back. Each
+direction is scored only out to its own screen edge (``escape_equal_view``),
+so a uniform crowd does not always leave north or south. If the ring
 is still closed after that, or the crowd is still close, the escape continues
 (up to 12 s) but the heading is re-picked toward the open corridor only while
 the ring stays closed.
@@ -156,6 +158,8 @@ class Tuning:
     low_hp: float = 0.5
     # Below this, wider berth and no gem or chest chase. 0 disables.
     critical_hp: float = 0.20
+    # Same exit as menus.HP_CRITICAL_EXIT. A 0.25 median does not leave critical.
+    critical_exit_hp: float = 0.40
     # High-HP dive. Garlic kills inside ~40 px (sim aura) and the engage standoff
     # is 34, but the danger kernel is 42 and the kite's near band is 110, so a
     # full bar still arcs wide of the aura. At dive_hp_hi the step kernel and
@@ -190,6 +194,11 @@ class Tuning:
     escape_len: float = 420.0         # corridor length when picking the escape heading
     escape_wedge_radius: float = 480.0  # crowd within this radius counts for the wedge term
     escape_wedge_gain: float = 0.5    # weight of whole-screen wedge density vs. corridor
+    # Silo: a uniform crowd makes the long east/west cast look denser, so a
+    # revive kept leaving north or south. 1 scores each direction by the crowd
+    # inside its own screen-edge reach (shared scale floored at 160px). 0 is
+    # the old fixed-length cast. VS_TUNE=escape_equal_view=0.
+    escape_equal_view: float = 1.0
     escape_repick_s: float = 0.5      # early window (REVIVE escapes only): first frames may be stale
     escape_repick_ratio: float = 1.25  # early re-pick only when clearly better
     escape_switch_ratio: float = 3.0  # later: switch only when the corridor is clearly shut
@@ -494,22 +503,95 @@ def corridor_costs(points: np.ndarray, px: float, py: float, length: float = 320
     return _fill_short_side(out, px, py)
 
 
+# Equal-view scale floor (Silo). A nearer border does not shrink every ray to
+# that distance; each ray stops at its own edge, and this only sets the
+# density scale so a uniform field still ties.
+ESCAPE_EQUAL_MIN = 160.0
+
+
+def _view_edges(px: float, py: float) -> np.ndarray:
+    return np.array(
+        [_edge_distance(px, py, float(ux), float(uy)) for ux, uy in _UNIT],
+        dtype=np.float32,
+    )
+
+
+def _corridor_sums(
+    points: np.ndarray, px: float, py: float, lengths: np.ndarray, width: float,
+) -> np.ndarray:
+    """Crowd weight along each direction, out to that direction's own length."""
+    out = np.zeros(len(DIRS), dtype=np.float32)
+    if points.shape[0] == 0:
+        return out
+    rel = points[:, :2] - np.array([px, py], dtype=np.float32)
+    for i, (ux, uy) in enumerate(_UNIT):
+        length = float(lengths[i])
+        proj = rel[:, 0] * ux + rel[:, 1] * uy
+        perp = np.abs(rel[:, 0] * uy - rel[:, 1] * ux)
+        inside = (proj > -10) & (proj < length) & (perp < width + 0.3 * np.clip(proj, 0, None))
+        if not np.any(inside):
+            continue
+        out[i] = float((points[inside, 2] / (1.0 + np.clip(proj[inside], 0, None) / 110.0)).sum())
+    return out
+
+
+def _wedge_sums(points: np.ndarray, px: float, py: float, radii: np.ndarray) -> np.ndarray:
+    """3-sector wedge weight, each direction capped at its own radius."""
+    wedge = np.zeros(len(DIRS), dtype=np.float32)
+    if points.shape[0] == 0:
+        return wedge
+    rel = points[:, :2] - np.array([px, py], dtype=np.float32)
+    dist = np.hypot(rel[:, 0], rel[:, 1])
+    for i, (ux, uy) in enumerate(_UNIT):
+        radius = float(radii[i])
+        keep = dist < radius
+        if not np.any(keep):
+            continue
+        prof = sector_profile(points[keep], px, py, radius)
+        k = int(((math.atan2(float(uy), float(ux)) + math.pi) / (2 * math.pi) * N_SECTORS)) % N_SECTORS
+        wedge[i] = (
+            prof[(k - 1) % N_SECTORS] + prof[k] + prof[(k + 1) % N_SECTORS]
+        )
+    return wedge
+
+
 def escape_costs(points: np.ndarray, px: float, py: float, tune: "Tuning") -> np.ndarray:
     """Per-direction cost for the post-REVIVE escape (low = least threat density).
 
     A long corridor cast (what is directly in the way) plus the crowd weight in a
     wide 3-sector (~67 deg) wedge out to most of the screen, so the heading points
     at the emptiest side / edge rather than at a thin gap between two walls.
+
+    With ``escape_equal_view`` each ray stops at that direction's screen edge
+    and the sums are scaled to one length, so a uniform crowd ties and the
+    revive runway break can take east or west. A single nearest-edge cap would
+    hide a wall that sits just past the short border on the long runway.
     """
-    costs = corridor_costs(points, px, py, tune.escape_len, tune.corridor_width)
-    prof = sector_profile(points, px, py, tune.escape_wedge_radius)
-    if prof.sum() <= 0:
-        return costs
-    wedge = np.zeros(len(DIRS), dtype=np.float32)
-    for i, (ux, uy) in enumerate(_UNIT):
-        k = int(((math.atan2(uy, ux) + math.pi) / (2 * math.pi) * N_SECTORS)) % N_SECTORS
-        wedge[i] = prof[(k - 1) % N_SECTORS] + prof[k] + prof[(k + 1) % N_SECTORS]
-    return costs + tune.escape_wedge_gain * wedge
+    if tune.escape_equal_view <= 0:
+        costs = corridor_costs(points, px, py, tune.escape_len, tune.corridor_width)
+        prof = sector_profile(points, px, py, tune.escape_wedge_radius)
+        if prof.sum() <= 0:
+            return costs
+        wedge = np.zeros(len(DIRS), dtype=np.float32)
+        for i, (ux, uy) in enumerate(_UNIT):
+            k = int(((math.atan2(uy, ux) + math.pi) / (2 * math.pi) * N_SECTORS)) % N_SECTORS
+            wedge[i] = prof[(k - 1) % N_SECTORS] + prof[k] + prof[(k + 1) % N_SECTORS]
+        return costs + tune.escape_wedge_gain * wedge
+
+    edges = _view_edges(px, py)
+    lengths = np.maximum(np.minimum(edges, np.float32(tune.escape_len)), 1.0)
+    radii = np.minimum(lengths, np.float32(tune.escape_wedge_radius))
+    raw = _corridor_sums(points, px, py, lengths, tune.corridor_width)
+    raw = raw + tune.escape_wedge_gain * _wedge_sums(points, px, py, radii)
+    ref = min(float(tune.escape_len), max(ESCAPE_EQUAL_MIN, float(edges.min())))
+    scaled = raw * (np.float32(ref) / lengths)
+    # Same 0.4 unseen-space weight corridor_costs uses, but from the real
+    # edges. Without it every empty ray is an exact 0 and the early re-pick
+    # clings to a 45 deg side-step of the heading it should leave.
+    longest = float(edges.max())
+    if longest > 1.0:
+        scaled = scaled + np.float32(0.4) * np.clip((longest - edges) / longest, 0, None)
+    return _fill_short_side(scaled, px, py)
 
 
 def rollout_costs(
@@ -1037,6 +1119,7 @@ class Navigator:
         self._escape_reason = "revive"  # "revive" or "ring" (flower-window commit)
         self._revive_held = False       # logged the surrounded-hold extension once
         self._revive_ring = False       # this revive escape has seen a closed ring
+        self._revive_clear_s = 0.0      # how long the post-hold field has stayed clear
         self._aim_hint = None           # chest or arrow on the frame that picks a heading
         self._last_break_dir: tuple[float, float] | None = None  # heading of the last breakout
         self._last_break_end = -1e9     # game_s when it ended
@@ -1139,6 +1222,7 @@ class Navigator:
         self._escape_pending = True
         self._revive_held = False
         self._revive_ring = False
+        self._revive_clear_s = 0.0
         return dur
 
     def _end_breakout(self) -> None:
@@ -1476,7 +1560,7 @@ class Navigator:
             self._request_escape(t.ring_commit_s, "ring")
         self._start_breakout(pts, px, py)
 
-    def _hold_revive_escape(self, t: Tuning, pts: np.ndarray, px: float, py: float) -> bool:
+    def _hold_revive_escape(self, t: Tuning, pts: np.ndarray, px: float, py: float, dt: float) -> bool:
         """Keep a post-revive heading until the crowd is actually clear.
 
         A closed ring (cover at or above ``cover_trigger``) holds. A revive that
@@ -1484,17 +1568,36 @@ class Navigator:
         still at or above ``safe_danger`` (test3: cover fell 0.94 -> 0.31 and
         the 12s hold never armed, then kite resumed at danger 0.7 and the ring
         shut again). A crowd that was never a ring still ends at
-        ``revive_escape_s``. Open ground ends the hold. The cap is
-        ``revive_escape_max_s``.
+        ``revive_escape_s`` once HP is a trusted reading. While HP is critical
+        (the post-revive blind, or a real low read) the escape continues until
+        danger and cover are both down, up to ``revive_escape_max_s``. One
+        quiet frame is not that clearance.
         """
         if self._escape_reason != "revive":
             return False
         danger = 0.0
         if pts is not None and len(pts):
             danger = float(_danger_at(pts, np.array([px]), np.array([py]), t.radius)[0])
-        opened_but_close = self._revive_ring and danger >= t.safe_danger
-        if self.cover < t.cover_trigger and not opened_but_close:
-            return False
+        clear = danger < t.safe_danger and self.cover < t.cover_trigger
+        surrounded = self.cover >= t.cover_trigger or (
+            self._revive_ring and danger >= t.safe_danger
+        )
+        if self._critical_on and not clear:
+            surrounded = True
+        if not surrounded:
+            # A hold that has started waits out one quiet frame, then rechecks.
+            # Granting the usual half second here would swallow the empty-field
+            # tests before a second clear sample arrived.
+            if not self._revive_held or self._revive_clear_s > 0:
+                return False
+            self._revive_clear_s = dt
+            room = t.revive_escape_max_s - self._escape_s
+            if room <= 1e-3:
+                return False
+            self._escape_remaining = min(1e-3, room)
+            self._flee_remaining = self._escape_remaining
+            return True
+        self._revive_clear_s = 0.0
         room = t.revive_escape_max_s - self._escape_s
         if room <= 1e-3:
             return False
@@ -1543,7 +1646,7 @@ class Navigator:
         self._escape_remaining = max(0.0, self._escape_remaining - dt)
         self._flee_remaining = self._escape_remaining
         if self._escape_remaining <= 0:
-            if not self._hold_revive_escape(t, pts, px, py):
+            if not self._hold_revive_escape(t, pts, px, py, dt):
                 self._keep_orbit(self.breakout)
                 self.log(f"[nav] {self._escape_reason} escape done {_nearest_dir(self.breakout)} game~{self.game_s:.0f}s")
                 self._end_breakout()
@@ -2342,13 +2445,47 @@ class Navigator:
         self.last = dec
         return dec
 
+    def _hot_crowd(self) -> bool:
+        if self.cover >= self.tune.cover_rising:
+            return True
+        last = self.last
+        return last is not None and last.danger_here >= self.tune.safe_danger
+
+    def _crowd_hp_caution(self, hp: float) -> bool:
+        """HP still above 0.20, but falling or already under the exit, in a crowd.
+
+        test4 nav lines sit at 0.31–0.50 with danger 2–4, then the latch logs
+        0.00 about 2s before death. The upward spike filter is not dropping
+        those reads; the enter line is. Unknown HP is not a reading.
+        """
+        if hp >= self.tune.low_hp or not self._hot_crowd():
+            return False
+        if hp < self.tune.critical_exit_hp:
+            return True
+        if not self._hp_hist:
+            return False
+        peak = max(h for _, h in self._hp_hist)
+        return peak - hp >= 0.15
+
     def _note_critical(self, hp: float | None) -> None:
-        """Log the edges of the critical-HP band. The [nav] mode carries the tag."""
-        on = hp is not None and self.tune.critical_hp > 0 and hp < self.tune.critical_hp
+        """Log the edges of the critical-HP band. The [nav] mode carries the tag.
+
+        An unknown bar does not change the latch. Leaving takes a reading at
+        or above ``critical_exit_hp``, and not while the crowd caution holds.
+        """
+        if self.tune.critical_hp <= 0:
+            return
+        if hp is None:
+            return
+        caution = self._crowd_hp_caution(hp)
+        if self._critical_on:
+            on = hp < self.tune.critical_exit_hp or caution
+        else:
+            on = hp < self.tune.critical_hp or caution
         if on == self._critical_on:
             return
         self._critical_on = on
-        shown = "?" if hp is None else f"{hp:.2f}"
+        shown = f"{hp:.2f}"
         self.log(f"[nav] critical HP {'on' if on else 'off'} hp={shown} game~{self.game_s:.0f}s")
 
 

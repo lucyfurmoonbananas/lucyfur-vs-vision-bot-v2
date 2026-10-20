@@ -92,6 +92,32 @@ def test_frozen_screen_ends_the_run_with_exit_3(frozen_game, capsys):
     assert "keys released, goodbye" in out
 
 
+def test_identical_capture_ends_before_the_long_watchdog(frozen_game, capsys):
+    frozen_game.setenv("VS_WATCHDOG_S", "30")
+    frozen_game.setenv("VS_STALE_FRAME_S", "0.2")
+    frozen_game.setattr(m, "ScreenCapture", FakeCapture)
+    assert m.main(["--dry-run"]) == m.EXIT_WATCHDOG
+    out = capsys.readouterr().out
+    assert "[watchdog] STALL reason=stale_frame" in out
+    assert "reason=frozen_frame" not in out
+
+
+class _MenuVision(FakeVision):
+    def analyze(self, frame):
+        return VisionResult(player=(48, 27), timer_s=None, size=(96, 54), menu=True)
+
+
+def test_identical_menu_does_not_use_the_fast_stale_path(frozen_game, capsys):
+    frozen_game.setenv("VS_WATCHDOG_S", "0.35")
+    frozen_game.setenv("VS_STALE_FRAME_S", "0.05")
+    frozen_game.setattr(m, "ScreenCapture", FakeCapture)
+    frozen_game.setattr(m, "Vision", _MenuVision)
+    assert m.main(["--dry-run"]) == m.EXIT_WATCHDOG
+    out = capsys.readouterr().out
+    assert "[watchdog] STALL reason=frozen_frame" in out
+    assert "reason=stale_frame" not in out
+
+
 def test_capture_that_keeps_failing_ends_the_run(frozen_game, capsys):
     frozen_game.setattr(m, "ScreenCapture", lambda cfg: FakeCapture(cfg, fail=True))
     assert m.main(["--dry-run"]) == m.EXIT_WATCHDOG

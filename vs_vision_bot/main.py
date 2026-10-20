@@ -160,6 +160,20 @@ class DeathTrace:
         return paths
 
 
+def format_logged_hp(median: float | None, acted: float | None) -> str:
+    """HP text for nav logs.
+
+    The tracker median is ``?`` while a revive is still blind. Nav may already
+    be acting on 0.0 (low_held). Show that, so the line is not read as healthy.
+    """
+    base = "?" if median is None else f"{median:.2f}"
+    if acted is None:
+        return base
+    if median is None or abs(float(acted) - float(median)) > 0.02:
+        return f"{base} nav={float(acted):.2f}"
+    return base
+
+
 def _pilot_progress(pilot: object) -> tuple[int, int]:
     """(level-up picks, chest confirms) seen so far. Stubs may omit both."""
     return (len(getattr(pilot, "picks", ())), int(getattr(pilot, "chest_presses", 0)))
@@ -347,7 +361,10 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, handle_stop)
 
     # No-progress watchdogs (monotonic clock: a VM pause does not trip them).
-    watchdog = ProgressWatchdog(limit_s=0 if cfg.demo else cfg.watchdog_s)
+    watchdog = ProgressWatchdog(
+        limit_s=0 if cfg.demo else cfg.watchdog_s,
+        identical_s=0 if cfg.demo else cfg.stale_frame_s,
+    )
     heartbeat = LoopHeartbeat(
         lambda stall: _abort_blocked_loop(stall, mover.shutdown),
         limit_s=0 if cfg.demo else cfg.loop_stall_s,
@@ -464,15 +481,14 @@ def main(argv: list[str] | None = None) -> int:
                         now_obs, read_hp_fraction(frame), pilot.hp, None, menu_kind or "menu", frame,
                     )
             else:
-                decision = nav.step(
-                    result, hp=hp_for_nav(
-                        pilot.hp,
-                        getattr(pilot, "hp_blind", False),
-                        getattr(pilot, "hp_low_held", False),
-                    ),
+                acted_hp = hp_for_nav(
+                    pilot.hp,
+                    getattr(pilot, "hp_blind", False),
+                    getattr(pilot, "hp_low_held", False),
                 )
+                decision = nav.step(result, hp=acted_hp)
                 vector, keys = decision.vector, cfg.keys_for_vector(decision.vector)
-                hp_txt = "?" if pilot.hp is None else f"{pilot.hp:.2f}"
+                hp_txt = format_logged_hp(pilot.hp, acted_hp)
                 result.note = f"{decision.mode} d={decision.danger_here:.1f} hp={hp_txt}{menu_hint}"
                 now_obs = time.monotonic()
                 if now_obs - last_nav_log[0] >= 3.0:
@@ -504,7 +520,7 @@ def main(argv: list[str] | None = None) -> int:
                 bus.toggle_pause()
                 mover.set_paused(True)
 
-            stall = watchdog.update(frame, paused=bus.paused)
+            stall = watchdog.update(frame, paused=bus.paused, in_menu=bool(result.menu))
             if stall is not None:
                 nav.log_gem_summary()
                 print(f"[watchdog] STALL {stall.describe()} game~{nav.game_s:.0f}s -> ending run (exit {EXIT_WATCHDOG})")
