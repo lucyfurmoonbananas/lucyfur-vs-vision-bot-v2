@@ -156,6 +156,18 @@ class Tuning:
     low_hp: float = 0.5
     # Below this, wider berth and no gem or chest chase. 0 disables.
     critical_hp: float = 0.20
+    # High-HP dive. Garlic kills inside ~40 px (sim aura) and the engage standoff
+    # is 34, but the danger kernel is 42 and the kite's near band is 110, so a
+    # full bar still arcs wide of the aura. At dive_hp_hi the step kernel and
+    # danger_gain shrink by dive_radius_scale (42 -> ~29, inside the aura) and
+    # gems keep pulling up to gem_danger * dive_gem_gain. Fades out at dive_hp_lo.
+    # dive_radius_scale 1.0 turns the whole dive off, gem fade included. Low HP,
+    # critical HP, and kite_floor escapes (wall commit, flower, revive) ignore it.
+    # VS_TUNE=dive_radius_scale=1
+    dive_hp_hi: float = 0.75
+    dive_hp_lo: float = 0.5
+    dive_radius_scale: float = 0.7
+    dive_gem_gain: float = 1.5
     # Encirclement breakout.
     sector_radius: float = 260.0   # crowd within this radius counts for encirclement
     sector_thr: float = 0.30       # per-sector density that counts as "occupied"
@@ -228,7 +240,8 @@ class Tuning:
     # collecting them. That pull is a sum of unit vectors weighted 1/(1+d/80): a gem 300 px
     # away adds ~0.2, and gems scattered around the wide-circle trail cancel out, so the
     # kite bias (1.0) + hysteresis (0.35) win. On top of it, aim at ONE gem: the one with
-    # the most gems within gem_cluster_r per distance (score count / (1 + d/150)), with a
+    # the most XP-value within gem_cluster_r per distance (score sum(value) / (1 + d/150);
+    # blue is 1, so an all-blue screen still scores as a count), with a
     # pull that does not decay with distance or cancel. Same gates as the gem pull (inside
     # gem_radius, fades with gem_danger, off at low HP / in flee-escapes). Only before
     # early_gem_until_s via gem_tune_for (late game unchanged). 0 disables.
@@ -390,6 +403,23 @@ class Decision:
     scores: dict[tuple[int, int], float] = field(default_factory=dict)
     danger_here: float = 0.0
     mode: str = ""
+    dive: float = 0.0  # 0 = today's caution; 1 = full high-HP dive
+
+
+def dive_level(hp: float | None, tune: Tuning) -> float:
+    """Aggression from HP, 0 at ``dive_hp_lo`` and 1 at ``dive_hp_hi``.
+
+    ``dive_radius_scale`` 1.0 forces 0, so radius, danger_gain, and the gem
+    fade all come back exactly. Unknown HP is not high. The low band and
+    critical HP stay at 0 even if the anchors are tuned down over them.
+    """
+    if hp is None or tune.dive_radius_scale == 1.0:
+        return 0.0
+    if tune.dive_hp_hi <= tune.dive_hp_lo or hp <= tune.dive_hp_lo:
+        return 0.0
+    if hp < tune.low_hp or (tune.critical_hp > 0 and hp < tune.critical_hp):
+        return 0.0
+    return float(min(1.0, (hp - tune.dive_hp_lo) / (tune.dive_hp_hi - tune.dive_hp_lo)))
 
 
 def _danger_at(points: np.ndarray, sx: np.ndarray, sy: np.ndarray, radius: float) -> np.ndarray:
@@ -531,31 +561,90 @@ def rollout_costs(
     return _fill_short_side((c1 + c2.min(axis=1)) / tune.rollout_steps, px, py)
 
 
+# XP weights. Blue is the common gem. Green and red are worth more, but the
+# target score is still value / (1 + d/150), so a far red loses to a near gem.
+# Anything that is not one of these colours counts as blue.
+GEM_VALUE = {"blue": 1.0, "green": 1.7, "red": 2.4}
+
+
+def gem_value(color: str | None) -> float:
+    """XP weight of a gem colour. Unknown and missing colours count as blue."""
+    if color in GEM_VALUE:
+        return GEM_VALUE[color]
+    return GEM_VALUE["blue"]
+
+
+def _gem_xy_val(gems):
+    """Gem centers and per-gem weights. A missing third column is blue (1)."""
+    g = np.asarray(gems, dtype=np.float32)
+    if g.size == 0:
+        return np.zeros((0, 2), np.float32), np.ones((0,), np.float32)
+    if g.ndim == 1:
+        g = g.reshape(-1, 2)
+    xy = g[:, :2]
+    val = g[:, 2] if g.shape[1] >= 3 else np.ones(g.shape[0], np.float32)
+    return xy, val
+
+
+def gems_with_values(gems, colors) -> list:
+    """``(x, y, value)`` rows. No colour list leaves the positions untouched."""
+    if not gems or not colors:
+        return gems
+    out = []
+    for i, g in enumerate(gems):
+        color = colors[i] if i < len(colors) else "blue"
+        out.append((float(g[0]), float(g[1]), gem_value(color)))
+    return out
+
+
+def seek_gem_color(gems, colors, px, py, radius, cluster_r) -> str:
+    """Colour of the gem a seek would walk to, or "" when none is in range.
+
+    A missing or unknown colour counts as blue.
+    """
+    if not gems:
+        return ""
+    tgt = gem_target(gems_with_values(gems, colors), px, py, radius, cluster_r)
+    if tgt is None:
+        return ""
+    best_i, best_d = 0, 1e18
+    for i, g in enumerate(gems):
+        dist = (float(g[0]) - tgt[0]) ** 2 + (float(g[1]) - tgt[1]) ** 2
+        if dist < best_d:
+            best_i, best_d = i, dist
+    if colors and best_i < len(colors) and colors[best_i] in GEM_VALUE:
+        return colors[best_i]
+    return "blue"
+
+
 def gems_in_range(gems, px: float, py: float, radius: float) -> int:
     """Number of gem positions within ``radius`` px of the player (None / empty -> 0)."""
     if not gems:
         return 0
-    g = np.asarray(gems, dtype=np.float32).reshape(-1, 2)
-    return int((np.hypot(g[:, 0] - px, g[:, 1] - py) < radius).sum())
+    xy, _val = _gem_xy_val(gems)
+    return int((np.hypot(xy[:, 0] - px, xy[:, 1] - py) < radius).sum())
 
 
 def gem_target(gems, px: float, py: float, radius: float, cluster_r: float) -> tuple[float, float] | None:
-    """Gem to walk to: most gems within ``cluster_r`` of it per distance, inside ``radius``.
+    """Gem to walk to: most XP-value within ``cluster_r`` of it per distance, inside ``radius``.
 
-    Score = cluster count / (1 + d / 150): a near single gem beats a far one, a clump of
-    gems a bit farther beats a lone near one. None when no gem is within ``radius``.
+    Score = sum of values in the cluster / (1 + d / 150). A missing value counts as
+    blue (1), so an all-blue screen scores exactly as a gem count. A near gem beats
+    a far one; a red beats a closer blue when it is not far. None when nothing is
+    within ``radius``.
     """
     if gems is None or len(gems) == 0:
         return None
-    g = np.asarray(gems, dtype=np.float32).reshape(-1, 2)
-    d = np.hypot(g[:, 0] - px, g[:, 1] - py)
-    g, d = g[d < radius], d[d < radius]
-    if g.shape[0] == 0:
+    xy, val = _gem_xy_val(gems)
+    d = np.hypot(xy[:, 0] - px, xy[:, 1] - py)
+    keep = d < radius
+    xy, d, val = xy[keep], d[keep], val[keep]
+    if xy.shape[0] == 0:
         return None
-    pair = np.hypot(g[:, None, 0] - g[None, :, 0], g[:, None, 1] - g[None, :, 1])
-    count = (pair < cluster_r).sum(axis=1).astype(np.float32)
-    i = int(np.argmax(count / (1.0 + d / 150.0)))
-    return float(g[i, 0]), float(g[i, 1])
+    pair = np.hypot(xy[:, None, 0] - xy[None, :, 0], xy[:, None, 1] - xy[None, :, 1])
+    weight = ((pair < cluster_r) * val[None, :]).sum(axis=1)
+    i = int(np.argmax(weight / (1.0 + d / 150.0)))
+    return float(xy[i, 0]), float(xy[i, 1])
 
 
 def engage_pull(
@@ -626,12 +715,22 @@ def score_directions(
         kite_mul = 0.7 if defensive else 1.0
         rollout_mul = 1.8 if defensive else 1.0
 
+    # High HP dives: a smaller step kernel and a smaller danger weight, so the
+    # tangent beats the wide outward diagonal. ``here`` stays on the unscaled
+    # radius (chest fade, panic, logged danger). kite_floor is a committed
+    # escape / orbit and does not dive. Contact and the chase rollout stay put.
+    level = 0.0 if kite_floor else dive_level(hp, tune)
+    radius_scale = 1.0 + (tune.dive_radius_scale - 1.0) * level
+    gem_mul = 1.0 + (tune.dive_gem_gain - 1.0) * level
+    danger_gain *= radius_scale
+    step_radius = radius * radius_scale
+
     here = float(_danger_at(pts, np.array([px]), np.array([py]), radius)[0])
     nx = px + _UNIT[:, 0] * tune.step_near
     ny = py + _UNIT[:, 1] * tune.step_near
     fx = px + _UNIT[:, 0] * tune.step_far
     fy = py + _UNIT[:, 1] * tune.step_far
-    danger = _danger_at(pts, nx, ny, radius) + 0.6 * _danger_at(pts, fx, fy, radius * 1.4)
+    danger = _danger_at(pts, nx, ny, step_radius) + 0.6 * _danger_at(pts, fx, fy, step_radius * 1.4)
     contact = _path_contact(pts, px, py, tune.step_far, body)
     scores = -(danger_gain * danger + tune.contact_gain * contact)
     if critical:
@@ -651,7 +750,10 @@ def score_directions(
         norm = math.hypot(kx, ky) or 1.0
         scores = scores + kite_scale * (_UNIT[:, 0] * kx / norm + _UNIT[:, 1] * ky / norm)
 
-    gem_scale = max(0.0, 1.0 - here / tune.gem_danger) if tune.gem_danger > 0 else 0.0
+    # dive_gem_gain extends the fade (moderate danger still pulls). At zero
+    # danger the scale is already 1, so a safe chest-vs-gem choice is unchanged.
+    gem_cap = tune.gem_danger * gem_mul
+    gem_scale = max(0.0, 1.0 - here / gem_cap) if gem_cap > 0 else 0.0
     gem_mask = None
     if gem_forward and kite_dir is not None and gem_scale > 0:
         kx, ky = float(kite_dir[0]), float(kite_dir[1])
@@ -662,21 +764,24 @@ def score_directions(
         # XP matters as much as dodging (live run8: level 6 at 3:53 with dozens of
         # gems left on screen), so gems pull at moderate danger too, fading out as
         # the crowd gets closer.
-        g = np.asarray(gems, dtype=np.float32).reshape(-1, 2)
-        gd = np.hypot(g[:, 0] - px, g[:, 1] - py)
-        close = g[gd < tune.gem_radius]
-        if close.shape[0]:
+        xy, val = _gem_xy_val(gems)
+        gd = np.hypot(xy[:, 0] - px, xy[:, 1] - py)
+        close = gd < tune.gem_radius
+        if int(close.sum()):
             pull = np.zeros(len(DIRS), dtype=np.float32)
-            for gx, gy in close:
-                vx, vy = gx - px, gy - py
+            for gx, gy, gv in zip(xy[close, 0], xy[close, 1], val[close]):
+                vx, vy = float(gx) - px, float(gy) - py
                 d = math.hypot(vx, vy) or 1.0
-                pull += (_UNIT[:, 0] * vx / d + _UNIT[:, 1] * vy / d) / (1.0 + d / 80.0)
+                pull += float(gv) * (_UNIT[:, 0] * vx / d + _UNIT[:, 1] * vy / d) / (1.0 + d / 80.0)
             bonus = tune.gem_gain * gem_scale * np.clip(pull, -1.5, 1.5)
             if gem_mask is not None:
                 bonus = np.where(gem_mask, np.maximum(bonus, 0.0), 0.0)
             scores = scores + bonus
             if tune.gem_target_gain > 0:
-                tgt = gem_target(close, px, py, tune.gem_radius, tune.gem_cluster_r)
+                tgt = gem_target(
+                    np.column_stack((xy[close], val[close])),
+                    px, py, tune.gem_radius, tune.gem_cluster_r,
+                )
                 if tgt is not None:
                     vx, vy = tgt[0] - px, tgt[1] - py
                     d = math.hypot(vx, vy)
@@ -727,8 +832,8 @@ def score_directions(
         mode = "roam"
     if idle_ok and not toward_chest and here < tune.safe_danger * 0.5:
         table[(0, 0)] = table[best] + 0.1
-        return Decision((0, 0), table, here, "hold")
-    return Decision(best, table, here, mode)
+        return Decision((0, 0), table, here, "hold", dive=level)
+    return Decision(best, table, here, mode, dive=level)
 
 
 # How far to extend a ray's own density across the part of the screen the
@@ -863,17 +968,24 @@ def chest_status(result: VisionResult) -> str:
 
 def gem_status(nav: Navigator) -> str:
     """Running gem-seek activations and XP-bar pickup proxy for the ``[nav]`` line."""
-    return f"gem_seek={nav.gem_seeks} gem_pickups={nav.gem_pickups}"
+    text = f"gem_seek={nav.gem_seeks} gem_pickups={nav.gem_pickups}"
+    color = nav.gem_target_color
+    if color:
+        text = f"{text} gem_target={color}"
+    return text
 
 
 def format_gem_summary(nav: Navigator) -> str:
     """One line for the end of a run: counts plus pickups per minute of game time."""
     minutes = nav.game_s / 60.0
     rate = nav.gem_pickups / minutes if minutes >= 1.0 / 60.0 else 0.0
-    return (
+    text = (
         f"[gems] seeks={nav.gem_seeks} pickups={nav.gem_pickups} "
         f"game~{nav.game_s:.0f}s {rate:.1f}/min"
     )
+    if nav.gem_red or nav.gem_green or nav.gem_blue:
+        text = f"{text} red={nav.gem_red} green={nav.gem_green} blue={nav.gem_blue}"
+    return text
 
 
 # HUD timer OCR plausibility (see Navigator._sync_timer).
@@ -936,12 +1048,17 @@ class Navigator:
         self._chest_miss_n = 0
         self.gem_seeks = 0          # times the roam gem-seek boost turned on
         self.gem_pickups = 0        # XP-bar rises (pickup proxy; a level-up drop does not count)
+        self.gem_red = 0            # of those seeks, how many locked a red / green / blue
+        self.gem_green = 0
+        self.gem_blue = 0
+        self.gem_target_color = ""  # colour of the gem the current seek is walking to
         self._gem_seeking = False
         self._xp: float | None = None
         self._gem_summary_logged = False
         self._tie_bias = 0.0  # orbit radians kept across breakout-heading snaps
         self._spun = 0.0      # orbit radians since the last snap
         self._critical_on = False
+        self.dive = 0.0  # aggression applied on the last step (0 during escapes)
         self._world = (0.0, 0.0)  # player position; the camera follows, so this is dead-reckoned
         self._leash: tuple[float, float] | None = None  # last chest, same coordinates
         self._leash_kind = ""
@@ -1817,8 +1934,27 @@ class Navigator:
             radius = max(radius, t.chest_hold_keepout)
         return radius
 
-    def _leash_chase(self, danger: float) -> str:
+    def _open_clear_danger(self, hp: float | None) -> float:
+        """Danger that drops an openable chest. Held chests stay on the knob.
+
+        Full dive walks into crowds whose ``danger_here`` sits between
+        ``chest_clear_danger`` (3) and ``chest_commit_fade`` (4.5). Cutting
+        the chase off at 3 is why a chest on the nav line was ignored: the
+        latch and the leash both released, and the heading matched the
+        no-chest escape. ``dive_radius_scale`` 1, low HP, and unknown HP stay
+        on the old cutoff.
+        """
+        level = dive_level(hp, self.tune)
+        lo = self.tune.chest_clear_danger
+        hi = max(lo, self.tune.chest_commit_fade)
+        return lo + (hi - lo) * level
+
+    def _leash_chase(self, danger: float, hp: float | None = None) -> str:
         """'orbit', 'step', or '' . Emergencies and a disabled orbit stay out of it."""
+        # A plain breakout is not one of these. run1 at game~590s logged
+        # "orbit exit" while chest=(210,465) was still on screen: cover 0.62
+        # started a breakout, danger 2.12 was still inside the orbit band.
+        # Wall commits set escaping, and a flower-window breakout still leaves.
         if (
             not self._leash_enabled()
             or self.tune.chest_leash_radius <= 0
@@ -1826,7 +1962,7 @@ class Navigator:
             or self._critical_on
             or self.escaping
             or self._flee_remaining > 0
-            or self.breakout is not None
+            or (self.breakout is not None and self._in_flower())
         ):
             return ""
         if not self._chest_open_allowed():
@@ -1835,12 +1971,13 @@ class Navigator:
             if danger < self.tune.chest_clear_danger:
                 return "orbit"
             return ""
+        clear = self._open_clear_danger(hp)
         opening = danger < self.tune.chest_danger or (
-            self._chest_latched and danger < self.tune.chest_clear_danger
+            self._chest_latched and danger < clear
         )
         if opening:
             return "step"
-        if danger < self.tune.chest_clear_danger:
+        if danger < clear:
             return "orbit"
         return ""
 
@@ -1933,6 +2070,7 @@ class Navigator:
         if result.menu:
             # Level-up / chest screens pause the game clock too.
             self.current = (0, 0)
+            self.dive = 0.0
             self.last = Decision((0, 0), {}, 0.0, "menu")
             return self.last
         self._advance_world(dt)
@@ -1955,7 +2093,7 @@ class Navigator:
         self._update_breakout(pts, px, py, dt, hp)
         escape = self.breakout is not None and self._escape_remaining > 0
         here = float(_danger_at(pts, np.array([px]), np.array([py]), self.tune.radius)[0])
-        self._chase = self._leash_chase(here)
+        self._chase = self._leash_chase(here, hp)
         self._orbit_aim = self._orbit_heading(pts, px, py, here) if self._chase == "orbit" else None
         self._note_leash_chase(here)
         # Denser early XP: boost gem pull before the flower without changing late knobs.
@@ -1968,6 +2106,7 @@ class Navigator:
         chest_at = seen[1] if seen is not None else None
         cone: list[tuple[int, int]] | None = None
         gem_seek_on = False
+        valued_gems = gems_with_values(result.gems, result.gem_colors)
         # Critical HP drops a latched chest. A committed escape (including a
         # fast-density wall) already made _chest_seen return None.
         if self._critical_on:
@@ -1980,9 +2119,11 @@ class Navigator:
             self._chest_miss_n = 0
         dec: Decision | None = None
         leash_pull = False
-        # A latched seek that scores into a real flee (danger >= chest_clear_danger)
-        # is thrown away and rescored with no chest, so the commit cannot walk
+        # A latched seek that scores into a real flee (danger past the open
+        # clear, chest_clear_danger, or chest_commit_fade while diving) is
+        # thrown away and rescored with no chest, so the commit cannot walk
         # into that crowd.
+        open_clear = self._open_clear_danger(hp)
         for drop_chest in (False, True):
             gem_seek_on = False
             cone = None
@@ -1991,7 +2132,28 @@ class Navigator:
             base = score_tune
             if self._chest_latched and this_chest is not None and self.tune.chest_commit_fade > base.chest_danger:
                 base = replace(base, chest_danger=self.tune.chest_commit_fade)
-            if self.breakout is not None:
+            # Past chest_clear the commit fade (4.5) is a small fraction, so a
+            # latched chest in the dive band did not turn the heading. Stretch
+            # the fade while diving. An unlatched seek still fades at 1.6, so a
+            # pack sitting on the chest is still fled.
+            if (
+                self._chest_latched
+                and this_chest is not None
+                and open_clear > self.tune.chest_clear_danger
+                and not escape
+                and not self._critical_on
+            ):
+                base = replace(base, chest_danger=max(base.chest_danger, open_clear * 1.6))
+            # Same case as the chase guard: a short encirclement breakout must
+            # not steer off a chest that is still inside the orbit band.
+            keep_orbit = (
+                self._chase == "orbit"
+                and self.breakout is not None
+                and not escape
+                and self._flee_remaining <= 0
+                and not self._in_flower()
+            )
+            if self.breakout is not None and not keep_orbit:
                 t = self.tune
                 plain = not escape and self._flee_remaining <= 0
                 in_early = plain and t.breakout_gem_until_s > 0 and self.game_s < t.breakout_gem_until_s
@@ -2001,7 +2163,7 @@ class Navigator:
                     and self.game_s >= t.late_gem_after_s
                     and self.game_s > t.flower_phase_hi
                 )
-                bgems = None if self._critical_on else (result.gems if in_early or in_late else None)
+                bgems = None if self._critical_on else (valued_gems if in_early or in_late else None)
                 btune = replace(base, engage_gain=0.0) if base.engage_gain else base
                 if in_late and bgems and not in_early:
                     over: dict[str, float] = {}
@@ -2071,7 +2233,7 @@ class Navigator:
                     pulled = False
                     dec = score_directions(
                         pts, (px, py), self._orbit_aim, self.tune.chest_orbit_gain,
-                        gems=None if self._critical_on else result.gems, current=self.current, hp=hp,
+                        gems=None if self._critical_on else valued_gems, current=self.current, hp=hp,
                         tune=roam_tune, idle_ok=False, kite_floor=True, chest=None,
                     )
                     self._bias_keepout(dec)
@@ -2081,7 +2243,7 @@ class Navigator:
                     pulled = True
                     dec = score_directions(
                         pts, (px, py), kite, phase.kite_weight,
-                        gems=None if self._critical_on else result.gems, current=self.current, hp=hp,
+                        gems=None if self._critical_on else valued_gems, current=self.current, hp=hp,
                         tune=roam_tune, idle_ok=phase.idle_ok,
                         chest=self._leash_screen(px, py),
                     )
@@ -2091,7 +2253,7 @@ class Navigator:
                     )
                     dec = score_directions(
                         pts, (px, py), aim, phase.kite_weight,
-                        gems=None if self._critical_on else result.gems, current=self.current, hp=hp,
+                        gems=None if self._critical_on else valued_gems, current=self.current, hp=hp,
                         tune=roam_tune, idle_ok=phase.idle_ok,
                         chest=score_chest,
                     )
@@ -2100,7 +2262,7 @@ class Navigator:
                 drop_chest
                 or this_chest is None
                 or not self._chest_latched
-                or dec.danger_here < self.tune.chest_clear_danger
+                or dec.danger_here < open_clear
             ):
                 break
             self._chest_latched = False
@@ -2135,7 +2297,7 @@ class Navigator:
         if choice != self.current:
             self._since_change = 0.0
         self.current = choice
-        high = dec.danger_here >= self.tune.chest_clear_danger
+        high = dec.danger_here >= open_clear
         toward = (
             chest_at is not None
             and chest_kind is not None
@@ -2154,13 +2316,29 @@ class Navigator:
             self._note_chest(chest_kind, chest_at, dec.danger_here)
         else:
             self._note_chest(None, None, dec.danger_here)
+        if gem_seek_on:
+            color = seek_gem_color(
+                result.gems, result.gem_colors, px, py,
+                score_tune.gem_radius, score_tune.gem_cluster_r,
+            ) or "blue"
+            self.gem_target_color = color
+        else:
+            color = ""
+            self.gem_target_color = ""
         if gem_seek_on and not self._gem_seeking:
             self.gem_seeks += 1
+            if color == "red":
+                self.gem_red += 1
+            elif color == "green":
+                self.gem_green += 1
+            else:
+                self.gem_blue += 1
         self._gem_seeking = gem_seek_on
         mode = f"{dec.mode}/{phase.name}"
         if self._critical_on:
             mode = f"{mode} critical"
-        dec = Decision(choice, dec.scores, dec.danger_here, mode)
+        dec = Decision(choice, dec.scores, dec.danger_here, mode, dive=dec.dive)
+        self.dive = dec.dive
         self.last = dec
         return dec
 
@@ -2208,7 +2386,10 @@ def choose_vector(
     pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
     if pts.shape[0] == 0:
         return (0, 0)
-    dec = score_directions(pts, _ref_player(result), None, 0.0, gems=result.gems, current=last, hp=hp)
+    dec = score_directions(
+        pts, _ref_player(result), None, 0.0,
+        gems=gems_with_values(result.gems, result.gem_colors), current=last, hp=hp,
+    )
     return dec.vector
 
 
