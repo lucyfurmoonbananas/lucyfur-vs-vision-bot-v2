@@ -621,23 +621,22 @@ def test_a_card_two_levels_up_corrects_the_tracker_and_stays_on_garlic():
     assert capped["Garlic"] == 8 and evolution_ready(capped)
 
 
-def test_main_level_beats_defense_until_hp_is_critical():
-    """A hurt bar (under 50%, above 20%) was spending the level on Armor.
-
-    The 1 AM runs died between 3:23 and 11:03 with Garlic still at 2-5. An
-    offered Garlic level has to be taken unless HP is actually critical.
-    Critical still takes Armor. With no Garlic on the card, Armor still beats
-    a new weapon.
+def test_hurt_bar_still_takes_defense_when_it_is_actually_offered():
+    """1 AM run 1 took Garlic at hp=0.44. The other cards were Candelabrador
+    and Cross, not Armor. Under half HP, defense still comes first when it
+    is on the card. That screen never happened in the five runs.
     """
-    levels = {"Garlic": 2, "Pummarola": 1}
-    cards = _offer([("Garlic", False), ("Armor", True), ("Hollow Heart", True)], levels)
-    pick = choose_pick(cards, hp=0.4, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
-    pick = choose_pick(cards, hp=0.2, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Armor"
-    cards = _offer([("Santa Water", True), ("Armor", True)], levels)
-    pick = choose_pick(cards, hp=0.4, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Armor"
+    levels = {"Garlic": 3, "Pummarola": 1}
+    offered = [
+        _card("Garlic", False, level=3),
+        _card("Candelabrador", True),
+        _card("Cross", True),
+    ]
+    pick = choose_pick(offered, hp=0.44, owned=set(levels), levels=levels)
+    assert offered[pick.index].name == "Garlic" and pick.reason == "main"
+    defense = _offer([("Garlic", False), ("Armor", True), ("Hollow Heart", True)], levels)
+    pick = choose_pick(defense, hp=0.4, owned=set(levels), levels=levels)
+    assert defense[pick.index].name == "Armor"
 
 
 def test_uncertain_screen_levels_an_owned_weapon_before_a_new_crowd_weapon():
@@ -682,6 +681,51 @@ def test_chest_armor_line_corrects_an_owned_level_and_a_generic_line_does_not():
     assert pilot.levels["Garlic"] == 4 and pilot.levels["Armor"] == 1
     pilot._note_chest_reward(text)
     assert pilot.levels["Armor"] == 3
+
+
+def test_next_level_tag_does_not_double_count_a_certain_pick():
+    """Run 3 had one Garlic pick and no chest. Results said Garlic 2.
+
+    The log said Garlic:3. The owned card's level tag is the level this pick
+    becomes (tracker 1, tag 2). Copying that tag and then adding 1 records 3.
+    A tag sitting on a card we do not take must not move the tracker either
+    (run 1 Clover 1 -> 2 on a Pummarola pick). Two above still replaces it.
+    """
+    levels = {"Garlic": 1}
+    cards = [_card("Garlic", False, level=2), _card("Lightning Ring", True)]
+    eff, certain = assess_inventory(cards, levels)
+    assert certain is True and eff["Garlic"] == 1
+    merge_card_levels(levels, eff)
+    pick = choose_pick(cards, owned=set(levels), levels=dict(levels))
+    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
+    levels["Garlic"] = min(WEAPON_MAX_LEVEL, levels["Garlic"] + 1)
+    assert levels["Garlic"] == 2
+
+    side = {"Garlic": 3, "Clover": 1, "Pummarola": 1}
+    screen = [
+        _card("Pummarola", False, level=2),
+        _card("Clover", False, level=2),
+        _card("Duplicator", True),
+    ]
+    eff, certain = assess_inventory(screen, side)
+    assert certain is True and eff["Clover"] == 1 and eff["Pummarola"] == 1
+
+
+def test_unfinished_main_takes_a_passive_instead_of_opening_a_weapon():
+    """Run 1 pick 8, hp=0.44: Glass Fandango, Fire Wand, Wings. Fire Wand opened.
+
+    Wings is not on the priority list, so a paired weapon outranked it. While
+    Garlic is under 8, that weapon loses to Wings. A screen of only weapons
+    still takes Magic Wand. A priority passive such as Spinach still loses to
+    a late Pentagram.
+    """
+    levels = {"Garlic": 4, "Pummarola": 1}
+    cards = _offer([("Glass Fandango", True), ("Fire Wand", True), ("Wings", True)], levels)
+    pick = choose_pick(cards, hp=0.44, owned=set(levels), levels=levels)
+    assert cards[pick.index].name == "Wings"
+    only_weapons = _offer([("Santa Water", True), ("Magic Wand", True), ("Knife", True)], levels)
+    pick = choose_pick(only_weapons, hp=1.0, owned=set(levels), levels=levels)
+    assert only_weapons[pick.index].name == "Magic Wand" and pick.reason == "fallback"
 
 
 def test_done_page_is_marked_as_the_reward_followup(monkeypatch):

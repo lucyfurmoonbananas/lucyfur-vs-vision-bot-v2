@@ -1126,12 +1126,13 @@ def assess_inventory(
     """Copy ``levels`` and fold in confident card reads.
 
     Certain when every confident card agrees with the tracker. A missing level
-    tag on a tracked item is fine. A tag up to ``LEVEL_RECONCILE`` higher is the
-    chest (or the occasional next-level read) and replaces the tracker. A tag
-    one lower stays on the plan without lowering it. A shaky name, a New! on
-    something we own, an owned item we have never seen a level for, or a wider
-    gap is not an inventory: the caller uses the static priority only when no
-    card still agrees.
+    tag on a tracked item is fine. A tag one higher is the level this pick will
+    become, which is how owned cards read, so the tracker stays put and the
+    pick adds one. A tag two higher replaces the tracker (a missed chest). A
+    tag one lower stays on the plan without lowering it. A shaky name, a New!
+    on something we own, an owned item we have never seen a level for, or a
+    wider gap is not an inventory: the caller uses the static priority only
+    when no card still agrees.
     """
     if levels is None:
         return {}, False
@@ -1157,7 +1158,10 @@ def assess_inventory(
             continue
         if c.level > held + LEVEL_RECONCILE or held - c.level > 1:
             return eff, False
-        if c.level > held:
+        # Gap of 1 is the next-level tag. Copying it and then incrementing the
+        # pick records two levels for one offer (run 3: results Garlic 2, log
+        # Garlic:3, no chest). Gap of 2 is a real missed level.
+        if c.level > held + 1:
             eff[c.name] = c.level
     return eff, True
 
@@ -1335,6 +1339,25 @@ def _choose_static(
     return min(range(len(cards)), key=lambda i: _card_rank(cards[i], i, hp, weapons, early))
 
 
+def _defer_new_weapons(cards: list[Card], levels: dict[str, int]) -> bool:
+    """Main weapon is under 8, and a non-priority passive is on this screen.
+
+    A new weapon joins the offer pool, so later level-ups show it instead of
+    Garlic. Wings is that passive (run 1 took Fire Wand beside it). Priority
+    passives stay under a paired weapon: late Pentagram still beats Spinach.
+    Weapon-only screens stay on the old fallback.
+    """
+    main = main_weapon_name(levels)
+    if main is None or levels.get(main, 0) >= WEAPON_MAX_LEVEL:
+        return False
+    for card in cards:
+        name = card.name
+        if not name or name in FILLER or name in WEAPONS or name in PRIORITY:
+            continue
+        return True
+    return False
+
+
 def _owned_weapon_level_offered(cards: list[Card], levels: dict[str, int]) -> bool:
     """An owned weapon that is not yet at 8 is on this screen."""
     for card in cards:
@@ -1354,23 +1377,20 @@ def _focused_rank(
     early: bool,
     levels: dict[str, int],
     protect_weapons: bool = False,
+    defer_new_weapons: bool = False,
 ) -> tuple[int, int, str]:
     """Lower tier wins. Reasons are main / partner / second / fallback.
 
     The main weapon takes every level until 8. Its partner is taken the moment
     it is offered, including on a screen that also has a main level (a partner
     may not come back; the owned weapon will). A second paired weapon is opened
-    only after the main is maxed, and is maxed the same way. New weapons before
-    that are a last resort. Pummarola / Armor / Hollow Heart come next, and
-    they beat a main level only while HP is critical.
+    only after the main is maxed, and is maxed the same way. While the main is
+    under 8, a new weapon loses to a non-weapon on the same screen. On a
+    weapon-only screen it stays a last resort. Pummarola / Armor / Hollow Heart
+    come next, and they beat a main level while HP is under half.
     """
     name = c.name
     low = hp is not None and hp < DEFENSIVE_HP
-    # Under half HP used to take Armor / Hollow Heart / chicken before a Garlic
-    # level. Short runs sit in that band the whole time, so the main weapon
-    # never moved. Defense still comes first at critical HP (<= 20%), which is
-    # the band the survive test locks. Above that, an offered main level wins.
-    critical = hp is not None and hp <= HP_CRITICAL
     main = main_weapon_name(levels)
     main_lv = levels.get(main, 0) if main else 0
     main_maxed = main is not None and main_lv >= WEAPON_MAX_LEVEL
@@ -1380,7 +1400,7 @@ def _focused_rank(
     if name in EVOLUTIONS and not c.new:
         evo = EVOLUTION_PAIRS.get(main, (None, ""))[1] if main else ""
         return (0, EVOLUTIONS.index(name), "main" if name == evo else "second")
-    if critical and name in DEFENSE:
+    if low and name in DEFENSE:
         missing = main is not None and name == partner_of(main) and levels.get(name, 0) <= 0
         return (1, DEFENSE.index(name), "partner" if missing else "fallback")
     if early and c.new and name in EARLY_AVOID_NEW:
@@ -1440,6 +1460,9 @@ def _focused_rank(
         and not (early and name in EARLY_AVOID_NEW)
     ):
         order = SECOND_ORDER.index(name) if name in SECOND_ORDER else 50
+        # Below a generic new passive (34), above an avoid weapon (40).
+        if defer_new_weapons:
+            return (35, order, "fallback")
         return (20, order, "fallback")
     if name in AVOID and c.new:
         return (40, idx, "fallback")
@@ -1451,6 +1474,8 @@ def _focused_rank(
     if name == CHICKEN or name in COINS:
         return (50, idx, "fallback")
     if c.new:
+        if defer_new_weapons and name in WEAPONS:
+            return (35, idx, "fallback")
         return (34, idx, "fallback")
     return (15, idx, "fallback")
 
@@ -1502,8 +1527,10 @@ def _choose_focused(
     weapons = owned_weapon_count(set(levels))
     early = is_early_run(game_s, weapons)
     protect = _owned_weapon_level_offered(cards, levels)
+    defer = _defer_new_weapons(cards, levels)
     ranked = [
-        _focused_rank(cards[i], i, hp, weapons, early, levels, protect) for i in range(len(cards))
+        _focused_rank(cards[i], i, hp, weapons, early, levels, protect, defer)
+        for i in range(len(cards))
     ]
     idx = min(range(len(cards)), key=lambda i: ranked[i][:2])
     return idx, ranked[idx][2]
