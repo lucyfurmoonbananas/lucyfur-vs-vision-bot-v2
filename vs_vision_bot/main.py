@@ -498,7 +498,7 @@ def main(argv: list[str] | None = None) -> int:
                         f"[nav] game~{nav.game_s:5.0f}s {decision.mode} v={decision.vector} "
                         f"danger={decision.danger_here:.2f} cover={nav.cover:.2f} "
                         f"cells={n_thr} gems={len(result.gems)} hp={hp_txt} breakouts={nav.breakouts} "
-                        f"{chest_status(result)} {gem_status(nav)}"
+                        f"{chest_status(result)} {gem_status(nav)} dive={nav.dive:.1f}"
                     )
                 trace.observe(
                     now_obs, read_hp_fraction(frame), pilot.hp,
