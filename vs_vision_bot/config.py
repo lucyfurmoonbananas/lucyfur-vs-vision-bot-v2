@@ -102,6 +102,8 @@ class Config:
     # No-progress watchdog (0 disables): end the run after this long with a frozen
     # screen, a menu stuck up, or a HUD timer that stopped (see watchdog.py).
     watchdog_s: float = 60.0
+    # Identical gameplay frames (a stuck grab). 0 disables; menus keep watchdog_s.
+    stale_frame_s: float = 4.0
     # Main-loop heartbeat (0 disables): exit if one iteration blocks this long.
     loop_stall_s: float = 90.0
 
@@ -148,6 +150,7 @@ class Config:
             model_path=model,
             dry_run=dry,
             watchdog_s=_env_float("VS_WATCHDOG_S", 60.0),
+            stale_frame_s=_env_float("VS_STALE_FRAME_S", 4.0),
             loop_stall_s=_env_float("VS_LOOP_STALL_S", 90.0),
         )
 

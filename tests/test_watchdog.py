@@ -171,3 +171,36 @@ def test_capture_failing_from_the_start_also_trips():
     wd = ProgressWatchdog(limit_s=60, clock=clock)
     stall = _run(wd, clock, 70, frame=None)
     assert stall is not None and stall.reason == "no_frames"
+
+
+def test_identical_gameplay_frames_trip_before_the_long_watchdog():
+    """Run 4 repeated one capture from ~239s to ~295s (danger stuck at 8.52)
+    until the 60s watchdog. An identical gameplay frame is a stuck grab.
+    """
+    clock = FakeClock()
+    wd = ProgressWatchdog(limit_s=60, identical_s=4, clock=clock)
+    assert _run(wd, clock, 3.5, step=0.5, frame=STILL) is None
+    stall = _run(wd, clock, 2, step=0.5, frame=STILL)
+    assert stall is not None and stall.reason == "stale_frame"
+    assert 4 <= stall.stalled_s < 5
+    assert "stale_frame" in stall.describe()
+
+
+def test_identical_menu_waits_for_the_long_watchdog():
+    """A still level-up or chest screen is not a stuck grab."""
+    clock = FakeClock()
+    wd = ProgressWatchdog(limit_s=60, identical_s=4, clock=clock)
+    assert _run(wd, clock, 10, step=0.5, frame=STILL, in_menu=True) is None
+
+
+def test_slow_drift_is_not_an_identical_capture():
+    clock = FakeClock()
+    wd = ProgressWatchdog(limit_s=60, identical_s=4, clock=clock)
+    base = frame_signature(STILL)
+
+    def sig(i: int) -> np.ndarray:
+        out = base.copy()
+        out[0, 0] = float(i)
+        return out
+
+    assert _run(wd, clock, 10, step=0.5, frame=None, signature=sig) is None

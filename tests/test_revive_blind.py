@@ -7,10 +7,19 @@ from __future__ import annotations
 import pytest
 
 from vs_vision_bot import menus
+from vs_vision_bot.main import format_logged_hp
 from vs_vision_bot.pathfind import Navigator
 
 from tests.test_movement import Clock, blob, result, ring, run
 from tests.test_revive_escape import _quiet_nav
+
+
+def test_blind_median_logs_the_hp_nav_acts_on():
+    """[nav] used to print hp=? while the latch was already passing 0.0."""
+    assert format_logged_hp(None, 0.0) == "? nav=0.00"
+    assert format_logged_hp(0.50, 0.0) == "0.50 nav=0.00"
+    assert format_logged_hp(0.50, 0.50) == "0.50"
+    assert format_logged_hp(None, None) == "?"
 
 
 def test_unknown_hp_does_not_clear_critical():
