@@ -1841,6 +1841,16 @@ class HpTracker:
         self._pending.clear()
         self._recover.clear()
 
+    def forget_for_revive(self) -> None:
+        """Drop the death-screen bar, and stay critical until a new one agrees.
+
+        ``reset`` would clear ``low_held`` too. The next frame is then hp=?
+        with nothing held, and nav treats that as healthy. The revived bar
+        (often ~0.50, sometimes a one-frame flash) has to agree before it counts.
+        """
+        self.reset()
+        self.low_held = True
+
     def blind_after_low(self, limit: float) -> bool:
         """Blind, and the last reading was under ``limit`` or still held critical.
 
@@ -2518,8 +2528,8 @@ class MenuPilot:
                     self.log(f"[{kind}] Enter on {label} ({shown!r})")
                 if kind == "revive":
                     self.revives += 1
-                    # Pre-death readings are stale; start HP over from the revived bar.
-                    self._hp.reset()
+                    # Pre-death readings are stale. Stay critical until the new bar agrees.
+                    self._hp.forget_for_revive()
                     self._hp_ignore_until = self.clock() + REVIVE_HP_HOLDOFF_S
                 elif kind == "quit":
                     self._quit_pressed = True

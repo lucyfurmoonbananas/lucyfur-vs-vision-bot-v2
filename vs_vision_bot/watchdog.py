@@ -7,7 +7,9 @@ not advance it, so a resumed box does not trip them spuriously):
   unpaused run, the captured screen has not visibly changed for ``limit_s``
   (``frozen_frame``; menus included: a level-up / chest / GAME OVER screen that
   sits unchanged that long is stuck), or capture itself kept failing that long
-  (``no_frames``).
+  (``no_frames``). An exactly repeated gameplay frame trips sooner
+  (``stale_frame``, ``identical_s``): a stuck grab is byte-identical, while a
+  real menu still drifts a fraction of a grey level and keeps the long limit.
 
 * :class:`LoopHeartbeat` — a daemon thread that fires ``on_stall`` when the main
   loop itself has not called :meth:`LoopHeartbeat.beat` for ``limit_s`` (a capture,
@@ -49,7 +51,7 @@ def signature_change(a: np.ndarray, b: np.ndarray) -> float:
 
 @dataclass(frozen=True)
 class Stall:
-    reason: str        # frozen_frame | no_frames | loop_blocked
+    reason: str        # frozen_frame | stale_frame | no_frames | loop_blocked
     stalled_s: float
     detail: str = ""
 
@@ -64,10 +66,13 @@ class ProgressWatchdog:
         limit_s: float = WATCHDOG_LIMIT_S,
         clock: Callable[[], float] = time.monotonic,
         change_min: float = FRAME_CHANGE_MIN,
+        identical_s: float | None = None,
     ) -> None:
         self.limit_s = float(limit_s)
         self.clock = clock
         self.change_min = change_min
+        # 0 disables the fast path. None keeps older callers on the long limit only.
+        self.identical_s = 0.0 if identical_s is None else float(identical_s)
         self.reset()
 
     @property
@@ -85,6 +90,7 @@ class ProgressWatchdog:
         paused: bool = False,
         now: float | None = None,
         signature: np.ndarray | None = None,
+        in_menu: bool = False,
     ) -> Stall | None:
         """Feed one frame (None = capture failed). Returns a :class:`Stall` once frozen."""
         if not self.enabled:
@@ -98,14 +104,27 @@ class ProgressWatchdog:
             self._frame_t = now
         # Compare against the frame at the last change (not the previous frame), so slow
         # but real motion still accumulates past the threshold.
+        changed = False
         if sig is not None and (
             self._ref_sig is None
             or self._ref_sig.shape != sig.shape
             or signature_change(sig, self._ref_sig) >= self.change_min
         ):
             self._ref_sig, self._frame_t = sig, now
-        elif now - self._frame_t >= self.limit_s:
-            return Stall("frozen_frame" if sig is not None else "no_frames", now - self._frame_t)
+            changed = True
+        stalled = now - self._frame_t
+        if not changed and sig is not None and self._ref_sig is not None:
+            # A stuck grab repeats the same pixels. A quiet menu is not exact.
+            exact = signature_change(sig, self._ref_sig) <= 1e-6
+            if (
+                exact
+                and not in_menu
+                and self.identical_s > 0
+                and stalled >= self.identical_s
+            ):
+                return Stall("stale_frame", stalled, "identical capture")
+        if not changed and stalled >= self.limit_s:
+            return Stall("frozen_frame" if sig is not None else "no_frames", stalled)
         return None
 
 

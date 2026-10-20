@@ -515,6 +515,49 @@ def test_set_build_state_logs_the_first_report_while_nothing_is_ready():
     assert logs[-1] == "[build] evolution_ready=True all_maxed=False"
 
 
+def test_plain_breakout_keeps_a_held_orbit_while_the_chest_is_visible():
+    """run1 game~590s: orbit exit while chest=(210,465) was still detected.
+
+    Cover 0.62 starts a plain breakout. Danger stays under chest_clear_danger,
+    so the orbit should keep the chest. A wall (cover >= 0.75) still leaves.
+    """
+    tune = tuning_from_env("chest_orbit_swell=0", log=lambda *_: None)
+    clock = Clock()
+    logs: list[str] = []
+    nav = Navigator(tune=tune, clock=clock, log=logs.append)
+    for _ in range(tune.chest_free_opens):
+        nav.on_chest_opened()
+    nav.game_s = 500.0
+    _anchor(nav, clock, chest=CHEST_RIGHT)
+    _park_west_of(nav, tune.chest_orbit_radius)
+    nav.current = (0, 1)
+    nav._since_change = 1.0
+    # Gap wide enough that cover stays under the wall commit.
+    crowd = result(ring(480, 256, 160, 36, gap_deg=(0, 140)))
+    crowd.chest = (210.0, 465.0)
+    before = len(logs)
+    run(nav, clock, crowd, 8, hp=0.97)
+    fresh = logs[before:]
+    assert nav.breakouts >= 1 and not nav.escaping
+    assert nav.cover < tune.ring_commit_cover
+    assert nav._orbit_on
+    assert nav.last.mode.startswith("leash-orbit")
+    assert not any(ln.startswith("[leash] orbit exit") for ln in fresh)
+
+    wall = Navigator(tune=tune, clock=Clock(), log=lambda *_: None)
+    for _ in range(tune.chest_free_opens):
+        wall.on_chest_opened()
+    wall.game_s = 500.0
+    _anchor(wall, wall.clock, chest=CHEST_RIGHT)
+    _park_west_of(wall, tune.chest_orbit_radius)
+    wall._since_change = 1.0
+    closing = result(ring(480, 256, 160, 36, gap_deg=(0, 90)))
+    closing.chest = (210.0, 465.0)
+    run(wall, wall.clock, closing, 6, hp=0.97)
+    assert wall.escaping and wall.last.mode.startswith("ring-escape")
+    assert not wall._orbit_on
+
+
 def test_critical_hp_and_a_wall_commit_override_a_held_chest():
     """Critical HP and a cover >= 0.75 wall leave the orbit. The wall takes its gap."""
     tune = tuning_from_env("chest_orbit_swell=0", log=lambda *_: None)
@@ -539,3 +582,47 @@ def test_critical_hp_and_a_wall_commit_override_a_held_chest():
     run(wall, wall.clock, result(ring(480, 256, 150, 48, gap_deg=(-1, 25))), 4, hp=0.80)
     assert wall.escaping and wall.last.mode.startswith("ring-escape")
     assert wall.breakout is not None and wall.breakout[0] > 0
+
+
+def test_high_hp_keeps_a_visible_chest_past_the_old_clear():
+    """Danger between chest_clear (3) and the commit fade (4.5) at full HP.
+
+    The dive sits in that band. The old cutoff dropped the leash, and the
+    heading matched the no-chest escape. Below the dive band, and with the
+    scale knob at 1, the cutoff stays 3.
+    """
+    pts = blob(520, 180, n=16, spread=40, seed=1)
+    chest = (700.0, 300.0)
+
+    def headings(hp, scale=None):
+        tune = Tuning() if scale is None else tuning_from_env(
+            f"dive_radius_scale={scale}", log=lambda *_: None,
+        )
+        clock = Clock()
+        nav = Navigator(tune=tune, clock=clock, log=lambda *_: None)
+        nav.game_s = 200.0
+        seen = result([])
+        seen.chest = chest
+        clock.t += 1 / 12
+        nav.step(seen, hp=hp)
+        crowd = result(pts)
+        crowd.chest = chest
+        return nav, run(nav, clock, crowd, 6, hp=hp)
+
+    nav, vecs = headings(1.0)
+    assert Tuning().chest_clear_danger < nav.last.danger_here < Tuning().chest_commit_fade
+    assert nav._chase == "step"
+    assert all(v[0] > 0 for v in vecs)
+
+    clock = Clock()
+    away = Navigator(clock=clock, log=lambda *_: None)
+    away.game_s = 200.0
+    assert all(v[0] <= 0 for v in run(away, clock, result(pts), 6, hp=1.0))
+
+    low, low_vecs = headings(0.4)
+    assert low._chase != "step"
+    assert all(v[0] < 0 for v in low_vecs)
+
+    old, old_vecs = headings(1.0, scale="1")
+    assert old.dive == 0.0 and old._chase == ""
+    assert all(v[0] <= 0 for v in old_vecs)
