@@ -621,6 +621,25 @@ def test_a_card_two_levels_up_corrects_the_tracker_and_stays_on_garlic():
     assert capped["Garlic"] == 8 and evolution_ready(capped)
 
 
+def test_main_level_beats_defense_until_hp_is_critical():
+    """A hurt bar (under 50%, above 20%) was spending the level on Armor.
+
+    The 1 AM runs died between 3:23 and 11:03 with Garlic still at 2-5. An
+    offered Garlic level has to be taken unless HP is actually critical.
+    Critical still takes Armor. With no Garlic on the card, Armor still beats
+    a new weapon.
+    """
+    levels = {"Garlic": 2, "Pummarola": 1}
+    cards = _offer([("Garlic", False), ("Armor", True), ("Hollow Heart", True)], levels)
+    pick = choose_pick(cards, hp=0.4, owned=set(levels), levels=levels)
+    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
+    pick = choose_pick(cards, hp=0.2, owned=set(levels), levels=levels)
+    assert cards[pick.index].name == "Armor"
+    cards = _offer([("Santa Water", True), ("Armor", True)], levels)
+    pick = choose_pick(cards, hp=0.4, owned=set(levels), levels=levels)
+    assert cards[pick.index].name == "Armor"
+
+
 def test_uncertain_screen_levels_an_owned_weapon_before_a_new_crowd_weapon():
     """A shaky extra card must not throw the plan onto Santa Water.
 

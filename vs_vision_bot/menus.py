@@ -1361,10 +1361,16 @@ def _focused_rank(
     it is offered, including on a screen that also has a main level (a partner
     may not come back; the owned weapon will). A second paired weapon is opened
     only after the main is maxed, and is maxed the same way. New weapons before
-    that are a last resort. Pummarola / Armor / Hollow Heart come next.
+    that are a last resort. Pummarola / Armor / Hollow Heart come next, and
+    they beat a main level only while HP is critical.
     """
     name = c.name
     low = hp is not None and hp < DEFENSIVE_HP
+    # Under half HP used to take Armor / Hollow Heart / chicken before a Garlic
+    # level. Short runs sit in that band the whole time, so the main weapon
+    # never moved. Defense still comes first at critical HP (<= 20%), which is
+    # the band the survive test locks. Above that, an offered main level wins.
+    critical = hp is not None and hp <= HP_CRITICAL
     main = main_weapon_name(levels)
     main_lv = levels.get(main, 0) if main else 0
     main_maxed = main is not None and main_lv >= WEAPON_MAX_LEVEL
@@ -1374,7 +1380,7 @@ def _focused_rank(
     if name in EVOLUTIONS and not c.new:
         evo = EVOLUTION_PAIRS.get(main, (None, ""))[1] if main else ""
         return (0, EVOLUTIONS.index(name), "main" if name == evo else "second")
-    if low and name in DEFENSE:
+    if critical and name in DEFENSE:
         missing = main is not None and name == partner_of(main) and levels.get(name, 0) <= 0
         return (1, DEFENSE.index(name), "partner" if missing else "fallback")
     if early and c.new and name in EARLY_AVOID_NEW:
