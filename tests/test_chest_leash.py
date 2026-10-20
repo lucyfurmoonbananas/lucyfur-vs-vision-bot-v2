@@ -480,6 +480,41 @@ def test_pilot_evolution_ready_after_ten_minutes_opens_a_held_chest():
     assert nav._leash_dist() < dist - 100.0
 
 
+def test_done_reward_does_not_spend_a_second_free_open():
+    """OPEN and the DONE page are one chest. Run 1 counted both, so five
+    'open-allowed (free)' lines never reached a hold.
+    """
+    clock = Clock()
+    logs: list[str] = []
+    nav = Navigator(
+        tune=tuning_from_env("chest_orbit_swell=0", log=lambda *_: None),
+        clock=clock,
+        log=logs.append,
+    )
+    nav.on_chest_opened()
+    nav.on_chest_opened(reward=True)
+    assert nav._chests_opened == 1
+    assert "[chest] opened 1" in logs
+    assert any("not counted" in ln for ln in logs)
+    clock.t += 60.0
+    nav.on_chest_opened(reward=True)
+    assert nav._chests_opened == 2
+
+
+def test_set_build_state_logs_the_first_report_while_nothing_is_ready():
+    """Live runs never printed [build]: the flags stayed false, and the log
+    waited for a change. The first push has to be visible.
+    """
+    logs: list[str] = []
+    nav = Navigator(clock=Clock(), log=logs.append)
+    nav.set_build_state(False, False)
+    assert logs == ["[build] evolution_ready=False all_maxed=False"]
+    nav.set_build_state(False, False)
+    assert len(logs) == 1
+    nav.set_build_state(True, False)
+    assert logs[-1] == "[build] evolution_ready=True all_maxed=False"
+
+
 def test_plain_breakout_keeps_a_held_orbit_while_the_chest_is_visible():
     """run1 game~590s: orbit exit while chest=(210,465) was still detected.
 
