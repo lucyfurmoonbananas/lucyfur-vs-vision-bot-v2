@@ -62,7 +62,9 @@ continues from that heading, so the character keeps sweeping in big loops
 instead of being boxed in. After a REVIVE, ``request_revive_escape`` (built on
 ``request_flee``) runs a committed ~3 s escape toward the least threat-dense
 side: steering stays within ~45 deg of that heading, the heading is only re-aimed
-early or when its corridor is clearly shut, and it never turns back. If the ring
+early or when its corridor is clearly shut, and it never turns back. Each
+direction is scored only out to its own screen edge (``escape_equal_view``),
+so a uniform crowd does not always leave north or south. If the ring
 is still closed after that, or the crowd is still close, the escape continues
 (up to 12 s) but the heading is re-picked toward the open corridor only while
 the ring stays closed.
@@ -180,6 +182,11 @@ class Tuning:
     escape_len: float = 420.0         # corridor length when picking the escape heading
     escape_wedge_radius: float = 480.0  # crowd within this radius counts for the wedge term
     escape_wedge_gain: float = 0.5    # weight of whole-screen wedge density vs. corridor
+    # Silo: a uniform crowd makes the long east/west cast look denser, so a
+    # revive kept leaving north or south. 1 scores each direction by the crowd
+    # inside its own screen-edge reach (shared scale floored at 160px). 0 is
+    # the old fixed-length cast. VS_TUNE=escape_equal_view=0.
+    escape_equal_view: float = 1.0
     escape_repick_s: float = 0.5      # early window (REVIVE escapes only): first frames may be stale
     escape_repick_ratio: float = 1.25  # early re-pick only when clearly better
     escape_switch_ratio: float = 3.0  # later: switch only when the corridor is clearly shut
@@ -466,22 +473,95 @@ def corridor_costs(points: np.ndarray, px: float, py: float, length: float = 320
     return _fill_short_side(out, px, py)
 
 
+# Equal-view scale floor (Silo). A nearer border does not shrink every ray to
+# that distance; each ray stops at its own edge, and this only sets the
+# density scale so a uniform field still ties.
+ESCAPE_EQUAL_MIN = 160.0
+
+
+def _view_edges(px: float, py: float) -> np.ndarray:
+    return np.array(
+        [_edge_distance(px, py, float(ux), float(uy)) for ux, uy in _UNIT],
+        dtype=np.float32,
+    )
+
+
+def _corridor_sums(
+    points: np.ndarray, px: float, py: float, lengths: np.ndarray, width: float,
+) -> np.ndarray:
+    """Crowd weight along each direction, out to that direction's own length."""
+    out = np.zeros(len(DIRS), dtype=np.float32)
+    if points.shape[0] == 0:
+        return out
+    rel = points[:, :2] - np.array([px, py], dtype=np.float32)
+    for i, (ux, uy) in enumerate(_UNIT):
+        length = float(lengths[i])
+        proj = rel[:, 0] * ux + rel[:, 1] * uy
+        perp = np.abs(rel[:, 0] * uy - rel[:, 1] * ux)
+        inside = (proj > -10) & (proj < length) & (perp < width + 0.3 * np.clip(proj, 0, None))
+        if not np.any(inside):
+            continue
+        out[i] = float((points[inside, 2] / (1.0 + np.clip(proj[inside], 0, None) / 110.0)).sum())
+    return out
+
+
+def _wedge_sums(points: np.ndarray, px: float, py: float, radii: np.ndarray) -> np.ndarray:
+    """3-sector wedge weight, each direction capped at its own radius."""
+    wedge = np.zeros(len(DIRS), dtype=np.float32)
+    if points.shape[0] == 0:
+        return wedge
+    rel = points[:, :2] - np.array([px, py], dtype=np.float32)
+    dist = np.hypot(rel[:, 0], rel[:, 1])
+    for i, (ux, uy) in enumerate(_UNIT):
+        radius = float(radii[i])
+        keep = dist < radius
+        if not np.any(keep):
+            continue
+        prof = sector_profile(points[keep], px, py, radius)
+        k = int(((math.atan2(float(uy), float(ux)) + math.pi) / (2 * math.pi) * N_SECTORS)) % N_SECTORS
+        wedge[i] = (
+            prof[(k - 1) % N_SECTORS] + prof[k] + prof[(k + 1) % N_SECTORS]
+        )
+    return wedge
+
+
 def escape_costs(points: np.ndarray, px: float, py: float, tune: "Tuning") -> np.ndarray:
     """Per-direction cost for the post-REVIVE escape (low = least threat density).
 
     A long corridor cast (what is directly in the way) plus the crowd weight in a
     wide 3-sector (~67 deg) wedge out to most of the screen, so the heading points
     at the emptiest side / edge rather than at a thin gap between two walls.
+
+    With ``escape_equal_view`` each ray stops at that direction's screen edge
+    and the sums are scaled to one length, so a uniform crowd ties and the
+    revive runway break can take east or west. A single nearest-edge cap would
+    hide a wall that sits just past the short border on the long runway.
     """
-    costs = corridor_costs(points, px, py, tune.escape_len, tune.corridor_width)
-    prof = sector_profile(points, px, py, tune.escape_wedge_radius)
-    if prof.sum() <= 0:
-        return costs
-    wedge = np.zeros(len(DIRS), dtype=np.float32)
-    for i, (ux, uy) in enumerate(_UNIT):
-        k = int(((math.atan2(uy, ux) + math.pi) / (2 * math.pi) * N_SECTORS)) % N_SECTORS
-        wedge[i] = prof[(k - 1) % N_SECTORS] + prof[k] + prof[(k + 1) % N_SECTORS]
-    return costs + tune.escape_wedge_gain * wedge
+    if tune.escape_equal_view <= 0:
+        costs = corridor_costs(points, px, py, tune.escape_len, tune.corridor_width)
+        prof = sector_profile(points, px, py, tune.escape_wedge_radius)
+        if prof.sum() <= 0:
+            return costs
+        wedge = np.zeros(len(DIRS), dtype=np.float32)
+        for i, (ux, uy) in enumerate(_UNIT):
+            k = int(((math.atan2(uy, ux) + math.pi) / (2 * math.pi) * N_SECTORS)) % N_SECTORS
+            wedge[i] = prof[(k - 1) % N_SECTORS] + prof[k] + prof[(k + 1) % N_SECTORS]
+        return costs + tune.escape_wedge_gain * wedge
+
+    edges = _view_edges(px, py)
+    lengths = np.maximum(np.minimum(edges, np.float32(tune.escape_len)), 1.0)
+    radii = np.minimum(lengths, np.float32(tune.escape_wedge_radius))
+    raw = _corridor_sums(points, px, py, lengths, tune.corridor_width)
+    raw = raw + tune.escape_wedge_gain * _wedge_sums(points, px, py, radii)
+    ref = min(float(tune.escape_len), max(ESCAPE_EQUAL_MIN, float(edges.min())))
+    scaled = raw * (np.float32(ref) / lengths)
+    # Same 0.4 unseen-space weight corridor_costs uses, but from the real
+    # edges. Without it every empty ray is an exact 0 and the early re-pick
+    # clings to a 45 deg side-step of the heading it should leave.
+    longest = float(edges.max())
+    if longest > 1.0:
+        scaled = scaled + np.float32(0.4) * np.clip((longest - edges) / longest, 0, None)
+    return _fill_short_side(scaled, px, py)
 
 
 def rollout_costs(
