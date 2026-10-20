@@ -547,3 +547,47 @@ def test_critical_hp_and_a_wall_commit_override_a_held_chest():
     run(wall, wall.clock, result(ring(480, 256, 150, 48, gap_deg=(-1, 25))), 4, hp=0.80)
     assert wall.escaping and wall.last.mode.startswith("ring-escape")
     assert wall.breakout is not None and wall.breakout[0] > 0
+
+
+def test_high_hp_keeps_a_visible_chest_past_the_old_clear():
+    """Danger between chest_clear (3) and the commit fade (4.5) at full HP.
+
+    The dive sits in that band. The old cutoff dropped the leash, and the
+    heading matched the no-chest escape. Below the dive band, and with the
+    scale knob at 1, the cutoff stays 3.
+    """
+    pts = blob(520, 180, n=16, spread=40, seed=1)
+    chest = (700.0, 300.0)
+
+    def headings(hp, scale=None):
+        tune = Tuning() if scale is None else tuning_from_env(
+            f"dive_radius_scale={scale}", log=lambda *_: None,
+        )
+        clock = Clock()
+        nav = Navigator(tune=tune, clock=clock, log=lambda *_: None)
+        nav.game_s = 200.0
+        seen = result([])
+        seen.chest = chest
+        clock.t += 1 / 12
+        nav.step(seen, hp=hp)
+        crowd = result(pts)
+        crowd.chest = chest
+        return nav, run(nav, clock, crowd, 6, hp=hp)
+
+    nav, vecs = headings(1.0)
+    assert Tuning().chest_clear_danger < nav.last.danger_here < Tuning().chest_commit_fade
+    assert nav._chase == "step"
+    assert all(v[0] > 0 for v in vecs)
+
+    clock = Clock()
+    away = Navigator(clock=clock, log=lambda *_: None)
+    away.game_s = 200.0
+    assert all(v[0] <= 0 for v in run(away, clock, result(pts), 6, hp=1.0))
+
+    low, low_vecs = headings(0.4)
+    assert low._chase != "step"
+    assert all(v[0] < 0 for v in low_vecs)
+
+    old, old_vecs = headings(1.0, scale="1")
+    assert old.dive == 0.0 and old._chase == ""
+    assert all(v[0] <= 0 for v in old_vecs)

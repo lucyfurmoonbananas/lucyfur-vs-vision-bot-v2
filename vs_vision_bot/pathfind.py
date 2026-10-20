@@ -1934,7 +1934,22 @@ class Navigator:
             radius = max(radius, t.chest_hold_keepout)
         return radius
 
-    def _leash_chase(self, danger: float) -> str:
+    def _open_clear_danger(self, hp: float | None) -> float:
+        """Danger that drops an openable chest. Held chests stay on the knob.
+
+        Full dive walks into crowds whose ``danger_here`` sits between
+        ``chest_clear_danger`` (3) and ``chest_commit_fade`` (4.5). Cutting
+        the chase off at 3 is why a chest on the nav line was ignored: the
+        latch and the leash both released, and the heading matched the
+        no-chest escape. ``dive_radius_scale`` 1, low HP, and unknown HP stay
+        on the old cutoff.
+        """
+        level = dive_level(hp, self.tune)
+        lo = self.tune.chest_clear_danger
+        hi = max(lo, self.tune.chest_commit_fade)
+        return lo + (hi - lo) * level
+
+    def _leash_chase(self, danger: float, hp: float | None = None) -> str:
         """'orbit', 'step', or '' . Emergencies and a disabled orbit stay out of it."""
         # A plain breakout is not one of these. run1 at game~590s logged
         # "orbit exit" while chest=(210,465) was still on screen: cover 0.62
@@ -1956,12 +1971,13 @@ class Navigator:
             if danger < self.tune.chest_clear_danger:
                 return "orbit"
             return ""
+        clear = self._open_clear_danger(hp)
         opening = danger < self.tune.chest_danger or (
-            self._chest_latched and danger < self.tune.chest_clear_danger
+            self._chest_latched and danger < clear
         )
         if opening:
             return "step"
-        if danger < self.tune.chest_clear_danger:
+        if danger < clear:
             return "orbit"
         return ""
 
@@ -2077,7 +2093,7 @@ class Navigator:
         self._update_breakout(pts, px, py, dt, hp)
         escape = self.breakout is not None and self._escape_remaining > 0
         here = float(_danger_at(pts, np.array([px]), np.array([py]), self.tune.radius)[0])
-        self._chase = self._leash_chase(here)
+        self._chase = self._leash_chase(here, hp)
         self._orbit_aim = self._orbit_heading(pts, px, py, here) if self._chase == "orbit" else None
         self._note_leash_chase(here)
         # Denser early XP: boost gem pull before the flower without changing late knobs.
@@ -2103,9 +2119,11 @@ class Navigator:
             self._chest_miss_n = 0
         dec: Decision | None = None
         leash_pull = False
-        # A latched seek that scores into a real flee (danger >= chest_clear_danger)
-        # is thrown away and rescored with no chest, so the commit cannot walk
+        # A latched seek that scores into a real flee (danger past the open
+        # clear, chest_clear_danger, or chest_commit_fade while diving) is
+        # thrown away and rescored with no chest, so the commit cannot walk
         # into that crowd.
+        open_clear = self._open_clear_danger(hp)
         for drop_chest in (False, True):
             gem_seek_on = False
             cone = None
@@ -2114,6 +2132,18 @@ class Navigator:
             base = score_tune
             if self._chest_latched and this_chest is not None and self.tune.chest_commit_fade > base.chest_danger:
                 base = replace(base, chest_danger=self.tune.chest_commit_fade)
+            # Past chest_clear the commit fade (4.5) is a small fraction, so a
+            # latched chest in the dive band did not turn the heading. Stretch
+            # the fade while diving. An unlatched seek still fades at 1.6, so a
+            # pack sitting on the chest is still fled.
+            if (
+                self._chest_latched
+                and this_chest is not None
+                and open_clear > self.tune.chest_clear_danger
+                and not escape
+                and not self._critical_on
+            ):
+                base = replace(base, chest_danger=max(base.chest_danger, open_clear * 1.6))
             # Same case as the chase guard: a short encirclement breakout must
             # not steer off a chest that is still inside the orbit band.
             keep_orbit = (
@@ -2232,7 +2262,7 @@ class Navigator:
                 drop_chest
                 or this_chest is None
                 or not self._chest_latched
-                or dec.danger_here < self.tune.chest_clear_danger
+                or dec.danger_here < open_clear
             ):
                 break
             self._chest_latched = False
@@ -2267,7 +2297,7 @@ class Navigator:
         if choice != self.current:
             self._since_change = 0.0
         self.current = choice
-        high = dec.danger_here >= self.tune.chest_clear_danger
+        high = dec.danger_here >= open_clear
         toward = (
             chest_at is not None
             and chest_kind is not None

@@ -153,11 +153,15 @@ def test_synthetic_red_and_green_rims_are_classified():
     frame = _grass()
     # Real red crystal, Oct 19 frames: BGR (156, 38, 225), not pure red.
     _paint_rim(frame, 300, 300, (156, 38, 225))
-    _paint_rim(frame, 700, 300, (38, 228, 38))  # green rim
+    _paint_rim(frame, 700, 300, (168, 228, 38))  # real green crystal, not pure green
     gems = _colored(frame, enemy_mask(frame))
     assert _near(gems, 300, 300, "red")
     assert _near(gems, 700, 300, "green")
     assert not any(c == "blue" for *_, c in gems)
+    # Pure green (both other channels near 0) is not the crystal.
+    pure = _grass()
+    _paint_rim(pure, 400, 300, (38, 228, 38))
+    assert _colored(pure, enemy_mask(pure)) == []
 
 
 def test_recolored_real_gem_is_found_and_blue_mask_ignores_it():
@@ -180,12 +184,13 @@ def test_recolored_real_gem_is_found_and_blue_mask_ignores_it():
     assert not any(abs(gx - 591) < 12 and abs(gy - 249) < 12 for gx, gy in blues)
 
 
-def _assert_only_crystal_reds(shot, name: str) -> None:
+def _assert_only_crystal_reds(shot, name: str, *, allow_green: bool = False) -> None:
     found = _colored(shot, enemy_mask(shot))
-    assert not any(c == "green" for *_, c in found), name
     h, w = shot.shape[:2]
     for x, y, color in found:
-        if color != "red":
+        if color == "green" and not allow_green:
+            raise AssertionError((name, x, y, "green"))
+        if color not in ("red", "green"):
             continue
         # The centroid can sit in the dark hole. A rim pixel next to it is the crystal.
         y0, y1 = max(0, y - 4), min(h, y + 5)
@@ -194,8 +199,11 @@ def _assert_only_crystal_reds(shot, name: str) -> None:
         bb = win[:, :, 0].astype(np.int16)
         gg = win[:, :, 1].astype(np.int16)
         rr = win[:, :, 2].astype(np.int16)
-        crystal = (rr >= 180) & (bb >= 100) & (bb <= 220) & (gg <= 100)
-        assert crystal.any(), (name, x, y)
+        if color == "red":
+            crystal = (rr >= 180) & (bb >= 100) & (bb <= 220) & (gg <= 100)
+        else:
+            crystal = (gg >= 180) & (bb >= 100) & (bb <= 220) & (rr <= 100)
+        assert crystal.any(), (name, x, y, color)
 
 
 def test_heart_foliage_chicken_blood_and_red_sprites_are_not_gems():
@@ -225,7 +233,22 @@ def test_heart_foliage_chicken_blood_and_red_sprites_are_not_gems():
         _assert_only_crystal_reds(shot, name)
     for path in sorted((FIX / "chest_real").glob("*.png")):
         shot = cv2.imread(str(path))
-        _assert_only_crystal_reds(shot, path.name)
+        # These shots contain the real green crystal, BGR (168, 228, 38).
+        _assert_only_crystal_reds(shot, path.name, allow_green=True)
+
+
+def test_real_green_crystals_are_gems_and_mantichana_is_not():
+    """Chest frames from 18 Oct. The green XP gem is BGR (168, 228, 38).
+
+    The Oct 19 Poe frames have no green crystal. Mantichana greens, about
+    (87, 196, 64), stay out.
+    """
+    shot = load("chest_real/REAL_chest_onscreen_run2_g0609_20261018_032908.png")
+    found = _colored(shot, enemy_mask(shot))
+    for x, y in ((309, 164), (177, 265), (314, 335), (236, 371)):
+        assert _near(found, x, y, "green", tol=12), (x, y)
+    assert not any(c == "green" for *_, c in _colored(load("gems/frame_g134659.png"), enemy_mask(load("gems/frame_g134659.png"))))
+    assert not any(c == "green" for *_, c in _colored(load("gameplay_full_hp.png"), enemy_mask(load("gameplay_full_hp.png"))))
 
 
 def test_oct19_frames_keep_red_crystals_and_drop_enemies():

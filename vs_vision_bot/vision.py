@@ -413,14 +413,14 @@ def _hue_gem_mask(frame: np.ndarray, color: str) -> np.ndarray:
     """Bright rim of a green or red XP gem.
 
     A real blue core is exactly BGR (228, 180, 38): one channel high, one
-    mid, one low. The red crystal in the Oct 19 frames is that sprite with
-    the hue moved by about +63 (OpenCV), BGR (156, 38, 225): red high, blue
-    still the mid channel, green low. A pure red pixel (both other channels
-    near 0) is a Red Death wing, a damage streak, or a spark, not a gem.
-    Green gems would be the same shape at BGR about (38, 228, 38). Mantichana
-    greens are dimmer and muddier, about (87, 196, 64), and fail the gaps.
-    Orange (the winged heart, red flowers, Floor Chicken) has green well
-    above blue.
+    mid, one low. The red crystal is that sprite with the hue moved by about
+    +63 (OpenCV), BGR (156, 38, 225): red high, blue still the mid channel,
+    green low. The green crystal is the same sprite the other way, BGR
+    (168, 228, 38), HSV (81, 212, 228): green high, blue still mid, red low.
+    A pure red or pure green pixel (both other channels near 0) is an enemy,
+    a damage streak, or a spark, not a gem. Mantichana greens are dimmer and
+    muddier, about (87, 196, 64), and fail the gaps. Orange (the winged
+    heart, red flowers, Floor Chicken) has green well above blue.
     """
     b = frame[:, :, 0].astype(np.int16)
     g = frame[:, :, 1].astype(np.int16)
@@ -429,7 +429,8 @@ def _hue_gem_mask(frame: np.ndarray, color: str) -> np.ndarray:
         # Real rim BGR (156, 38, 225). Blue stays the mid channel (130-210).
         m = (r >= 200) & (b >= 130) & (b <= 210) & (g <= 90) & (r > b) & (r - g >= 140) & (b - g >= 70)
     else:
-        m = (g >= 190) & (g - r >= 150) & (g - b >= 150) & (r < 70) & (b < 70) & (np.abs(r - b) <= 35)
+        # Real rim BGR (168, 228, 38). Blue stays the mid channel, as on red.
+        m = (g >= 200) & (b >= 130) & (b <= 210) & (r <= 90) & (g > b) & (g - r >= 140) & (b - r >= 70)
     h, w = frame.shape[:2]
     ignore, side = _masks(w, h)
     m[ignore | side] = False
@@ -448,7 +449,10 @@ def _loose_body(frame: np.ndarray, color: str) -> np.ndarray:
         crystal = (r >= 200) & (b >= 130) & (g <= 90) & (r > b)
         m = ((r >= 160) & (r >= g + 80) & (r >= b + 80)) | crystal
     else:
-        m = (g >= 160) & (g >= r + 80) & (g >= b + 80)
+        # The crystal's blue is ~168, so g - b is only ~60 and a pure-green
+        # test misses it. Including it keeps a large green sprite one blob.
+        crystal = (g >= 200) & (b >= 130) & (r <= 90) & (g > b)
+        m = ((g >= 160) & (g >= r + 80) & (g >= b + 80)) | crystal
     h, w = frame.shape[:2]
     ignore, side = _masks(w, h)
     m[ignore | side] = False
@@ -477,9 +481,11 @@ def _hue_gems(frame: np.ndarray, color: str, enemies: np.ndarray | None) -> list
         bh_min = max(3, int(round(4 * sy)))
         dark_limit = 0.30
     else:
+        # Real greens are the full 6x8 crystal (area 14-17, dark fill about
+        # 0.04-0.13), not the short red rim. A 4x4 leaf still fails the colour.
         min_area = max(8, int(round(12 * scale)))
         bh_min = max(5, int(round(7 * sy)))
-        dark_limit = 0.12
+        dark_limit = 0.16
     slack = max(4, int(round(8 * scale)))
     loose = _loose_body(frame, color).astype(np.uint8)
     _ln, llabels, lstats, _lc = cv2.connectedComponentsWithStats(loose, connectivity=8)
@@ -518,7 +524,10 @@ def _hue_gems(frame: np.ndarray, color: str, enemies: np.ndarray | None) -> list
             # Red crystals drop inside the pack that just died. Their own dark
             # outline plus that pack is well over the blue-gem limit (measured
             # 74-180 vs 70), and this palette is not the Red Death wing.
-            limit = 400 * scale if color == "red" else 70 * scale
+            # Red and green crystals drop inside the pack that just died.
+            # Their outline plus that pack is over the blue-gem limit of 70
+            # (red measured 74-180, green up to about 100).
+            limit = 400 * scale if color in ("red", "green") else 70 * scale
             if dark > limit:
                 continue
             enemies[y0:y1, x0:x1] = False
