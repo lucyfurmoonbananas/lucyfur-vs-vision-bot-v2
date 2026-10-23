@@ -43,7 +43,7 @@ function ConvertTo-PSString {
                 # Must use double quotes due to escape characters.
                 return '"' + ($InputObject -replace '["$`]', '`$0').Replace("`r", '`r').Replace("`n", '`n').Replace("`t", '`t') + '"'
             }
-            if ($UseQuotes -OR $InputObject.IndexOfAny('''"` $(){},;&|#@') -ge 0) {
+            if ($UseQuotes -OR $InputObject.IndexOfAny('''"` $(){},;&|#@<>') -ge 0) {
                 return "'" + $InputObject.Replace("'", "''") + "'"
             }
             return $InputObject
