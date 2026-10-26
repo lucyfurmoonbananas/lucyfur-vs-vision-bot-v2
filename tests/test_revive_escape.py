@@ -469,6 +469,65 @@ def test_revive_hold_sidesteps_a_wall_ahead():
     assert not any("->(-1," in line for line in logs[n0:])
 
 
+def _arm_south_hold():
+    clock = Clock()
+    nav, logs = _quiet_nav(clock)
+    nav.heading = math.pi / 2
+    nav.request_revive_escape()
+    gap = result(ring(480, 256, 150, 48, gap_deg=(70, 110)))
+    run(nav, clock, gap, 8, hp=0.5)
+    assert _nearest(nav.breakout) == (0, 1)
+    run(nav, clock, gap, 30, hp=0.5)
+    assert nav.escaping and nav.cover >= nav.tune.cover_trigger
+    assert _nearest(nav.breakout) == (0, 1)
+    assert _nearest(nav._escape_origin) == (0, 1)
+    assert any("revive escape holding" in line for line in logs)
+    return nav, clock, logs
+
+
+def _south_wall():
+    """Closed ring with the south corridor shut. West is a 90 deg side-step."""
+    wall = []
+    for radius in (120.0, 160.0, 200.0, 240.0):
+        wall += _arc(90, n=11, radius=radius, weight=1.6, spread=0.16)
+    return ring(480, 256, 150, 48) + ring(480, 256, 210, 40) + wall
+
+
+def _north_nudge():
+    """North is a bit cheaper than west, and not a shut wall behind the anchor.
+
+    From a west heading this is a forward 90 deg step. From the original south
+    heading it is a 180 deg reversal, and west itself is still under 2x north.
+    """
+    pts = ring(480, 256, 150, 48, gap_deg=(250, 290)) + ring(480, 256, 220, 36)
+    for deg, weight in ((0, 1.5), (45, 1.3), (-45, 1.3), (90, 1.2), (180, 1.6), (135, 1.1), (-135, 1.05)):
+        for radius in (140.0, 190.0):
+            pts += _arc(deg, n=5, radius=radius, weight=weight, spread=0.12)
+    return pts
+
+
+def test_revive_hold_side_steps_do_not_add_up_to_a_reversal():
+    """run2.log 271-276: the hold was on (0, 1). A 135 deg re-aim to (-1, -1)
+    overwrote the origin, and the next re-aim to (0, -1) was only a forward
+    step from that new origin — 180 deg back through the pack.
+
+    A 90 deg side-step off a shut corridor is still allowed. The following
+    90 deg step must not finish the reversal while the original hemisphere
+    still has a corridor.
+    """
+    nav, clock, _ = _arm_south_hold()
+    origin = nav._escape_origin
+    run(nav, clock, result(_south_wall()), 12, hp=0.5)
+    assert nav.cover >= nav.tune.cover_trigger
+    assert _dot(nav.breakout, origin) >= -1e-6
+    assert _nearest(nav.breakout) == (-1, 0)
+    run(nav, clock, result(_north_nudge()), 18, hp=0.5)
+    assert nav.escaping and nav.cover >= nav.tune.cover_trigger
+    assert _dot(nav.breakout, origin) >= -1e-6
+    assert _dot(nav._escape_origin, origin) >= -1e-6
+    assert _nearest(nav.breakout) != (0, -1)
+
+
 def test_revive_escape_early_window_still_allows_reversal():
     """REVIVE behaviour unchanged: stale first frame may be fully re-picked."""
     clock = Clock()

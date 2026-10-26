@@ -1651,28 +1651,55 @@ class Navigator:
         """While a revive hold is running, follow a corridor that has actually shut.
 
         The first ``revive_escape_s`` stays committed. After that a closed ring
-        keeps the escape going. The cheapest corridor still wins, including a
-        reversal when the opening has moved, but a small edge is the step just
-        taken: walking toward D makes -D look cheaper on the next frame. A
-        reversal has to clear ``revive_hold_reverse_ratio``. A forward side-step
-        keeps the pre-hold 1.6x bar, including when the opposite is only a
-        little cheaper, so a wall ahead still turns. A second re-aim waits
-        ``revive_hold_reaim_s``.
+        keeps the escape going. ``_escape_origin`` stays the hemisphere the
+        escape committed to. A 90 deg side-step uses the pre-hold 1.6x bar and
+        does not move that anchor, so a second side-step cannot finish a 180
+        deg reversal (run2 at game~332s: south, then northwest, then north).
+        A heading behind the anchor still wins when the corridor we are on is
+        shut (about 2x), or when every corridor in the anchor hemisphere is.
+        The anchor moves only when that new heading cannot steer inside it
+        (a straight reversal), so a 135 deg step leaves it in place. A second
+        re-aim waits ``revive_hold_reaim_s``.
         """
         t = self.tune
         if self._escape_reason != "revive" or self._escape_s <= t.revive_escape_s:
             return False
         if self.cover < t.cover_trigger:
             return False
+        org = np.asarray(self._escape_origin or self.breakout, dtype=np.float32)
+        org_n = float(np.hypot(float(org[0]), float(org[1])))
+        org_u = _UNIT[cur] if org_n < 1e-6 else org / org_n
+        hemi = (_UNIT @ org_u) >= -1e-6
         best = _pick_min(costs, self.breakout)
         if best == cur or not np.isfinite(costs[best]):
             return True
         # Same pad and forward bar as the pre-hold window (1.6x + 0.5).
+        # Dot 0 is a 90 deg side-step and stays inside the anchor hemisphere.
         bar = 1.6
-        if float(_UNIT[cur] @ _UNIT[best]) < -1e-6:
+        # A real reversal may have to retarget the anchor so the steering cone
+        # is not empty. A 90/135 deg step that still shares that cone must not:
+        # moving the anchor is what let the next side-step finish a 180.
+        move_anchor = False
+        anchor_dot = float(_UNIT[best] @ org_u)
+        cur_dot = float(_UNIT[cur] @ org_u)
+        further = anchor_dot < -1e-6 and anchor_dot < cur_dot - 1e-4
+        if further:
+            ratio = t.revive_hold_reverse_ratio
+            on_anchor_side = cur_dot >= -1e-6
+            current_shut = on_anchor_side and costs[cur] > costs[best] * ratio + 0.5
+            in_hemi = costs[hemi & np.isfinite(costs)]
+            blocked = in_hemi.size == 0 or float(in_hemi.min()) > float(costs[best]) * ratio + 0.5
+            if current_shut or blocked:
+                bar = ratio
+                move_anchor = True
+            else:
+                best = _pick_min(np.where(hemi, costs, np.inf), self.breakout)
+                bar = 1.6
+                move_anchor = False
+        elif float(_UNIT[cur] @ _UNIT[best]) < -1e-6:
             bar = t.revive_hold_reverse_ratio
             if not (costs[cur] > costs[best] * bar + 0.5):
-                ahead = (_UNIT @ _UNIT[cur]) >= -1e-6
+                ahead = hemi & ((_UNIT @ _UNIT[cur]) >= -1e-6)
                 best = _pick_min(np.where(ahead, costs, np.inf), self.breakout)
                 bar = 1.6
         if (
@@ -1682,8 +1709,14 @@ class Navigator:
             and costs[cur] > costs[best] * bar + 0.5
         ):
             cur_d = DIRS[cur]
-            self.breakout = tuple(float(v) for v in _UNIT[best])
-            self._escape_origin = self.breakout
+            new_h = _UNIT[best]
+            self.breakout = tuple(float(v) for v in new_h)
+            # Keep the anchor unless the new heading cannot steer inside it.
+            # A 180 deg reversal has an empty cone; a 135 deg one still shares
+            # the boundary direction, so the anchor stays put.
+            along = _UNIT @ new_h
+            if move_anchor and not np.any((along >= t.escape_cone_dot - 1e-6) & hemi):
+                self._escape_origin = self.breakout
             self._revive_reaim_s = self._escape_s
             self.log(
                 f"[nav] revive escape re-aim {cur_d}->{DIRS[best]} at +{self._escape_s:.1f}s"
