@@ -1,4 +1,6 @@
-"""Treasure chests outrank gems. Escapes still win when danger is high.
+"""Treasure chests outrank gems. A full-HP crowd stays with the chest.
+
+HP-crash flees and a flower-window ring still take their own heading.
 
 No fixture in tests/fixtures shows a chest or the yellow off-screen arrow
 (checked against every captured frame). Detection is pinned to the game's
@@ -105,13 +107,14 @@ def test_navigator_prefers_chest_over_gem_target_when_safe():
 def test_high_danger_escapes_then_resumes_chest():
     clock = Clock()
     nav = Navigator(clock=clock, log=lambda *_: None)
-    # Crowd and chest both to the right. Danger here is above chest_danger.
+    # Crowd and chest both to the right. Full HP steps or tight-kites toward it.
     crowd = result(blob(600, 256, n=16, spread=16), gems=GEM_LEFT)
     crowd.chest = CHEST_RIGHT
     vecs = run(nav, clock, crowd, 8, hp=1.0)
     assert nav.last.danger_here >= Tuning().chest_danger
-    assert nav.last.mode.startswith("escape")
-    assert all(v[0] < 0 for v in vecs)
+    assert nav._chase in ("step", "orbit")
+    assert not nav.last.mode.startswith("ring-escape")
+    assert all(v[0] > 0 for v in vecs)
 
     # HP-crash flee (same path as a flower-ring survival flee) ignores the chest.
     run(nav, clock, crowd, 2, hp=1.0)
@@ -183,16 +186,24 @@ def test_late_gems_beat_kite_at_moderate_danger():
     assert vecs[-1][0] != 1
 
 
-def test_high_danger_breakout_keeps_the_gap_not_the_chest():
+def test_high_danger_ring_stays_with_the_chest():
+    """A closing ring's away-gap does not pull a full-HP bot off the chest.
+
+    The gap is to the left and the chest is to the right. The commit walks
+    toward the chest (or tight-kites it) instead of taking that gap.
+    """
     clock = Clock()
-    nav = Navigator(clock=clock, log=lambda *_: None)
+    logs: list[str] = []
+    nav = Navigator(clock=clock, log=logs.append)
     nav.game_s = 100.0
     closing = result(ring(480, 256, 170, 40, gap_deg=(170, 200)))  # gap to the left
     closing.chest = CHEST_RIGHT
     vecs = run(nav, clock, closing, 6, hp=1.0)
     assert nav.last.danger_here >= Tuning().chest_danger
-    assert nav.breakouts >= 1
-    assert all(v[0] < 0 for v in vecs)
+    assert nav.cover >= nav.tune.cover_trigger
+    assert nav._chase in ("step", "orbit")
+    assert all(v[0] > 0 for v in vecs)
+    assert not any(ln.startswith("[chest] clear ") for ln in logs)
 
 
 def test_chest_seek_logs_transitions_with_position_and_danger():
@@ -229,13 +240,13 @@ def test_chest_seek_logs_transitions_with_position_and_danger():
     assert any(ln.startswith("[chest] seek chest (720,256) danger=") for ln in lines)
     assert not any(ln.startswith("[chest] seek arrow") for ln in lines)
 
-    # Crowd and chest both to the right: danger is past chest_danger, so no seek.
+    # Crowd and chest both to the right. The existing seek is not cleared.
     lines.clear()
     crowd = result(blob(600, 256, n=16, spread=16), gems=GEM_LEFT)
     crowd.chest = CHEST_RIGHT
     run(nav, clock, crowd, 6, hp=1.0)
     assert nav.last.danger_here >= Tuning().chest_danger
-    assert not any(ln.startswith("[chest] seek") for ln in lines)
+    assert not any(ln.startswith("[chest] clear") for ln in lines)
 
 
 def test_firewand_fireball_is_not_a_chest():
