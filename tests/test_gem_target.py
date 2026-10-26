@@ -36,25 +36,35 @@ def test_gem_tune_for_swaps_target_gain_only_early():
 
 def test_target_pull_beats_kite_when_scattered_gems_cancel():
     kite = (0.0, -1.0)  # kite says "up"
-    early = gem_tune_for(Tuning(), 120.0)
-    off = gem_tune_for(Tuning(early_gem_target_gain=0.0), 120.0)
-    no_target = score_directions(EMPTY, (PX, PY), kite, 1.0, gems=SCATTER, tune=off)
-    with_target = score_directions(EMPTY, (PX, PY), kite, 1.0, gems=SCATTER, tune=early)
+    # Kite band, without the defensive gem veto. Above pack_dive_hp the kite
+    # term is off and the gem pull is what moves.
+    band = dict(low_hp=0.10, critical_hp=0.10)
+    early = gem_tune_for(Tuning(**band), 120.0)
+    off = gem_tune_for(Tuning(early_gem_target_gain=0.0, **band), 120.0)
+    no_target = score_directions(EMPTY, (PX, PY), kite, 1.0, gems=SCATTER, tune=off, hp=0.24)
+    with_target = score_directions(EMPTY, (PX, PY), kite, 1.0, gems=SCATTER, tune=early, hp=0.24)
     assert no_target.vector[0] <= 0          # the cancelled sum leaves the kite in charge
     assert with_target.vector[0] == 1        # heads for the clump on the right
     assert with_target.scores[(1, 0)] > no_target.scores[(1, 0)]
 
 
 def test_target_pull_fades_with_danger_and_off_at_low_hp():
-    early = gem_tune_for(Tuning(), 120.0)
-    # Enemy blob next to the player: danger here >= gem_danger -> no gem terms at all.
+    band = dict(low_hp=0.10, critical_hp=0.10)
+    early = gem_tune_for(Tuning(**band), 120.0)
+    # Enemy blob next to the player: danger here >= gem_danger -> no gem terms
+    # once HP is in the kite band. Above that line the gems keep pulling.
     crowd = np.array([[PX + dx, PY + dy, 1.0] for dx in (-12, 0, 12) for dy in (-12, 0, 12)], np.float32)
-    off = gem_tune_for(Tuning(early_gem_target_gain=0.0), 120.0)
-    a = score_directions(crowd, (PX, PY), None, 0.0, gems=SCATTER, tune=early)
-    b = score_directions(crowd, (PX, PY), None, 0.0, gems=SCATTER, tune=off)
+    off = gem_tune_for(Tuning(early_gem_target_gain=0.0, **band), 120.0)
+    a = score_directions(crowd, (PX, PY), None, 0.0, gems=SCATTER, tune=early, hp=0.24)
+    b = score_directions(crowd, (PX, PY), None, 0.0, gems=SCATTER, tune=off, hp=0.24)
     assert a.danger_here >= early.gem_danger
     assert a.scores == b.scores
+    farming = score_directions(crowd, (PX, PY), None, 0.0, gems=SCATTER, tune=early, hp=1.0)
+    farming_off = score_directions(crowd, (PX, PY), None, 0.0, gems=SCATTER, tune=off, hp=1.0)
+    assert farming.scores != farming_off.scores
     # Low HP (defensive): no gem pull either.
-    lo_a = score_directions(EMPTY, (PX, PY), None, 0.0, gems=SCATTER, hp=0.3, tune=early)
-    lo_b = score_directions(EMPTY, (PX, PY), None, 0.0, gems=SCATTER, hp=0.3, tune=off)
+    lo_early = gem_tune_for(Tuning(), 120.0)
+    lo_off = gem_tune_for(Tuning(early_gem_target_gain=0.0), 120.0)
+    lo_a = score_directions(EMPTY, (PX, PY), None, 0.0, gems=SCATTER, hp=0.20, tune=lo_early)
+    lo_b = score_directions(EMPTY, (PX, PY), None, 0.0, gems=SCATTER, hp=0.20, tune=lo_off)
     assert lo_a.scores == lo_b.scores

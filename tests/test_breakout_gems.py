@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from vs_vision_bot.pathfind import Navigator, Tuning
 
 from tests.test_movement import Clock, result, ring, run
@@ -11,12 +13,19 @@ GEMS_UP_RIGHT = [(560.0, 200.0), (575.0, 190.0), (590.0, 205.0)]
 
 
 def _scores_in_breakout(game_s: float, gems, tune: Tuning | None = None, flee: bool = False):
+    # Breakouts are the kite band. low_hp stays under 0.24 so the defensive
+    # gem veto is not what these score comparisons measure.
+    base = tune or Tuning()
+    if base.low_hp > 0.24:
+        base = replace(base, low_hp=0.10)
+    if base.critical_hp > 0.24:
+        base = replace(base, critical_hp=0.10)
     clock = Clock()
-    nav = Navigator(tune=tune or Tuning(), clock=clock, log=lambda *_: None)
+    nav = Navigator(tune=base, clock=clock, log=lambda *_: None)
     nav.game_s = game_s
     if flee:
         nav.request_flee(3.0)
-    run(nav, clock, result(ring(480, 256, 240, 32, gap_deg=GAP_RIGHT), gems=gems), 4, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 240, 32, gap_deg=GAP_RIGHT), gems=gems), 4, hp=0.24)
     assert nav.breakout is not None and not nav.escaping
     return nav.last.scores
 
@@ -47,9 +56,9 @@ def test_low_hp_breakout_ignores_gems():
     clock = Clock()
     a = Navigator(clock=clock, log=lambda *_: None)
     a.game_s = 150.0
-    run(a, clock, result(ring(480, 256, 240, 32, gap_deg=GAP_RIGHT), gems=GEMS_UP_RIGHT), 4, hp=0.3)
+    run(a, clock, result(ring(480, 256, 240, 32, gap_deg=GAP_RIGHT), gems=GEMS_UP_RIGHT), 4, hp=0.20)
     clock2 = Clock()
     b = Navigator(clock=clock2, log=lambda *_: None)
     b.game_s = 150.0
-    run(b, clock2, result(ring(480, 256, 240, 32, gap_deg=GAP_RIGHT)), 4, hp=0.3)
+    run(b, clock2, result(ring(480, 256, 240, 32, gap_deg=GAP_RIGHT)), 4, hp=0.20)
     assert a.last.scores == b.last.scores
