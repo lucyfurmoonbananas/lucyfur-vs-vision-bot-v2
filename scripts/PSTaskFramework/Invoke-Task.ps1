@@ -161,6 +161,11 @@ function Invoke-Task {
         $bound = $result.TaskArgs.Bound
         $unbound = $result.TaskArgs.Unbound
         & $Task.Action @bound @unbound
+
+        $result.ExitCode = $global:LASTEXITCODE
+        if ($Task.AllowedExitCodes.Count -gt 0 -and $result.ExitCode -notin $Task.AllowedExitCodes) {
+            throw "Task '$TaskName' failed with exit code $($result.ExitCode)."
+        }
     }
     catch {
         $result.Error = $_
@@ -168,11 +173,6 @@ function Invoke-Task {
     }
     finally {
         $result.Duration = [datetime]::UtcNow - $result.Start
-    }
-
-    $result.ExitCode = $global:LASTEXITCODE
-    if ($Task.AllowedExitCodes.Count -gt 0 -and $result.ExitCode -notin $Task.AllowedExitCodes) {
-        throw "Task '$TaskName' failed with exit code $($result.ExitCode)."
     }
 
     # Success!
