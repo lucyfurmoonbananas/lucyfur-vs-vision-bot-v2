@@ -212,6 +212,14 @@ class Tuning:
     # VS_TUNE=revive_hold_reaim_s=0 disables the dwell.
     revive_hold_reverse_ratio: float = 2.0
     revive_hold_reaim_s: float = 0.75
+    # test6 run1 (+8.2s / +9.2s / +11.7s) and run2 (+4.3s / +6.9s / +10.0s):
+    # a 2x reversal moved the anchor onto -D, and the next dwell treated +D as
+    # the new "further" side and walked back. Leaving the hemisphere captured
+    # when the hold starts still uses revive_hold_reverse_ratio. Coming back
+    # needs this higher bar. The heavy-wall swap is about 3.3x and still
+    # returns; a 2.2x oscillation does not. VS_TUNE=revive_hold_return_ratio=2
+    # restores the old ping-pong.
+    revive_hold_return_ratio: float = 3.0
     escape_len: float = 420.0         # corridor length when picking the escape heading
     escape_wedge_radius: float = 480.0  # crowd within this radius counts for the wedge term
     escape_wedge_gain: float = 0.5    # weight of whole-screen wedge density vs. corridor
@@ -1295,6 +1303,7 @@ class Navigator:
         self._revive_ring = False       # this revive escape has seen a closed ring
         self._revive_clear_s = 0.0      # how long the post-hold field has stayed clear
         self._revive_reaim_s = 0.0      # escape clock of the last hold re-aim
+        self._revive_hemi: tuple[float, float] | None = None  # hemisphere at hold start
         self._aim_hint = None           # chest or arrow on the frame that picks a heading
         self._last_break_dir: tuple[float, float] | None = None  # heading of the last breakout
         self._last_break_end = -1e9     # game_s when it ended
@@ -1402,6 +1411,7 @@ class Navigator:
         self._revive_ring = False
         self._revive_clear_s = 0.0
         self._revive_reaim_s = 0.0
+        self._revive_hemi = None
         return dur
 
     def _end_breakout(self) -> None:
@@ -1832,55 +1842,75 @@ class Navigator:
         """While a revive hold is running, follow a corridor that has actually shut.
 
         The first ``revive_escape_s`` stays committed. After that a closed ring
-        keeps the escape going. ``_escape_origin`` stays the hemisphere the
-        escape committed to. A 90 deg side-step uses the pre-hold 1.6x bar and
-        does not move that anchor, so a second side-step cannot finish a 180
-        deg reversal (run2 at game~332s: south, then northwest, then north).
-        A heading behind the anchor still wins when the corridor we are on is
-        shut (about 2x), or when every corridor in the anchor hemisphere is.
-        The anchor moves only when that new heading cannot steer inside it
-        (a straight reversal), so a 135 deg step leaves it in place. A second
-        re-aim waits ``revive_hold_reaim_s``.
+        keeps the escape going. ``_revive_hemi`` is the hemisphere when the hold
+        starts and does not move. A 90 deg side-step uses the pre-hold 1.6x bar.
+        A heading outside that hemisphere still wins when the corridor we are on
+        is shut (about 2x), or when every corridor in the hemisphere is. Coming
+        back needs ``revive_hold_return_ratio`` (~3x): a 2x blip must not walk
+        +D to -D and back (test6 run1 +8.2s, run2 +4.3s). ``_escape_origin``
+        moves only when the new heading cannot steer inside it, so the cone
+        stays non-empty. A second re-aim waits ``revive_hold_reaim_s``.
         """
         t = self.tune
         if self._escape_reason != "revive" or self._escape_s <= t.revive_escape_s:
             return False
         if self.cover < t.cover_trigger:
             return False
+        if self._revive_hemi is None and self.breakout is not None:
+            self._revive_hemi = tuple(float(v) for v in self.breakout)
+        frozen = np.asarray(self._revive_hemi or self.breakout, dtype=np.float32)
+        frozen_n = float(np.hypot(float(frozen[0]), float(frozen[1])))
+        frozen_u = _UNIT[cur] if frozen_n < 1e-6 else frozen / frozen_n
+        frozen_dot = _UNIT @ frozen_u
+        in_hemi = frozen_dot >= -1e-6
+        outside = frozen_dot < -1e-6
         org = np.asarray(self._escape_origin or self.breakout, dtype=np.float32)
         org_n = float(np.hypot(float(org[0]), float(org[1])))
         org_u = _UNIT[cur] if org_n < 1e-6 else org / org_n
-        hemi = (_UNIT @ org_u) >= -1e-6
+        steer_hemi = (_UNIT @ org_u) >= -1e-6
         best = _pick_min(costs, self.breakout)
         if best == cur or not np.isfinite(costs[best]):
             return True
         # Same pad and forward bar as the pre-hold window (1.6x + 0.5).
-        # Dot 0 is a 90 deg side-step and stays inside the anchor hemisphere.
+        # Dot 0 is a 90 deg side-step and stays inside the frozen hemisphere.
         bar = 1.6
-        # A real reversal may have to retarget the anchor so the steering cone
-        # is not empty. A 90/135 deg step that still shares that cone must not:
-        # moving the anchor is what let the next side-step finish a 180.
+        # A real reversal may have to retarget the steering anchor so the cone
+        # is not empty. The frozen hemisphere is what a later re-aim is judged
+        # against, so moving the anchor cannot authorize the walk back.
         move_anchor = False
-        anchor_dot = float(_UNIT[best] @ org_u)
-        cur_dot = float(_UNIT[cur] @ org_u)
-        further = anchor_dot < -1e-6 and anchor_dot < cur_dot - 1e-4
-        if further:
+        best_dot = float(frozen_dot[best])
+        cur_dot = float(frozen_dot[cur])
+        departs = bool(outside[best]) and best_dot < cur_dot - 1e-4
+        returns = bool(outside[cur]) and best_dot > 1e-6
+        if departs:
             ratio = t.revive_hold_reverse_ratio
-            on_anchor_side = cur_dot >= -1e-6
-            current_shut = on_anchor_side and costs[cur] > costs[best] * ratio + 0.5
-            in_hemi = costs[hemi & np.isfinite(costs)]
-            blocked = in_hemi.size == 0 or float(in_hemi.min()) > float(costs[best]) * ratio + 0.5
+            on_side = cur_dot >= -1e-6
+            current_shut = on_side and costs[cur] > costs[best] * ratio + 0.5
+            in_costs = costs[in_hemi & np.isfinite(costs)]
+            blocked = in_costs.size == 0 or float(in_costs.min()) > float(costs[best]) * ratio + 0.5
             if current_shut or blocked:
                 bar = ratio
                 move_anchor = True
             else:
-                best = _pick_min(np.where(hemi, costs, np.inf), self.breakout)
+                best = _pick_min(np.where(in_hemi, costs, np.inf), self.breakout)
+                bar = 1.6
+                move_anchor = False
+        elif returns:
+            ratio = t.revive_hold_return_ratio
+            current_shut = costs[cur] > costs[best] * ratio + 0.5
+            out_costs = costs[outside & np.isfinite(costs)]
+            blocked = out_costs.size == 0 or float(out_costs.min()) > float(costs[best]) * ratio + 0.5
+            if current_shut or blocked:
+                bar = ratio
+                move_anchor = True
+            else:
+                best = _pick_min(np.where(outside, costs, np.inf), self.breakout)
                 bar = 1.6
                 move_anchor = False
         elif float(_UNIT[cur] @ _UNIT[best]) < -1e-6:
             bar = t.revive_hold_reverse_ratio
             if not (costs[cur] > costs[best] * bar + 0.5):
-                ahead = hemi & ((_UNIT @ _UNIT[cur]) >= -1e-6)
+                ahead = in_hemi & ((_UNIT @ _UNIT[cur]) >= -1e-6)
                 best = _pick_min(np.where(ahead, costs, np.inf), self.breakout)
                 bar = 1.6
         if (
@@ -1892,11 +1922,11 @@ class Navigator:
             cur_d = DIRS[cur]
             new_h = _UNIT[best]
             self.breakout = tuple(float(v) for v in new_h)
-            # Keep the anchor unless the new heading cannot steer inside it.
-            # A 180 deg reversal has an empty cone; a 135 deg one still shares
-            # the boundary direction, so the anchor stays put.
+            # Keep the steering anchor unless the new heading cannot steer
+            # inside it. A 180 deg reversal has an empty cone; a 135 deg one
+            # still shares the boundary direction, so the anchor stays put.
             along = _UNIT @ new_h
-            if move_anchor and not np.any((along >= t.escape_cone_dot - 1e-6) & hemi):
+            if move_anchor and not np.any((along >= t.escape_cone_dot - 1e-6) & steer_hemi):
                 self._escape_origin = self.breakout
             self._revive_reaim_s = self._escape_s
             self.log(
@@ -2908,6 +2938,23 @@ class Navigator:
         self._critical_on = on
         shown = f"{hp:.2f}"
         self.log(f"[nav] critical HP {'on' if on else 'off'} hp={shown} game~{self.game_s:.0f}s")
+
+    def clear_menu_overlay_latch(self) -> None:
+        """A chest or level-up covered the bar. Drop the false critical and crash flee.
+
+        A committed revive or ring escape is not an HP-crash flee and stays.
+        """
+        if self._critical_on:
+            self._critical_on = False
+            self.log(f"[nav] critical HP cleared (overlay) game~{self.game_s:.0f}s")
+        crash_flee = self._hp_crash_latched and self._flee_remaining > 0 and not self.escaping
+        self._hp_crashing = False
+        self._hp_crash_latched = False
+        self._hp_hist.clear()
+        if crash_flee:
+            self._flee_remaining = 0.0
+            self._end_breakout()
+            self.log(f"[nav] HP-crash flee cleared (overlay) game~{self.game_s:.0f}s")
 
 
 def _ref_player(result: VisionResult) -> tuple[float, float]:

@@ -210,6 +210,31 @@ def gate_heuristic_menu(
     return streak >= need, streak
 
 
+def note_menu_overlay(nav: object, pilot: object, menu_kind: str | None, armed: bool = False) -> bool:
+    """Clear a false critical / HP-crash when a chest or level-up covers the bar.
+
+    Returns whether that overlay is still up. The frame the menu closes resumes
+    the HP tracker so the darkened 0.00 samples do not latch the next step.
+    """
+    tracker = getattr(pilot, "_hp", None)
+    if menu_kind in ("chest", "levelup"):
+        suspend = getattr(tracker, "suspend_for_overlay", None)
+        if callable(suspend):
+            suspend()
+        clear = getattr(nav, "clear_menu_overlay_latch", None)
+        if callable(clear):
+            clear()
+        return True
+    if armed:
+        resume = getattr(tracker, "resume_after_overlay", None)
+        if callable(resume):
+            resume()
+        clear = getattr(nav, "clear_menu_overlay_latch", None)
+        if callable(clear):
+            clear()
+    return False
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vs-vision-bot",
@@ -394,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
     in_menu = False
     prev_menu = None
     heur_streak = [0]
+    overlay_armed = False
 
     try:
         while not bus.quit:
@@ -446,6 +472,7 @@ def main(argv: list[str] | None = None) -> int:
                     # open (chest_is_reward) and must not spend a second.
                     nav.on_chest_opened(reward=bool(getattr(pilot, "chest_is_reward", False)))
             prev_menu = menu_kind
+            overlay_armed = note_menu_overlay(nav, pilot, menu_kind, overlay_armed)
             in_menu = menu_kind is not None
             if not cfg.demo and not bus.paused and not menu_kind:
                 now_box = time.monotonic()
