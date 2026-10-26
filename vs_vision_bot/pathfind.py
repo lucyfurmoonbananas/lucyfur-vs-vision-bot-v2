@@ -191,6 +191,14 @@ class Tuning:
     # and the next death was 9–10s later. Hold the heading while the ring stays
     # closed, and stop once it opens or this cap is reached.
     revive_escape_max_s: float = 12.0
+    # Oct 26 1 AM (run1 game~733s, run3 ~128s, run4 ~447s): past 3s the hold
+    # re-aimed on a 1.1x edge and reversed 135-180 deg every few tenths, so the
+    # escape never left the pack. A reversal during the hold needs the current
+    # corridor to be clearly shut. A second hold re-aim waits this long, so
+    # stepping toward D cannot make -D look cheap enough to flip straight back.
+    # VS_TUNE=revive_hold_reaim_s=0 disables the dwell.
+    revive_hold_reverse_ratio: float = 2.0
+    revive_hold_reaim_s: float = 0.75
     escape_len: float = 420.0         # corridor length when picking the escape heading
     escape_wedge_radius: float = 480.0  # crowd within this radius counts for the wedge term
     escape_wedge_gain: float = 0.5    # weight of whole-screen wedge density vs. corridor
@@ -1123,6 +1131,7 @@ class Navigator:
         self._revive_held = False       # logged the surrounded-hold extension once
         self._revive_ring = False       # this revive escape has seen a closed ring
         self._revive_clear_s = 0.0      # how long the post-hold field has stayed clear
+        self._revive_reaim_s = 0.0      # escape clock of the last hold re-aim
         self._aim_hint = None           # chest or arrow on the frame that picks a heading
         self._last_break_dir: tuple[float, float] | None = None  # heading of the last breakout
         self._last_break_end = -1e9     # game_s when it ended
@@ -1228,6 +1237,7 @@ class Navigator:
         self._revive_held = False
         self._revive_ring = False
         self._revive_clear_s = 0.0
+        self._revive_reaim_s = 0.0
         return dur
 
     def _end_breakout(self) -> None:
@@ -1618,11 +1628,16 @@ class Navigator:
         return True
 
     def _revive_hold_repick(self, costs: np.ndarray, cur: int) -> bool:
-        """While a revive hold is running, aim at the current open corridor.
+        """While a revive hold is running, follow a corridor that has actually shut.
 
-        The first ``revive_escape_s`` stays committed. After that, a closed ring
-        keeps the escape going, but the heading follows the cheapest corridor,
-        including a reversal when the old one has filled in.
+        The first ``revive_escape_s`` stays committed. After that a closed ring
+        keeps the escape going. The cheapest corridor still wins, including a
+        reversal when the opening has moved, but a small edge is the step just
+        taken: walking toward D makes -D look cheaper on the next frame. A
+        reversal has to clear ``revive_hold_reverse_ratio``. A forward side-step
+        keeps the pre-hold 1.6x bar, including when the opposite is only a
+        little cheaper, so a wall ahead still turns. A second re-aim waits
+        ``revive_hold_reaim_s``.
         """
         t = self.tune
         if self._escape_reason != "revive" or self._escape_s <= t.revive_escape_s:
@@ -1630,14 +1645,26 @@ class Navigator:
         if self.cover < t.cover_trigger:
             return False
         best = _pick_min(costs, self.breakout)
+        if best == cur or not np.isfinite(costs[best]):
+            return True
+        # Same pad and forward bar as the pre-hold window (1.6x + 0.5).
+        bar = 1.6
+        if float(_UNIT[cur] @ _UNIT[best]) < -1e-6:
+            bar = t.revive_hold_reverse_ratio
+            if not (costs[cur] > costs[best] * bar + 0.5):
+                ahead = (_UNIT @ _UNIT[cur]) >= -1e-6
+                best = _pick_min(np.where(ahead, costs, np.inf), self.breakout)
+                bar = 1.6
         if (
             best != cur
             and np.isfinite(costs[best])
-            and costs[cur] > costs[best] * 1.1 + 0.15
+            and self._escape_s - self._revive_reaim_s >= t.revive_hold_reaim_s
+            and costs[cur] > costs[best] * bar + 0.5
         ):
             cur_d = DIRS[cur]
             self.breakout = tuple(float(v) for v in _UNIT[best])
             self._escape_origin = self.breakout
+            self._revive_reaim_s = self._escape_s
             self.log(
                 f"[nav] revive escape re-aim {cur_d}->{DIRS[best]} at +{self._escape_s:.1f}s"
             )
