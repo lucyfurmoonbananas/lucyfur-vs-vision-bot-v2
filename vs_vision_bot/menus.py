@@ -1734,6 +1734,12 @@ HP_CRITICAL_EXIT = 0.40
 HP_RECOVER_N = 3
 HP_FULL_FLASH = 0.90
 HP_FULL_FLASH_N = 6
+# A chest or level-up darkens the playfield and the anchored bar reads 0.00
+# for a frame (test6: 21 critical-on lines, 14 HP-crash flees, previous frame
+# still full). One such drop from a healthy bar is the overlay, not a hit.
+# A second 0.00, or any read that is merely low (0.06), is real.
+HP_OVERLAY_ZERO = 0.02
+HP_OVERLAY_HEALTHY = 0.35
 
 
 class HpTracker:
@@ -1750,10 +1756,15 @@ class HpTracker:
         self._anchor: float | None = None
         self._pending: list[float] = []
         self._recover: list[float] = []
+        self._zero_pending = 0
+        self._overlay = False
+        self._overlay_base: float | None = None
+        self._healthy: float | None = None
 
     def add(self, v: float | None) -> None:
         if v is None:
             self._pending.clear()
+            self._zero_pending = 0
             self._recover.clear()
             self.misses += 1
             if self.values and self.misses >= self.miss_limit:
@@ -1773,6 +1784,21 @@ class HpTracker:
             ):
                 self._accept_window(self._pending[-HP_JUMP_CONFIRM :])
             return
+        if self._overlay and v <= HP_OVERLAY_ZERO:
+            return
+        # One exact empty-bar read from a healthy window is the chest / level-up
+        # frame that occludes the bar. The next different read, or a second
+        # 0.00, is accepted. A drop to 0.06 is not this case.
+        if (
+            not self.low_held
+            and base is not None
+            and base >= HP_OVERLAY_HEALTHY
+            and v <= HP_OVERLAY_ZERO
+        ):
+            self._zero_pending += 1
+            if self._zero_pending < 2:
+                return
+        self._zero_pending = 0
         self._accept(v)
 
     def _accept(self, v: float) -> None:
@@ -1783,6 +1809,8 @@ class HpTracker:
         del self.values[: -self.window]
         self._anchor = self.value
         self._sync_low([float(v)])
+        if not self.low_held and self.value is not None and self.value >= HP_OVERLAY_HEALTHY:
+            self._healthy = float(self.value)
 
     def _accept_window(self, samples: list[float]) -> None:
         self.misses = 0
@@ -1840,6 +1868,44 @@ class HpTracker:
         self._anchor = None
         self._pending.clear()
         self._recover.clear()
+        self._zero_pending = 0
+        self._overlay = False
+        self._overlay_base = None
+        self._healthy = None
+
+    def suspend_for_overlay(self) -> None:
+        """Chest or level-up is up. Remember the last healthy bar and ignore 0.00."""
+        if self._overlay_base is None and self._healthy is not None:
+            self._overlay_base = self._healthy
+        self._overlay = True
+        self._zero_pending = 0
+
+    def resume_after_overlay(self) -> None:
+        """The menu closed. Drop zeros that the dark frame wrote over a healthy bar.
+
+        A real low sample (0.06, not 0.00) in the window keeps the hold. A window
+        that never had a healthy reading is left alone.
+        """
+        self._overlay = False
+        self._zero_pending = 0
+        base = self._overlay_base
+        self._overlay_base = None
+        if base is None:
+            return
+        real_low = [v for v in self.values if HP_OVERLAY_ZERO < v < HP_OVERLAY_HEALTHY]
+        if real_low:
+            return
+        if not self.low_held and not any(v <= HP_OVERLAY_ZERO for v in self.values):
+            return
+        kept = [v for v in self.values if v > HP_OVERLAY_ZERO]
+        self.values = (kept or [base])[-self.window :]
+        self.low_held = False
+        self._recover.clear()
+        self.blind = False
+        self.misses = 0
+        self._anchor = self.value
+        if self.value is not None and self.value >= HP_OVERLAY_HEALTHY:
+            self._healthy = float(self.value)
 
     def forget_for_revive(self) -> None:
         """Drop the death-screen bar, and stay critical until a new one agrees.
@@ -1948,6 +2014,60 @@ def is_final_quit_button(frame: np.ndarray, words: list[tuple[str, int, int, int
 
 def read_chest_text(frame: np.ndarray) -> str:
     return " ".join(t for t, *_ in read_screen_words(frame))
+
+
+def _lowest_word(words: list[tuple[str, int, int, int, int]], target: str) -> tuple[int, int] | None:
+    """Center of the lowest OCR word matching ``target``. The DONE button sits under the card."""
+    best: tuple[int, int] | None = None
+    for t, x, y, w, h in words:
+        clean = re.sub(r"[^a-z]", "", t.lower())
+        if not clean or difflib.SequenceMatcher(None, clean, target).ratio() < 0.8:
+            continue
+        cy = y + h // 2
+        if best is None or cy > best[1]:
+            best = (x + w // 2, cy)
+    return best
+
+
+def read_chest_card_text(frame: np.ndarray, words: list[tuple[str, int, int, int, int]] | None = None) -> str:
+    """OCR the reward card above DONE.
+
+    The full darkened page (timer, kill counter, vignette) is what Tesseract
+    returns as ``'Venda Feet...'`` / ``'18304 oF] ~ . oe DONE'``. The item name
+    and ``Level: N`` are the lighter text on the card, so a tight crop above
+    the button is read at a lower threshold and a larger scale.
+    """
+    if frame is None or frame.size == 0 or not tesseract_available():
+        return ""
+    h, w = frame.shape[:2]
+    if words is None:
+        words = read_screen_words(frame)
+    done = _lowest_word(words, "done")
+    if done is not None:
+        cx, cy = done
+        x0 = max(0, int(cx - 0.22 * w))
+        x1 = min(w, int(cx + 0.22 * w))
+        y1 = max(0, int(cy - 0.04 * h))
+        y0 = max(0, int(cy - 0.56 * h))
+    else:
+        x0, x1 = int(0.27 * w), int(0.73 * w)
+        y0, y1 = int(0.24 * h), int(0.64 * h)
+    if y1 <= y0 + 8 or x1 <= x0 + 8:
+        return ""
+    crop = frame[y0:y1, x0:x1]
+    if crop.size == 0:
+        return ""
+    best = ""
+    for thr in (170, 150, 200):
+        text = ocr_image(_white_text(crop, thr=thr, scale=3), psm=6).replace("\n", " ")
+        text = " ".join(text.split())
+        if not text:
+            continue
+        if evolutions_from_chest_text(text) or levels_from_chest_text(text):
+            return text
+        if len(text) > len(best):
+            best = text
+    return best
 
 
 def find_word(words: list[tuple[str, int, int, int, int]], target: str) -> tuple[int, int] | None:
@@ -2091,6 +2211,26 @@ class MenuPilot:
                 self.levels[name] = min(level_cap(name), lv)
         self._publish_build()
 
+    def _note_shown_cards(self, screen: LevelUpScreen) -> None:
+        """An evolution named on a level-up card has already happened.
+
+        Soul Eater on the card marks Garlic evolved and at 8. A level tag one
+        above the tracker stays the next-level offer (it is not copied here).
+        """
+        changed = False
+        for card in screen.cards:
+            if not card.name or card.new:
+                continue
+            for base in EVOLUTION_BASES.get(card.name, ()):
+                if base in self.evolved:
+                    continue
+                self.evolved.add(base)
+                self.owned.add(base)
+                self.levels[base] = max(WEAPON_MAX_LEVEL, self.levels.get(base, 0))
+                changed = True
+        if changed:
+            self._publish_build()
+
     @property
     def hp(self) -> float | None:
         """Smoothed HP fraction (median of recent bar readings), None until seen or when the bar is lost."""
@@ -2228,6 +2368,7 @@ class MenuPilot:
                 return
             with _menu_ocr_budget():
                 read_cards(frame, screen)
+                self._note_shown_cards(screen)
                 self._names = [c.name or c.raw or "?" for c in screen.cards]
                 self.owned |= {c.name for c in screen.cards if c.name and not c.new}
                 if self._try_start_banish(frame, screen):
@@ -2435,7 +2576,12 @@ class MenuPilot:
         self.picks.append(name)
         taken = self._chosen or (name if name in VOCAB else "")
         # Coin bags and Floor Chicken are not a weapon or a passive slot.
-        if taken and taken not in FILLER:
+        if taken in EVOLUTION_BASES:
+            for base in EVOLUTION_BASES[taken]:
+                self.evolved.add(base)
+                self.owned.add(base)
+                self.levels[base] = max(WEAPON_MAX_LEVEL, self.levels.get(base, 0))
+        elif taken and taken not in FILLER:
             self.owned.add(taken)
             self.levels[taken] = min(level_cap(taken), self.levels.get(taken, 0) + 1)
         shown = taken or name
@@ -2489,7 +2635,8 @@ class MenuPilot:
             if self._chest_streak >= 2:  # two scans in a row: not OCR noise
                 target = {"revive": "revive", "quit": "quit", "results": "done"}.get(kind)
                 where = find_word(words, target) if target else None
-                self._chest_hit = (self.clock(), text, kind, where)
+                card = read_chest_card_text(frame, words) if kind == "chest" else ""
+                self._chest_hit = (self.clock(), text, kind, where, card)
         else:
             self._chest_streak = 0
             self._chest_hit = None
@@ -2543,7 +2690,10 @@ class MenuPilot:
                 self._press("enter", self.chest_cooldown_s)
                 self.chest_presses += 1
                 self.log(f"[chest] Enter on chest screen ({shown!r})")
-                self._note_chest_reward(hit[1] or "")
+                full = hit[1] or ""
+                card = hit[4] if len(hit) > 4 else ""
+                reward = card if card and (evolutions_from_chest_text(card) or levels_from_chest_text(card)) else full
+                self._note_chest_reward(reward)
             self._chest_hit = None
             self._chest_streak = 0  # the next screen must be confirmed by two fresh scans
         self.status = kind.upper()
