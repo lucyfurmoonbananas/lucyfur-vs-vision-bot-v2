@@ -37,14 +37,18 @@ Per frame, every one of the 8 WASD directions is scored:
   ``chest_orbit_radius`` (wider as danger rises). The orbit sign is whichever
   tangent corridor is more open, and it flips when the other side opens up.
   A low-danger corridor toward the chest (the same gate as a chest seek)
-  steps in, unless the chest is being held. The first ``chest_free_opens``
-  chests (default 3) open immediately. After that the bot keeps orbiting and
-  treats the chest as a small keep-out disc until a weapon is evolution-ready
-  and the clock is past ``chest_evo_after_s`` (10:00), or every weapon is
-  maxed or evolved. ``set_build_state`` reports those two flags; both default
-  to false, so an unwired tracker holds every chest after the free ones.
-  Committed escapes, flees, and critical HP are not pulled and may cross the
-  disc. When escape costs are close, the corridor toward the anchor wins by
+  steps in. Every spotted chest is open-allowed (``chest_open_always``).
+  The old rule — the first ``chest_free_opens`` immediately, later chests
+  held until a weapon is evolution-ready and the clock is past
+  ``chest_evo_after_s`` (10:00), or every weapon is maxed — is
+  ``chest_open_always=0``. ``set_build_state`` reports those two flags.
+  While HP is in the dive band the bot steps in when a corridor toward the
+  chest is open, and otherwise kite-orbits on ``chest_commit_orbit`` instead
+  of the wide ring (about 350–400 px). That commitment stays up through a
+  plain breakout and a ring-escape, so the seek is not cleared and the
+  heading is not walked off the chest. Critical HP, flees, and the flower
+  window still leave. A held chest (the override) is a small keep-out disc.
+  When escape costs are close, the corridor toward the anchor wins by
   ``chest_leash_tie``. The anchor drops once the chest is reached, after
   ``chest_leash_forget_s`` without a re-sight, or after ``chest_leash_slip``
   of travel since the last sight. Orbit enter/exit, step-in, hold, and
@@ -311,14 +315,29 @@ class Tuning:
     chest_orbit_band: float = 60.0
     # Extra px of radius per unit of danger, capped at chest_clear_danger. 0 holds the radius fixed.
     chest_orbit_swell: float = 40.0
+    # Tight ring while committing to an openable chest at dive HP. The wide
+    # radius above still swells for a held chest and for low HP. 0 falls back
+    # to that wide orbit. VS_TUNE=chest_commit_orbit=280.
+    chest_commit_orbit: float = 140.0
+    # Inward share of the tight ring while the straight lane is shut, so the
+    # kite stays mostly tangent instead of stepping through the crowd. 1 dives straight.
+    chest_commit_inward: float = 0.50
+    # Toward-chest corridor cost at or under this multiple of the cheapest
+    # corridor is a lane: the commit steps in. Above it, tight-orbit.
+    chest_lane_ratio: float = 1.45
     # Weight of the orbit heading. High enough to beat a moderate crowd, under chest_gain.
     chest_orbit_gain: float = 6.0
     # The other tangent takes the orbit when its corridor cost is below this
     # fraction of the current side. Ties keep the way the body is already pointed.
     chest_orbit_switch: float = 0.7
-    # Chests taken as soon as they drop. Later ones are held. A large value
-    # disables the hold. VS_TUNE=chest_free_opens=9.
+    # Chests taken as soon as they drop, when chest_open_always is 0.
+    # Later ones are held. A large value disables that hold.
+    # VS_TUNE=chest_free_opens=9.
     chest_free_opens: int = 3
+    # 1: every spotted chest is open-allowed, ignoring the free-open quota,
+    # evolution readiness, and the 10:00 clock. 0 restores that hold.
+    # VS_TUNE=chest_open_always=0.
+    chest_open_always: int = 1
     # A held chest opens once a weapon is evolution-ready and the clock is here
     # (10:00). all_maxed ignores the clock. VS_TUNE=chest_evo_after_s=600.
     chest_evo_after_s: float = 600.0
@@ -1160,6 +1179,7 @@ class Navigator:
         self._leash_seen = 0.0
         self._leash_travel = 0.0  # px moved since the last sight
         self._chase = ""  # "" | "orbit" | "step" for this frame
+        self._commit = False  # dive / tight-kite an openable chest this frame
         self._orbit_on = False
         self._orbit_sign = 0  # +1 / -1 around the anchor, 0 until a side is chosen
         self._orbit_aim: tuple[float, float] | None = None
@@ -1754,7 +1774,10 @@ class Navigator:
         The first missed frame is always held, then up to ``chest_hold_s``.
         Flees and committed escapes return None so they keep their own heading.
         """
-        if self.tune.chest_gain <= 0 or escape or self._flee_remaining > 0:
+        # A ring-escape copies its timer into _flee_remaining. While committing
+        # to a chest that mirror must not wipe the sighting (the seek/clear cycle).
+        ring_mirror = self._flee_remaining > 0 and self._ring_escape_running() and self._commit
+        if self.tune.chest_gain <= 0 or escape or (self._flee_remaining > 0 and not ring_mirror):
             self._chest_hold = None
             self._chest_miss_s = 0.0
             self._chest_miss_n = 0
@@ -1888,6 +1911,8 @@ class Navigator:
 
     def _open_reason(self) -> str | None:
         """Why the pending chest may be stepped on, or None while it is held."""
+        if self.tune.chest_open_always:
+            return "always"
         if self._all_maxed:
             return "all-maxed"
         if self._chests_opened < self.tune.chest_free_opens:
@@ -1895,6 +1920,65 @@ class Navigator:
         if self._evolution_ready and self.game_s >= self.tune.chest_evo_after_s:
             return "evolution"
         return None
+
+    def _ring_escape_running(self) -> bool:
+        """A committed ring-escape. Revive and HP-crash flees are not this."""
+        return (
+            self.escaping
+            and self._escape_reason == "ring"
+            and not self._hp_crashing
+        )
+
+    def _chest_commit(self, hp: float | None) -> bool:
+        """Openable chest and dive HP: step in or tight-kite, including through a ring-escape.
+
+        Critical HP, a revive/HP-crash flee, and the flower window keep their own heading.
+        A ring-escape copies its timer into ``_flee_remaining``; that mirror is not a flee.
+        """
+        survival_flee = self._flee_remaining > 0 and not self._ring_escape_running()
+        if (
+            not self._leash_enabled()
+            or not self._chest_open_allowed()
+            or self._critical_on
+            or survival_flee
+            or self._hp_crashing
+            or self._in_flower()
+            or (self.escaping and not self._ring_escape_running())
+            or dive_level(hp, self.tune) <= 0.0
+        ):
+            return False
+        return True
+
+    def _chest_lane_open(self, pts: np.ndarray, px: float, py: float) -> bool:
+        """True when the corridor toward the anchor is not much worse than the best."""
+        if self._leash is None:
+            return False
+        ox, oy = self._leash_offset()
+        dist = math.hypot(ox, oy)
+        if dist <= _LEASH_REACH:
+            return True
+        t = self.tune
+        costs = corridor_costs(pts, px, py, t.corridor_len, t.corridor_width)
+        toward = self._heading_cost(costs, ox / dist, oy / dist)
+        best = float(np.min(costs))
+        if not math.isfinite(toward) or not math.isfinite(best):
+            return False
+        ratio = t.chest_lane_ratio if t.chest_lane_ratio > 0 else 1.0
+        return toward <= best * ratio + 0.35
+
+    def _aim_from_leash(
+        self, px: float, py: float, chest_at: tuple[float, float] | None,
+    ) -> tuple[float, float] | None:
+        if chest_at is not None:
+            dx, dy = float(chest_at[0]) - px, float(chest_at[1]) - py
+        elif self._leash is not None:
+            dx, dy = self._leash_offset()
+        else:
+            return None
+        n = math.hypot(dx, dy)
+        if n < 1e-3:
+            return None
+        return (dx / n, dy / n)
 
     def _chest_open_allowed(self) -> bool:
         return self._open_reason() is not None
@@ -2078,6 +2162,8 @@ class Navigator:
 
     def _orbit_radius(self, danger: float) -> float:
         t = self.tune
+        if self._commit and t.chest_commit_orbit > 0:
+            return t.chest_commit_orbit
         extra = 0.0
         if t.chest_orbit_swell > 0 and t.chest_clear_danger > 0:
             extra = t.chest_orbit_swell * min(max(danger, 0.0), t.chest_clear_danger)
@@ -2101,19 +2187,21 @@ class Navigator:
         hi = max(lo, self.tune.chest_commit_fade)
         return lo + (hi - lo) * level
 
-    def _leash_chase(self, danger: float, hp: float | None = None) -> str:
+    def _leash_chase(self, danger: float, hp: float | None = None, lane: bool = False) -> str:
         """'orbit', 'step', or '' . Emergencies and a disabled orbit stay out of it."""
         # A plain breakout is not one of these. run1 at game~590s logged
         # "orbit exit" while chest=(210,465) was still on screen: cover 0.62
         # started a breakout, danger 2.12 was still inside the orbit band.
-        # Wall commits set escaping, and a flower-window breakout still leaves.
+        # Wall commits set escaping. A commit (openable chest, dive HP) keeps
+        # the chase through that escape. A flower-window breakout still leaves.
+        commit = self._commit
         if (
             not self._leash_enabled()
             or self.tune.chest_leash_radius <= 0
             or self.tune.chest_orbit_radius <= 0
             or self._critical_on
-            or self.escaping
-            or self._flee_remaining > 0
+            or (self._flee_remaining > 0 and not commit)
+            or (self.escaping and not commit)
             or (self.breakout is not None and self._in_flower())
         ):
             return ""
@@ -2124,6 +2212,14 @@ class Navigator:
                 return "orbit"
             return ""
         clear = self._open_clear_danger(hp)
+        if commit and self.tune.chest_commit_orbit > 0:
+            # Step as soon as a lane is open, or while danger is still in the
+            # old arming band. A latch alone must not step through a shut lane:
+            # that is the tight kite. The wide 350-400 ring and the ring-escape
+            # handoff are the two ways the Oct 26 runs never touched the chest.
+            if lane or danger < self.tune.chest_danger:
+                return "step"
+            return "orbit"
         opening = danger < self.tune.chest_danger or (
             self._chest_latched and danger < clear
         )
@@ -2181,6 +2277,11 @@ class Navigator:
         tx, ty = t_pos if sign > 0 else t_neg
         band = max(self.tune.chest_orbit_band, 1.0)
         err = max(-1.0, min(1.0, (dist - self._orbit_radius(danger)) / band))
+        # Outside the tight ring, a full radial correction walks through the
+        # crowd. Cap the inward share so the kite spirals in along the tangent.
+        cap = self.tune.chest_commit_inward
+        if self._commit and cap < 1.0 and err > cap:
+            err = max(0.0, cap)
         hx = tx * (1.0 - abs(err)) + ix * err
         hy = ty * (1.0 - abs(err)) + iy * err
         n = math.hypot(hx, hy)
@@ -2245,12 +2346,16 @@ class Navigator:
         self._update_breakout(pts, px, py, dt, hp)
         escape = self.breakout is not None and self._escape_remaining > 0
         here = float(_danger_at(pts, np.array([px]), np.array([py]), self.tune.radius)[0])
-        self._chase = self._leash_chase(here, hp)
+        self._commit = self._chest_commit(hp)
+        lane = self._chest_lane_open(pts, px, py) if self._commit else False
+        self._chase = self._leash_chase(here, hp, lane)
         self._orbit_aim = self._orbit_heading(pts, px, py, here) if self._chase == "orbit" else None
         self._note_leash_chase(here)
         # Denser early XP: boost gem pull before the flower without changing late knobs.
         score_tune = gem_tune_for(self.tune, self.game_s)
-        seen = self._chest_seen(result, escape, dt)
+        # A commit keeps the sighting through a ring-escape. Clearing it here is
+        # the seek -> breakout away -> clear cycle from the Oct 26 runs.
+        seen = self._chest_seen(result, escape and not self._commit, dt)
         if seen is not None and not self._chest_open_allowed():
             # The orbit keeps the chest. A seek here would walk onto it.
             seen = None
@@ -2295,6 +2400,10 @@ class Navigator:
                 and not escape
                 and not self._critical_on
             ):
+                base = replace(base, chest_danger=max(base.chest_danger, open_clear * 1.6))
+            # Same stretch for a commit that has not armed the latch yet: the
+            # crowd around the chest is why the latch never armed.
+            if self._commit and this_chest is not None and not self._critical_on:
                 base = replace(base, chest_danger=max(base.chest_danger, open_clear * 1.6))
             # Same case as the chase guard: a short encirclement breakout must
             # not steer off a chest that is still inside the orbit band.
@@ -2415,6 +2524,7 @@ class Navigator:
                 or this_chest is None
                 or not self._chest_latched
                 or dec.danger_here < open_clear
+                or self._commit
             ):
                 break
             self._chest_latched = False
@@ -2446,6 +2556,21 @@ class Navigator:
             # Keep the current chord for a moment unless it is clearly worse.
             if cur_score > dec.scores[choice] - 1.0:
                 choice = self.current
+        # Dive HP on an openable chest: the field and a ring-escape both lose
+        # to the step or the tight orbit. Nearest-dir keeps the inward share
+        # that a wider cone would drop in favor of the open gap.
+        if self._commit and self._chase in ("orbit", "step"):
+            heading = (
+                self._orbit_aim if self._chase == "orbit"
+                else self._aim_from_leash(px, py, chest_at)
+            )
+            if heading is not None:
+                choice = _nearest_dir(heading)
+                dec.vector = choice
+                if self._chase == "orbit":
+                    dec.mode = "leash-orbit"
+                elif "escape" in dec.mode or dec.mode == "breakout":
+                    dec.mode = "leash-step"
         if choice != self.current:
             self._since_change = 0.0
         self.current = choice
@@ -2455,16 +2580,25 @@ class Navigator:
             and chest_kind is not None
             and _toward_point(choice, chest_at, px, py)
         )
-        if chest_at is None or chest_kind is None or high:
+        # Orbiting or stepping a commit keeps the seek. Danger above the arming
+        # band used to clear it every frame (Oct 26 run4: 28 seek / 28 clear).
+        sticky = (
+            self._commit
+            and chest_at is not None
+            and self._chase in ("orbit", "step")
+        )
+        if chest_at is None or chest_kind is None or (high and not sticky):
             self._chest_latched = False
             self._chest_until = 0.0
-        elif self._chest_latched or dec.danger_here < self.tune.chest_danger:
+        elif self._chest_latched or dec.danger_here < self.tune.chest_danger or sticky:
             self._chest_latched = True
-            if dec.danger_here < self.tune.chest_danger or toward:
+            if dec.danger_here < self.tune.chest_danger or toward or sticky:
                 self._chest_until = self.game_s + self.tune.chest_commit_s
         elif self.game_s >= self._chest_until:
             self._chest_latched = False
-        if self._chest_latched and chest_at is not None and (toward or self.game_s < self._chest_until):
+        if self._chest_latched and chest_at is not None and (
+            toward or self.game_s < self._chest_until or sticky
+        ):
             self._note_chest(chest_kind, chest_at, dec.danger_here)
         else:
             self._note_chest(None, None, dec.danger_here)
