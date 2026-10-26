@@ -68,10 +68,11 @@ def test_score_directions_lets_enemy_close_only_when_engaged():
     t = gem_tune_for(ON, 60.0)
     off = score_directions(LEFT, P, None, 1.0, hp=1.0, tune=replace(t, engage_gain=0.0))
     on = score_directions(LEFT, P, None, 1.0, hp=1.0, tune=t)
-    assert off.vector[0] >= 0  # without engage: drifts away from the lone enemy
-    assert on.vector[0] == -1  # engaged: steps toward it (Garlic range)
-    low = score_directions(LEFT, P, None, 1.0, hp=0.5, tune=t)
-    assert low.vector[0] >= 0  # low HP: no engage
+    # Above 25% the pack is approached either way. Engage still adds pull.
+    assert on.vector[0] < 0 and off.vector[0] < 0
+    assert on.scores[(-1, 0)] > off.scores[(-1, 0)]
+    low = score_directions(LEFT, P, None, 1.0, hp=0.20, tune=t)
+    assert low.vector[0] >= 0  # kite band: no engage, leave the enemy
 
 
 def test_navigator_engages_early_not_later_and_not_in_breakout():
@@ -97,12 +98,12 @@ def test_navigator_engages_early_not_later_and_not_in_breakout():
     b.game_s = 30.0
     b.breakout = (1.0, 0.0)
     b._breakout_origin = (1.0, 0.0)
-    bon = b.step(result(LEFT), hp=1.0)
+    bon = b.step(result(LEFT), hp=0.20)
     boff = Navigator(tune=replace(Tuning(), early_engage_until_s=0), clock=Clock(), log=lambda *_: None)
     boff.game_s = 30.0
     boff.breakout = (1.0, 0.0)
     boff._breakout_origin = (1.0, 0.0)
-    ref_b = boff.step(result(LEFT), hp=1.0)
+    ref_b = boff.step(result(LEFT), hp=0.20)
     assert bon.mode.startswith("breakout")
     assert bon.scores == ref_b.scores
 

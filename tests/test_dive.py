@@ -78,34 +78,36 @@ def test_defaults_match_the_garlic_standoff():
 
 def test_high_hp_accepts_a_closer_approach():
     pts = _pack_east()
-    # Wide kite loses: the step goes tangent (north) instead of northwest.
+    # Above pack_dive_hp the step goes into the pack. The radius scale does not
+    # turn that off; the kite band still leaves.
     high = score_directions(pts, P, _KITE_N, 1.0, hp=1.0)
-    assert high.vector == (0, 1)
+    assert high.vector[0] > 0
     assert high.dive == 1.0
     cautious = score_directions(pts, P, _KITE_N, 1.0, hp=1.0, tune=_off())
-    assert cautious.vector == (-1, 1)
+    assert cautious.vector[0] > 0
     assert cautious.dive == 0.0
-    # The north score is what improved; the old winner was the outward diagonal.
-    assert high.scores[(0, 1)] > cautious.scores[(0, 1)]
-    assert high.scores[(0, 1)] > high.scores[(-1, 1)]
+    kite = score_directions(pts, P, _KITE_N, 1.0, hp=0.20)
+    assert kite.vector[0] <= 0
+    assert kite.dive == 0.0
 
 
 def test_scale_one_matches_old_scoring():
     pts = _pack_east()
     gems = [(P[0] + 200.0, P[1])]
     off = _off()
-    # Unknown HP is the old caution. Scale 1.0 at full HP must score the same,
-    # including a gem that the default dive would start pulling.
+    # Unknown HP farms, same as a full bar. Scale 1.0 does not disable that.
+    # Below the kite line the scale-1 scores match the default.
     unknown = score_directions(pts, P, _KITE_N, 1.0, gems=gems, hp=None)
     restored = score_directions(pts, P, _KITE_N, 1.0, gems=gems, hp=1.0, tune=off)
-    mid = score_directions(pts, P, _KITE_N, 1.0, gems=gems, hp=0.5)
-    assert restored.scores == unknown.scores
-    assert restored.vector == unknown.vector == mid.vector
-    assert mid.scores == unknown.scores
-    assert mid.dive == restored.dive == 0.0
-    diving = score_directions(pts, P, _KITE_N, 1.0, gems=gems, hp=1.0)
-    assert diving.scores != unknown.scores
-    assert diving.dive == 1.0
+    full = score_directions(pts, P, _KITE_N, 1.0, gems=gems, hp=1.0)
+    assert unknown.vector[0] > 0
+    assert restored.vector == unknown.vector == full.vector
+    assert full.dive == 1.0
+    assert restored.dive == 0.0
+    kite = score_directions(pts, P, _KITE_N, 1.0, gems=gems, hp=0.20)
+    kite_off = score_directions(pts, P, _KITE_N, 1.0, gems=gems, hp=0.20, tune=off)
+    assert kite.scores == kite_off.scores
+    assert kite.vector[0] <= 0
 
 
 def test_mid_low_and_critical_hp_are_unchanged():
@@ -117,13 +119,12 @@ def test_mid_low_and_critical_hp_are_unchanged():
         assert now.scores == old.scores
         assert now.vector == old.vector
         assert now.dive == 0.0
-    # Partial credit between the anchors, not a second step change.
+    # Above 25% the pack is entered. Critical HP still leaves it.
+    assert score_directions(pts, P, _KITE_N, 1.0, hp=0.5).vector[0] > 0
+    assert score_directions(pts, P, _KITE_N, 1.0, hp=0.12).vector[0] <= 0
     mid = score_directions(pts, P, _KITE_N, 1.0, hp=0.625)
     assert mid.dive == 0.5
-    assert mid.vector == (-1, 1)
-    high = score_directions(pts, P, _KITE_N, 1.0, hp=1.0)
-    low = score_directions(pts, P, _KITE_N, 1.0, hp=0.5)
-    assert low.scores[(0, 1)] < mid.scores[(0, 1)] < high.scores[(0, 1)]
+    assert mid.vector[0] > 0
 
 
 def test_blind_and_unknown_hp_do_not_dive():
@@ -138,8 +139,10 @@ def test_blind_and_unknown_hp_do_not_dive():
     assert blind.dive == 0.0
     assert unknown.dive == 0.0
     assert unknown.scores == score_directions(pts, P, _KITE_N, 1.0, hp=None, tune=_off()).scores
-    assert healthy.vector == (0, 1)
-    assert unknown.vector == (-1, 1)
+    # Unknown and a full bar farm into the pack. A blind 0 read is critical and leaves.
+    assert healthy.vector[0] > 0
+    assert unknown.vector[0] > 0
+    assert blind.vector[0] <= 0
     assert blind.vector != healthy.vector
 
 
@@ -162,16 +165,21 @@ def test_high_hp_seeks_a_gem_that_moderate_danger_used_to_refuse():
     assert high.dive == 1.0
     assert toward[-1][0] > 0
     bare, away = frames(1.0, with_gems=False)
+    assert away[-1][1] > 0  # into the south pack, not out to the gem
     assert away[-1][0] <= 0
     assert bare.last.danger_here == high.last.danger_here
 
-    # Same crowd at the anchors still refuses the gem.
-    for hp in (0.5, 0.3, 0.12, None):
+    # At or below 25% the gem is refused. Above it, and with no HP read, it is taken.
+    for hp in (0.5, 0.3, None):
         nav, vecs = frames(hp)
         old, old_vecs = frames(hp, tune=_off())
         assert vecs == old_vecs
-        assert nav.dive == 0.0
-        assert vecs[-1][0] <= 0
+        assert vecs[-1][0] > 0
+    nav, vecs = frames(0.12)
+    old, old_vecs = frames(0.12, tune=_off())
+    assert vecs == old_vecs
+    assert nav.dive == 0.0
+    assert vecs[-1][0] <= 0
 
     blind_hp = hp_for_nav(0.95, blind=True)
     blind, blind_vecs = frames(blind_hp)
@@ -195,7 +203,7 @@ def test_kite_floor_emergencies_ignore_the_dive():
         clock = Clock()
         nav = Navigator(tune=tune, clock=clock, log=lambda *_: None)
         nav.game_s = 318.0
-        vecs = run(nav, clock, result(gap), 8, hp=1.0)
+        vecs = run(nav, clock, result(gap), 8, hp=0.24)
         assert nav.escaping and nav.cover >= nav.tune.ring_commit_cover
         assert nav.dive == 0.0
         return vecs

@@ -513,7 +513,12 @@ def test_plain_breakout_keeps_a_held_orbit_while_the_chest_is_visible():
     chest. A wall (cover >= 0.75) still leaves a held chest. An openable chest
     at dive HP stays with the chest instead; see test_chest_commit.
     """
-    tune = tuning_from_env("chest_open_always=0,chest_orbit_swell=0", log=lambda *_: None)
+    # low_hp stays under 0.24 so the danger field matches the old full-HP hold.
+    # The kite line is pack_dive_hp, not the defensive radius.
+    tune = tuning_from_env(
+        "chest_open_always=0,chest_orbit_swell=0,critical_hp=0,low_hp=0.10",
+        log=lambda *_: None,
+    )
     clock = Clock()
     logs: list[str] = []
     nav = Navigator(tune=tune, clock=clock, log=logs.append)
@@ -528,7 +533,9 @@ def test_plain_breakout_keeps_a_held_orbit_while_the_chest_is_visible():
     crowd = result(ring(480, 256, 160, 36, gap_deg=(0, 140)))
     crowd.chest = (210.0, 465.0)
     before = len(logs)
-    run(nav, clock, crowd, 8, hp=0.97)
+    # The anchor frame was full HP. Drop that sample so 0.24 is not an HP-crash.
+    nav._hp_hist.clear()
+    run(nav, clock, crowd, 8, hp=0.24)
     fresh = logs[before:]
     assert nav.breakouts >= 1 and not nav.escaping
     assert nav.cover < tune.ring_commit_cover
@@ -545,7 +552,8 @@ def test_plain_breakout_keeps_a_held_orbit_while_the_chest_is_visible():
     wall._since_change = 1.0
     closing = result(ring(480, 256, 160, 36, gap_deg=(0, 90)))
     closing.chest = (210.0, 465.0)
-    run(wall, wall.clock, closing, 6, hp=0.97)
+    wall._hp_hist.clear()
+    run(wall, wall.clock, closing, 6, hp=0.24)
     assert wall.escaping and wall.last.mode.startswith("ring-escape")
     assert not wall._orbit_on
 
@@ -576,13 +584,15 @@ def test_critical_hp_and_a_wall_commit_override_a_held_chest():
     _anchor(wall, wall.clock, chest=(240.0, 256.0))
     warm = result(blob(700, 256, n=8, spread=30))
     warm.chest = (240.0, 256.0)
-    run(wall, wall.clock, warm, 8, hp=0.80)
+    wall._hp_hist.clear()
+    run(wall, wall.clock, warm, 8, hp=0.24)
     gap = result(ring(480, 256, 150, 48, gap_deg=(-1, 25)))
     gap.chest = (240.0, 256.0)
-    vecs = run(wall, wall.clock, gap, 4, hp=0.80)
+    vecs = run(wall, wall.clock, gap, 4, hp=0.24)
     assert wall.escaping and wall.breakout is not None and wall.breakout[0] > 0
-    assert wall.last.mode.startswith("leash-")
-    assert all(v[0] <= 0 for v in vecs)
+    # At the kite line a held chest yields: the steps take the gap.
+    assert wall.last.mode.startswith("ring-escape")
+    assert all(v[0] > 0 for v in vecs)
 
 
 def test_high_hp_keeps_a_visible_chest_past_the_old_clear():
@@ -622,12 +632,14 @@ def test_high_hp_keeps_a_visible_chest_past_the_old_clear():
     clock = Clock()
     away = Navigator(clock=clock, log=lambda *_: None)
     away.game_s = 200.0
-    assert all(v[0] <= 0 for v in run(away, clock, result(pts), 6, hp=1.0))
+    # No chest: the pack (north of the player) is the farm, not a flee west.
+    assert all(v[1] <= 0 for v in run(away, clock, result(pts), 6, hp=1.0))
 
-    low, low_vecs = headings(0.4)
+    low, low_vecs = headings(0.20)
     assert low._chase != "step"
     assert all(v[0] < 0 for v in low_vecs)
 
     old, old_vecs = headings(1.0, scale="1")
-    assert old.dive == 0.0 and old._chase == ""
-    assert all(v[0] <= 0 for v in old_vecs)
+    assert old.dive == 0.0
+    # pack_dive_hp does not follow dive_radius_scale. The chest is still walked.
+    assert all(v[0] > 0 for v in old_vecs)

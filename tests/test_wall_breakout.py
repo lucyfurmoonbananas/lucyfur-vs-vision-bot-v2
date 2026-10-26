@@ -22,18 +22,18 @@ def test_late_density_surge_commits_through_the_gap_and_holds():
     logs: list[str] = []
     nav = Navigator(clock=clock, log=logs.append)
     nav.game_s = 660.0  # wide-loops, flower window already closed
-    run(nav, clock, result(blob(700, 256, n=8, spread=30)), 8, hp=0.80)
+    run(nav, clock, result(blob(700, 256, n=8, spread=30)), 8, hp=0.24)
     assert nav.escaping is False
 
     gap_east = result(ring(480, 256, 150, 48, gap_deg=(-1, 25)))
-    run(nav, clock, gap_east, 4, hp=0.80)
+    run(nav, clock, gap_east, 4, hp=0.24)
     assert nav.escaping
     assert nav.last.mode.startswith("ring-escape")
     assert nav.breakout is not None and nav.breakout[0] > 0.5
     assert any(line.startswith("[nav] ring escape (1, 0)") for line in logs)
 
     # Plain breakouts end after 1.1s once the ring is gone. The commit must hold.
-    out = run(nav, clock, result(blob(300, 256, n=6, spread=20)), 18, hp=0.80)
+    out = run(nav, clock, result(blob(300, 256, n=6, spread=20)), 18, hp=0.24)
     assert nav.escaping
     assert all(v[0] >= 0 for v in out)
 
@@ -56,10 +56,11 @@ def test_density_surge_stays_with_a_latched_chest():
 
     gap_east = result(ring(480, 256, 150, 48, gap_deg=(-1, 25)))
     gap_east.chest = (300.0, 256.0)
-    out = run(nav, clock, gap_east, 4, hp=0.80)
-    assert nav.escaping and nav.breakout is not None and nav.breakout[0] > 0.5
+    out = run(nav, clock, gap_east, 4, hp=1.0)
+    # Above 25% the wall is not a ring-escape. The chest to the west is walked.
+    assert not nav.escaping
+    assert not nav.last.mode.startswith("ring-escape")
     assert nav._chest_latched
-    assert nav.last.mode.startswith("leash-")
     assert not any(line.startswith("[chest] clear") for line in logs)
     assert all(v[0] <= 0 for v in out)
 
@@ -69,8 +70,8 @@ def test_surge_picks_the_south_gap_when_that_side_is_thinnest():
     nav = Navigator(clock=clock, log=lambda *_: None)
     nav.game_s = 660.0
     nav.heading = 0.0
-    run(nav, clock, result(blob(480, 80, n=6, spread=20)), 8, hp=1.0)
-    run(nav, clock, result(ring(480, 256, 150, 48, gap_deg=(70, 110))), 4, hp=1.0)
+    run(nav, clock, result(blob(480, 80, n=6, spread=20)), 8, hp=0.24)
+    run(nav, clock, result(ring(480, 256, 150, 48, gap_deg=(70, 110))), 4, hp=0.24)
     assert nav.escaping and nav.breakout is not None
     assert nav.breakout[1] > 0.5
 
@@ -85,10 +86,10 @@ def test_tied_breakout_cone_follows_the_heading_not_north():
     nav = Navigator(tune=tune, clock=clock, log=lambda *_: None)
     nav.game_s = 318.0
     nav.heading = 0.0
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 2, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 2, hp=0.24)
     assert not nav.escaping and nav.breakout is not None and nav.breakout[0] > 0.5
     clock.t += 1 / 12
-    dec = nav.step(result([]), hp=1.0)
+    dec = nav.step(result([]), hp=0.24)
     assert dec.vector != (0, -1)
     assert dec.vector[0] > 0
 
@@ -98,10 +99,14 @@ def test_full_screen_crowd_does_not_score_north_as_the_opening():
     xs = np.arange(16, 960, 32)
     ys = np.arange(16, 540, 32)
     grid = np.array([(float(x), float(y), 1.0) for x in xs for y in ys], np.float32)
-    dec = score_directions(grid, (480.0, 256.0), None, 0.0)
+    old = Tuning(pack_dive_hp=0.0)
+    dec = score_directions(grid, (480.0, 256.0), None, 0.0, tune=old)
     # Before the short-side fill this was about +6 (north scored as the opening).
     advantage = dec.scores[(0, -1)] - dec.scores[(0, 1)]
     assert advantage < 2.0
 
     gap_north = np.array(ring(480, 256, 140, 36, gap_deg=(250, 290)), np.float32)
-    assert score_directions(gap_north, (480.0, 256.0), None, 0.0).vector == (0, -1)
+    assert score_directions(gap_north, (480.0, 256.0), None, 0.0, tune=old).vector == (0, -1)
+    # Above 25% the same gap is not the exit. The mass of the ring is south of it.
+    farmed = score_directions(gap_north, (480.0, 256.0), None, 0.0, hp=1.0)
+    assert farmed.vector != (0, -1)

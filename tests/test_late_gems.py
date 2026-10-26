@@ -19,9 +19,12 @@ GEMS_RIGHT = [(700.0, 256.0), (712.0, 262.0), (690.0, 248.0)]
 GEMS_DOWN = [(480.0, 420.0), (490.0, 430.0), (470.0, 415.0)]
 
 
-def _breakout(game_s: float, gems, hp: float = 1.0):
+def _breakout(game_s: float, gems, hp: float = 0.24):
     clock = Clock()
-    nav = Navigator(clock=clock, log=lambda *_: None)
+    # Stay in the kite band without the low-HP gem veto, so a breakout can still
+    # be biased by gems. Above pack_dive_hp there is no breakout to bias.
+    tune = Tuning(low_hp=0.10, critical_hp=0.10)
+    nav = Navigator(tune=tune, clock=clock, log=lambda *_: None)
     nav.game_s = game_s
     pts = ring(480, 256, 180, 28, gap_deg=GAP_UP)
     vecs = run(nav, clock, result(pts, gems=gems), 8, hp=hp)
@@ -58,5 +61,5 @@ def test_low_hp_late_roam_still_ignores_gems():
     nav = Navigator(clock=clock, log=lambda *_: None)
     nav.game_s = 600.0
     nav.heading = -math.pi / 2
-    vecs = run(nav, clock, result(blob(480, 280, n=3, spread=6, seed=1), gems=GEMS_RIGHT), 6, hp=0.3)
+    vecs = run(nav, clock, result(blob(480, 280, n=3, spread=6, seed=1), gems=GEMS_RIGHT), 6, hp=0.20)
     assert all(v[0] <= 0 for v in vecs)

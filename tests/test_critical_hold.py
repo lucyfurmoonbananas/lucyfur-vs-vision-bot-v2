@@ -125,6 +125,6 @@ def test_cover_044_density_noise_does_not_commit_a_ring_escape():
     wall = Navigator(clock=Clock(), log=logs.append)
     wall.game_s = 660.0
     clock2 = wall.clock
-    run(wall, clock2, result(blob(700, 256, n=8, spread=30)), 8, hp=0.80)
-    run(wall, clock2, result(ring(480, 256, 150, 48, gap_deg=(-1, 25))), 4, hp=0.80)
+    run(wall, clock2, result(blob(700, 256, n=8, spread=30)), 8, hp=0.24)
+    run(wall, clock2, result(ring(480, 256, 150, 48, gap_deg=(-1, 25))), 4, hp=0.24)
     assert wall.escaping and wall.last.mode.startswith("ring-escape")
