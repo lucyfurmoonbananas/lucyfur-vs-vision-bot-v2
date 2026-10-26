@@ -385,6 +385,90 @@ def test_revive_hold_repicks_the_open_corridor():
     assert _nearest(nav.breakout) == (0, 1)
 
 
+def _arc(deg: float, n: int, radius: float, weight: float, spread: float):
+    pts = []
+    base = math.radians(deg)
+    for i in range(n):
+        ang = base + (i - (n - 1) / 2) * spread
+        pts.append((480 + radius * math.cos(ang), 256 + radius * math.sin(ang), weight))
+    return pts
+
+
+def _pack(extra):
+    return ring(480, 256, 150, 48) + ring(480, 256, 210, 40) + extra
+
+
+def _arm_east_hold():
+    """Revive through an east gap until the surrounded hold is on, still facing east."""
+    clock = Clock()
+    nav, logs = _quiet_nav(clock)
+    nav.request_revive_escape()
+    gap = result(ring(480, 256, 150, 48, gap_deg=(-20, 20)))
+    run(nav, clock, gap, 8, hp=0.5)
+    assert _nearest(nav.breakout) == (1, 0)
+    run(nav, clock, gap, 30, hp=0.5)
+    assert nav.escaping and nav.cover >= nav.tune.cover_trigger
+    assert _nearest(nav.breakout) == (1, 0)
+    assert any("revive escape holding" in line for line in logs)
+    return nav, clock, logs
+
+
+def test_revive_hold_does_not_reverse_on_a_slight_bias():
+    """Oct 26 1 AM: past 3s the hold re-aimed 135-180 deg every few tenths
+    (run1 game~733s, run3 ~128s, run4 ~447s) and never left the pack.
+    A closed ring with a small east/west bias is the step just taken, not a new opening.
+    """
+    nav, clock, logs = _arm_east_hold()
+    n0 = len(logs)
+    seen = []
+    for i in range(48):  # ~4s; the cheap side swaps every two frames (~0.17s)
+        cheap = 0 if (i // 2) % 2 == 0 else 180
+        crowd = _pack(_arc(cheap + 180, n=8, radius=160, weight=1.2, spread=0.12))
+        run(nav, clock, result(crowd), 1, hp=0.5)
+        seen.append(_nearest(nav.breakout))
+        assert nav.cover >= nav.tune.cover_trigger
+    assert nav.escaping
+    assert all(h == (1, 0) for h in seen)
+    assert not any("re-aim" in line for line in logs[n0:])
+
+
+def test_revive_hold_reverses_a_shut_corridor_but_not_every_frame():
+    """A wall that closes the corridor still turns the hold. Swapping that wall
+    to the other side every couple of frames must not flip the heading each time.
+    """
+    nav, clock, _ = _arm_east_hold()
+    headings = [(1, 0)]
+    covers = []
+    for i in range(36):
+        wall = 0 if (i // 2) % 2 == 0 else 180
+        extra = []
+        for radius in (120.0, 160.0, 200.0):
+            extra += _arc(wall, n=9, radius=radius, weight=1.5, spread=0.18)
+        run(nav, clock, result(_pack(extra)), 1, hp=0.5)
+        headings.append(_nearest(nav.breakout))
+        covers.append(nav.cover)
+    assert min(covers) >= nav.tune.cover_trigger
+    changes = [i for i in range(1, len(headings)) if headings[i] != headings[i - 1]]
+    assert changes, "a shut corridor is still a re-aim"
+    assert changes[0] <= 2
+    min_gap = nav.tune.revive_hold_reaim_s * 12
+    assert all(b - a >= min_gap - 1 for a, b in zip(changes, changes[1:]))
+
+
+def test_revive_hold_sidesteps_a_wall_ahead():
+    """An impassable wall on the heading turns into the open side, not back through the ring."""
+    nav, clock, logs = _arm_east_hold()
+    pts = ring(480, 256, 150, 48, gap_deg=(250, 290))
+    pts += blob(640, 256, n=40, spread=30, seed=1)
+    pts += blob(600, 180, n=20, spread=25, seed=2)
+    pts += blob(600, 340, n=20, spread=25, seed=3)
+    n0 = len(logs)
+    run(nav, clock, result(pts), 6, hp=0.5)
+    assert nav.escaping and nav.cover >= nav.tune.cover_trigger
+    assert _nearest(nav.breakout) == (0, -1)
+    assert not any("->(-1," in line for line in logs[n0:])
+
+
 def test_revive_escape_early_window_still_allows_reversal():
     """REVIVE behaviour unchanged: stale first frame may be fully re-picked."""
     clock = Clock()
