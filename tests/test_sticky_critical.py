@@ -84,7 +84,7 @@ def test_critical_hp_drops_a_latched_chest_and_late_breakout_gems():
     late.game_s = 600.0
     gap = result(ring(480, 256, 180, 28, gap_deg=(250, 290)), gems=[(700.0, 256.0), (712.0, 262.0)])
     healthy = run(late, clock2, gap, 8, hp=1.0)
-    assert late.breakout is not None and not late.escaping
+    assert not late.escaping
     assert healthy[-1][0] > 0
 
     clock3 = Clock()

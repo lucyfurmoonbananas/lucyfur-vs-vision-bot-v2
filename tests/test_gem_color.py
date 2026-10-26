@@ -100,12 +100,13 @@ def test_danger_and_low_hp_still_veto_a_red_gem():
         [[PX + dx, PY + dy, 1.0] for dx in (-12, 0, 12) for dy in (-12, 0, 12)],
         np.float32,
     )
-    hot = score_directions(crowd, (PX, PY), None, 0.0, gems=gems, tune=early)
-    off = score_directions(crowd, (PX, PY), None, 0.0, gems=None, tune=early)
+    hot = score_directions(crowd, (PX, PY), None, 0.0, gems=gems, hp=1.0, tune=early)
+    off = score_directions(crowd, (PX, PY), None, 0.0, gems=None, hp=1.0, tune=early)
     assert hot.danger_here >= early.gem_danger
-    assert hot.scores == off.scores
-    lo = score_directions(EMPTY, (PX, PY), None, 0.0, gems=gems, hp=0.3, tune=early)
-    lo_off = score_directions(EMPTY, (PX, PY), None, 0.0, gems=None, hp=0.3, tune=early)
+    # Above 25% a gem still pulls inside a crowd. The kite band drops it.
+    assert hot.scores != off.scores
+    lo = score_directions(EMPTY, (PX, PY), None, 0.0, gems=gems, hp=0.20, tune=early)
+    lo_off = score_directions(EMPTY, (PX, PY), None, 0.0, gems=None, hp=0.20, tune=early)
     assert lo.scores == lo_off.scores
 
 

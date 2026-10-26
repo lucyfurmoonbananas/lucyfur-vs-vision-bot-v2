@@ -8,7 +8,10 @@ def test_flees_left_when_monster_is_on_the_right():
         player=(200, 200),
         monsters=[Detection(x=280, y=190, w=20, h=20)],
     )
-    assert choose_vector(result) == (-1, 0)
+    # Unread HP is a full bar: step toward the monster. At or below 25%, kite.
+    assert choose_vector(result) == (1, 0)
+    assert choose_vector(result, hp=0.25) == (-1, 0)
+    assert choose_vector(result, hp=0.20) == (-1, 0)
 
 
 def test_idle_without_monsters_or_on_menu():

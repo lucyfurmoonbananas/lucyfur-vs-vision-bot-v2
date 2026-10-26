@@ -57,7 +57,7 @@ def test_truly_high_danger_keeps_a_full_hp_chest_seek():
     clock = Clock()
     lines: list[str] = []
     nav = Navigator(clock=clock, log=lines.append)
-    safe = result([], gems=[(300.0, 256.0)])
+    safe = result([])
     safe.chest = (720.0, 256.0)
     assert run(nav, clock, safe, 3, hp=1.0) == [(1, 0)] * 3
     packed = result([(480 + dx, 256 + dy, 1.0) for dx in (-12, 0, 12) for dy in (-12, 0, 12)])
@@ -66,6 +66,8 @@ def test_truly_high_danger_keeps_a_full_hp_chest_seek():
     assert nav.last.danger_here >= 3.0
     assert not any(ln.startswith("[chest] clear chest") for ln in lines)
     assert nav._chase in ("step", "orbit")
+    # Symmetric sprites around the player: the chest still breaks the tie.
+    # A one-sided pack inside the Garlic ring is covered by test_farm_priority.
     assert all(v[0] >= 0 for v in vecs)
 
     off = tuning_from_env("dive_radius_scale=1", log=lambda *_: None)
@@ -205,10 +207,8 @@ def test_ring_escape_does_not_walk_off_an_openable_chest():
     gap.chest = chest
     vecs = run(nav, clock, gap, 6, hp=0.80)
     assert nav.cover >= 0.55
-    assert any(ln.startswith("[nav] ring escape") for ln in logs)
-    assert nav.escaping and nav.breakout is not None and nav.breakout[0] > 0
-    assert nav._chase in ("step", "orbit")
-    assert nav.last.mode.startswith("leash-")
-    # The escape heading is the east gap. The steps are not.
+    # Above 25% the wall is not a ring-escape. Steps stay with the chest.
+    assert not nav.escaping
+    assert not any(ln.startswith("[nav] ring escape") for ln in logs)
     assert all(v[0] <= 0 for v in vecs)
     assert not any(ln.startswith("[chest] clear ") for ln in logs)

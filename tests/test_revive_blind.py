@@ -65,7 +65,10 @@ def test_falling_hp_in_a_crowd_is_critical_before_zero():
     wall = result(ring(480, 256, 140, 64))
     run(nav, clock, wall, 8, hp=0.70)
     assert not nav._critical_on
+    # Still above the kite line: farming clears the sticky 0.40 latch.
     run(nav, clock, wall, 4, hp=0.36)
+    assert not nav._critical_on
+    run(nav, clock, wall, 4, hp=0.24)
     assert nav._critical_on
     assert any("critical HP on" in line for line in logs)
     assert not any("hp=0.00" in line for line in logs)

@@ -87,14 +87,20 @@ def test_navigator_prefers_chest_over_gem_target_when_safe():
     nav = Navigator(clock=clock, log=lambda *_: None)
     offscreen = result([], gems=GEM_LEFT)
     offscreen.chest_arrow = ARROW_RIGHT
-    assert run(nav, clock, offscreen, 6, hp=1.0) == [(1, 0)] * 6
-    assert nav.last.mode.startswith("chest")
+    # Gems are first. The arrow does not outrank them above 25% HP.
+    assert run(nav, clock, offscreen, 6, hp=1.0) == [(-1, 0)] * 6
 
     clock = Clock()
     nav = Navigator(clock=clock, log=lambda *_: None)
     onscreen = result([], gems=GEM_LEFT)
     onscreen.chest = CHEST_RIGHT
-    assert run(nav, clock, onscreen, 4, hp=1.0)[-1] == (1, 0)
+    assert run(nav, clock, onscreen, 4, hp=1.0)[-1][0] == -1
+
+    clock = Clock()
+    nav = Navigator(clock=clock, log=lambda *_: None)
+    chest_only = result([])
+    chest_only.chest = CHEST_RIGHT
+    assert run(nav, clock, chest_only, 4, hp=1.0)[-1] == (1, 0)
 
     # Tuning toggle: chest_gain 0 (VS_TUNE=chest_gain=0) leaves the gem target in charge.
     clock = Clock()
@@ -107,8 +113,8 @@ def test_navigator_prefers_chest_over_gem_target_when_safe():
 def test_high_danger_escapes_then_resumes_chest():
     clock = Clock()
     nav = Navigator(clock=clock, log=lambda *_: None)
-    # Crowd and chest both to the right. Full HP steps or tight-kites toward it.
-    crowd = result(blob(600, 256, n=16, spread=16), gems=GEM_LEFT)
+    # Crowd and chest both to the right. Full HP steps toward the chest.
+    crowd = result(blob(600, 256, n=16, spread=16))
     crowd.chest = CHEST_RIGHT
     vecs = run(nav, clock, crowd, 8, hp=1.0)
     assert nav.last.danger_here >= Tuning().chest_danger
@@ -118,7 +124,7 @@ def test_high_danger_escapes_then_resumes_chest():
 
     # HP-crash flee (same path as a flower-ring survival flee) ignores the chest.
     run(nav, clock, crowd, 2, hp=1.0)
-    flee = run(nav, clock, crowd, 6, hp=0.65)
+    flee = run(nav, clock, crowd, 6, hp=0.20)
     assert nav._hp_crashing and nav.breakout is not None
     assert nav.last.mode.startswith("breakout")
     assert all(v[0] < 0 for v in flee)
@@ -129,7 +135,7 @@ def test_high_danger_escapes_then_resumes_chest():
     ring_nav.game_s = 318.0
     closing = result(ring(480, 256, 170, 40, gap_deg=(-1, 25)))  # gap to the right
     closing.chest = (200.0, 256.0)  # chest back into the ring
-    out = run(ring_nav, clock_r, closing, 8, hp=1.0)
+    out = run(ring_nav, clock_r, closing, 8, hp=0.24)
     assert ring_nav.escaping and ring_nav.last.mode.startswith("ring-escape")
     assert all(v[0] == 1 for v in out)
 
@@ -140,7 +146,7 @@ def test_high_danger_escapes_then_resumes_chest():
         if nav.breakout is None and nav._flee_remaining <= 0 and not nav.escaping:
             break
     assert nav.breakout is None and nav._flee_remaining == 0.0
-    safe = result([], gems=GEM_LEFT)
+    safe = result([])
     safe.chest = CHEST_RIGHT
     resumed = run(nav, clock, safe, 6, hp=0.95)
     assert resumed[-1] == (1, 0)
@@ -160,7 +166,7 @@ def test_symmetric_breakout_follows_heading_not_left():
         nav = Navigator(clock=clock, log=lambda *_: None)
         nav.heading = heading
         nav.game_s = 100.0
-        run(nav, clock, result(pts), 3, hp=1.0)
+        run(nav, clock, result(pts), 3, hp=0.24)
         assert nav.breakouts >= 1 and nav.breakout is not None
         assert nav.breakout[0] * sign > 0.5
 
@@ -182,7 +188,7 @@ def test_late_gems_beat_kite_at_moderate_danger():
     nav = Navigator(tune=off, clock=clock, log=lambda *_: None)
     nav.game_s = 400.0
     nav.heading = -math.pi / 2
-    vecs = run(nav, clock, result(crowd, gems=SCATTER), 8, hp=1.0)
+    vecs = run(nav, clock, result(crowd, gems=SCATTER), 8, hp=0.20)
     assert vecs[-1][0] != 1
 
 

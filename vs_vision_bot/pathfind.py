@@ -164,6 +164,15 @@ class Tuning:
     critical_hp: float = 0.20
     # Same exit as menus.HP_CRITICAL_EXIT. A 0.25 median does not leave critical.
     critical_exit_hp: float = 0.40
+    # Pack-dive above this fraction (0 disables). Above it, and while the bar
+    # is still unknown, walk into packs and XP gems first and into a chest when
+    # no gem is in range. At or below it, kite and break out. The walk stops at
+    # engage_standoff (Garlic's knockback ring) instead of the sprite center.
+    # VS_TUNE=pack_dive_hp=0
+    pack_dive_hp: float = 0.25
+    # Pull toward a pack that is still outside the Garlic ring. A gem or a chest
+    # outranks it. Bodies already inside the ring outrank both.
+    farm_gain: float = 3.0
     # High-HP dive. Garlic kills inside ~40 px (sim aura) and the engage standoff
     # is 34, but the danger kernel is 42 and the kite's near band is 110, so a
     # full bar still arcs wide of the aura. At dive_hp_hi the step kernel and
@@ -456,6 +465,20 @@ def dive_level(hp: float | None, tune: Tuning) -> float:
     if hp < tune.low_hp or (tune.critical_hp > 0 and hp < tune.critical_hp):
         return 0.0
     return float(min(1.0, (hp - tune.dive_hp_lo) / (tune.dive_hp_hi - tune.dive_hp_lo)))
+
+
+def farming(hp: float | None, tune: Tuning) -> bool:
+    """True when the bot should dive packs and gems instead of kiting.
+
+    Unknown HP counts as full: nothing has been read as damage yet. At or
+    below ``pack_dive_hp`` the kite, breakout, and ring-escape return.
+    ``pack_dive_hp`` <= 0 disables the farm.
+    """
+    if tune.pack_dive_hp <= 0:
+        return False
+    if hp is None:
+        return True
+    return float(hp) > tune.pack_dive_hp
 
 
 def _danger_at(points: np.ndarray, sx: np.ndarray, sy: np.ndarray, radius: float) -> np.ndarray:
@@ -791,6 +814,68 @@ def engage_pull(
     return (tune.engage_gain * fade * (_UNIT[:, 0] * vx / n + _UNIT[:, 1] * vy / n)).astype(np.float32)
 
 
+def _crowd_heading(pts: np.ndarray, px: float, py: float) -> tuple[float, float] | None:
+    """Unit vector toward the weighted crowd centroid, or None when it cancels."""
+    if pts.shape[0] == 0:
+        return None
+    rel = pts[:, :2] - np.array([px, py], dtype=np.float32)
+    d = np.hypot(rel[:, 0], rel[:, 1]) + 1e-3
+    w = pts[:, 2] / (1.0 + (d / 160.0) ** 2)
+    cx = float((w * rel[:, 0] / d).sum())
+    cy = float((w * rel[:, 1] / d).sum())
+    mag = math.hypot(cx, cy)
+    if mag < 1e-6:
+        return None
+    return (cx / mag, cy / mag)
+
+
+def _nearest_threat(pts: np.ndarray, px: float, py: float) -> tuple[float, float, float] | None:
+    """Distance and unit vector toward the nearest threat, or None."""
+    if pts.shape[0] == 0:
+        return None
+    rel = pts[:, :2] - np.array([px, py], dtype=np.float32)
+    dist = np.hypot(rel[:, 0], rel[:, 1])
+    i = int(np.argmin(dist))
+    d = float(dist[i])
+    if d < 1e-3:
+        return (0.0, 1.0, 0.0)
+    return (d, float(rel[i, 0] / d), float(rel[i, 1] / d))
+
+
+def _pack_aim(pts: np.ndarray, px: float, py: float, standoff: float) -> tuple[float, float] | None:
+    """Toward a pack outside the Garlic ring, away from a body already inside it."""
+    near = _nearest_threat(pts, px, py)
+    if near is None:
+        return None
+    dist, ux, uy = near
+    if standoff > 0 and dist <= standoff:
+        return (-ux, -uy)
+    return _crowd_heading(pts, px, py)
+
+
+def _standoff_closing(pts: np.ndarray, px: float, py: float, standoff: float) -> np.ndarray:
+    """Per-direction closing weight onto threats already inside ``standoff``.
+
+    All zeros when every threat is outside the ring. Closer bodies count more.
+    """
+    out = np.zeros(len(DIRS), dtype=np.float32)
+    if pts.shape[0] == 0 or standoff <= 0:
+        return out
+    rel = pts[:, :2] - np.array([px, py], dtype=np.float32)
+    dist = np.hypot(rel[:, 0], rel[:, 1])
+    inside = dist <= standoff
+    if not bool(inside.any()):
+        return out
+    dist_i = np.maximum(dist[inside], 1e-3)
+    ux = rel[inside, 0] / dist_i
+    uy = rel[inside, 1] / dist_i
+    depth = (standoff - dist[inside]) / standoff
+    weight = pts[inside, 2] * (0.35 + depth)
+    closing = _UNIT[:, None, 0] * ux[None, :] + _UNIT[:, None, 1] * uy[None, :]
+    closing = np.clip(closing, 0.0, None)
+    return (closing * weight[None, :]).sum(axis=1).astype(np.float32)
+
+
 def score_directions(
     threats: np.ndarray,
     player: tuple[float, float],
@@ -811,12 +896,21 @@ def score_directions(
     px, py = float(player[0]), float(player[1])
     critical = hp is not None and tune.critical_hp > 0 and hp < tune.critical_hp
     defensive = critical or (hp is not None and hp < tune.low_hp)
-    if critical:
+    # Above pack_dive_hp the danger field is what kites the bot out of XP.
+    # Drop it. A committed escape (kite_floor) keeps the old penalties.
+    farm = farming(hp, tune) and not kite_floor
+    if critical and not farm:
         danger_gain = tune.danger_gain * 3.2
         radius = tune.radius * 1.9
         body = tune.body * 1.7
         kite_mul = 0.35
         rollout_mul = 3.0
+    elif farm:
+        danger_gain = 0.0
+        radius = tune.radius
+        body = tune.body
+        kite_mul = 0.0
+        rollout_mul = 0.0
     else:
         danger_gain = tune.danger_gain * (1.8 if defensive else 1.0)
         radius = tune.radius * (1.25 if defensive else 1.0)
@@ -835,21 +929,26 @@ def score_directions(
     step_radius = radius * radius_scale
 
     here = float(_danger_at(pts, np.array([px]), np.array([py]), radius)[0])
-    nx = px + _UNIT[:, 0] * tune.step_near
-    ny = py + _UNIT[:, 1] * tune.step_near
-    fx = px + _UNIT[:, 0] * tune.step_far
-    fy = py + _UNIT[:, 1] * tune.step_far
-    danger = _danger_at(pts, nx, ny, step_radius) + 0.6 * _danger_at(pts, fx, fy, step_radius * 1.4)
-    contact = _path_contact(pts, px, py, tune.step_far, body)
-    scores = -(danger_gain * danger + tune.contact_gain * contact)
-    if critical:
-        scores = scores - corridor_costs(pts, px, py, tune.corridor_len, tune.corridor_width)
-    if tune.rollout_gain > 0:
-        scores = scores - tune.rollout_gain * rollout_mul * rollout_costs(pts, px, py, tune)
+    if farm:
+        scores = np.zeros(len(DIRS), dtype=np.float32)
+    else:
+        nx = px + _UNIT[:, 0] * tune.step_near
+        ny = py + _UNIT[:, 1] * tune.step_near
+        fx = px + _UNIT[:, 0] * tune.step_far
+        fy = py + _UNIT[:, 1] * tune.step_far
+        danger = _danger_at(pts, nx, ny, step_radius) + 0.6 * _danger_at(pts, fx, fy, step_radius * 1.4)
+        contact = _path_contact(pts, px, py, tune.step_far, body)
+        scores = -(danger_gain * danger + tune.contact_gain * contact)
+        if critical:
+            scores = scores - corridor_costs(pts, px, py, tune.corridor_len, tune.corridor_width)
+        if tune.rollout_gain > 0:
+            scores = scores - tune.rollout_gain * rollout_mul * rollout_costs(pts, px, py, tune)
 
     # Kiting fades out when things get tight: pure escape then.
     panic = min(1.0, max(0.0, (here - tune.safe_danger) / max(tune.panic_danger - tune.safe_danger, 1e-6)))
-    if kite_floor:
+    if farm:
+        kite_scale = 0.0
+    elif kite_floor:
         # Breakout heading: stays strong under pressure (contact terms still veto bodies).
         kite_scale = kite_weight * (1.0 - 0.3 * panic)
     else:
@@ -862,21 +961,27 @@ def score_directions(
     # dive_gem_gain extends the fade (moderate danger still pulls). At zero
     # danger the scale is already 1, so a safe chest-vs-gem choice is unchanged.
     gem_cap = tune.gem_danger * gem_mul
-    gem_scale = max(0.0, 1.0 - here / gem_cap) if gem_cap > 0 else 0.0
+    # Farming keeps the full gem pull inside a pack. Danger used to fade it to 0.
+    if farm:
+        gem_scale = 1.0
+    else:
+        gem_scale = max(0.0, 1.0 - here / gem_cap) if gem_cap > 0 else 0.0
+    gem_near = False
     gem_mask = None
     if gem_forward and kite_dir is not None and gem_scale > 0:
         kx, ky = float(kite_dir[0]), float(kite_dir[1])
         kn = math.hypot(kx, ky) or 1.0
         # Breakout: gems may bias the open half, not pull a U-turn back into the ring.
         gem_mask = (_UNIT[:, 0] * (kx / kn) + _UNIT[:, 1] * (ky / kn)) >= -1e-6
-    if gems and gem_scale > 0 and not defensive and not critical:
+    if gems and gem_scale > 0 and (farm or (not defensive and not critical)):
         # XP matters as much as dodging (live run8: level 6 at 3:53 with dozens of
         # gems left on screen), so gems pull at moderate danger too, fading out as
-        # the crowd gets closer.
+        # the crowd gets closer. Above the kite line they do not fade at all.
         xy, val = _gem_xy_val(gems)
         gd = np.hypot(xy[:, 0] - px, xy[:, 1] - py)
         close = gd < tune.gem_radius
         if int(close.sum()):
+            gem_near = True
             pull = np.zeros(len(DIRS), dtype=np.float32)
             for gx, gy, gv in zip(xy[close, 0], xy[close, 1], val[close]):
                 vx, vy = float(gx) - px, float(gy) - py
@@ -902,13 +1007,33 @@ def score_directions(
                             bonus = np.where(gem_mask, np.maximum(bonus, 0.0), 0.0)
                         scores = scores + bonus
 
+    # No gem and no chest: the pack itself is the XP, approached from outside
+    # the Garlic ring. A body already inside that ring is backed off, not dived.
+    near = _nearest_threat(pts, px, py) if farm else None
+    inside_ring = near is not None and tune.engage_standoff > 0 and near[0] <= tune.engage_standoff
+    if farm and not inside_ring and not gem_near and (chest is None or tune.chest_gain <= 0):
+        aim = _pack_aim(pts, px, py, tune.engage_standoff)
+        if aim is not None and tune.farm_gain > 0:
+            scores = scores + tune.farm_gain * (_UNIT[:, 0] * aim[0] + _UNIT[:, 1] * aim[1])
+        elif kite_dir is not None and kite_weight > 0:
+            kx, ky = kite_dir
+            norm = math.hypot(kx, ky) or 1.0
+            scores = scores + kite_weight * (_UNIT[:, 0] * kx / norm + _UNIT[:, 1] * ky / norm)
+
     if tune.engage_gain > 0 and pts.shape[0]:
         scores = scores + engage_pull(pts, px, py, here, hp, tune, gems=gems)
 
     chest_scale = 0.0
     chest_vx = chest_vy = 0.0
-    if not critical and tune.chest_gain > 0 and tune.chest_danger > 0 and chest is not None:
-        chest_scale = max(0.0, 1.0 - here / tune.chest_danger)
+    if (
+        not critical
+        and tune.chest_gain > 0
+        and tune.chest_danger > 0
+        and chest is not None
+        and not (farm and gem_near)
+    ):
+        # Gems are first. With none in range the chest is walked, pack or not.
+        chest_scale = 1.0 if farm else max(0.0, 1.0 - here / tune.chest_danger)
         chest_vx, chest_vy = float(chest[0]) - px, float(chest[1]) - py
         cd = math.hypot(chest_vx, chest_vy)
         if chest_scale > 0 and cd > 1e-3:
@@ -917,6 +1042,23 @@ def score_directions(
             )
         else:
             chest_scale = 0.0
+
+    # Garlic ring: a step onto a body already inside engage_standoff loses to
+    # gems, chests, and the pack pull. Run 11 died by walking into that center.
+    if farm and inside_ring:
+        closing = _standoff_closing(pts, px, py, tune.engage_standoff)
+        peak = float(closing.max()) if closing.size else 0.0
+        if peak > 1e-6:
+            block = (
+                tune.farm_gain
+                + max(tune.chest_gain, 0.0)
+                + max(tune.gem_seek_gain, tune.early_gem_gain, tune.gem_gain, tune.gem_target_gain, 0.0)
+                + 2.0
+            )
+            scores = scores - np.float32(block) * (closing / peak)
+        away = _pack_aim(pts, px, py, tune.engage_standoff)
+        if away is not None and tune.farm_gain > 0:
+            scores = scores + tune.farm_gain * (_UNIT[:, 0] * away[0] + _UNIT[:, 1] * away[1])
 
     if current in DIRS:
         scores[DIRS.index(current)] += tune.hysteresis * (1.0 - 0.6 * panic)
@@ -931,10 +1073,12 @@ def score_directions(
         cd = math.hypot(chest_vx, chest_vy)
         if cd > 1e-3:
             toward_chest = (best[0] * chest_vx + best[1] * chest_vy) / (math.hypot(*best) * cd) > 0.5
-    if panic > 0.5:
+    if panic > 0.5 and not farm:
         mode = "escape"
     elif toward_chest:
         mode = "chest"
+    elif farm and (gem_near or pts.shape[0] > 0):
+        mode = "farm"
     elif kite_dir is not None:
         mode = "kite"
     else:
@@ -1445,7 +1589,9 @@ class Navigator:
         self._gem_summary_logged = True
         self.log(format_gem_summary(self))
 
-    def _kite_direction(self, pts: np.ndarray, px: float, py: float, dt: float) -> tuple[float, float]:
+    def _kite_direction(
+        self, pts: np.ndarray, px: float, py: float, dt: float, hp: float | None = None,
+    ) -> tuple[float, float]:
 
         phase = self.phase
         step = self.orbit * dt * 2.0 * math.pi / phase.orbit_period_s
@@ -1454,6 +1600,12 @@ class Navigator:
         roam = (math.cos(self.heading), math.sin(self.heading))
         if pts.shape[0] == 0:
             return roam
+        if farming(hp, self.tune):
+            into = _pack_aim(pts, px, py, self.tune.engage_standoff)
+            if into is None:
+                return roam
+            self.heading = math.atan2(into[1], into[0])
+            return into
         rel = pts[:, :2] - np.array([px, py], dtype=np.float32)
         d = np.hypot(rel[:, 0], rel[:, 1]) + 1e-3
         w = pts[:, 2] / (1.0 + (d / 160.0) ** 2)
@@ -1522,7 +1674,9 @@ class Navigator:
         # A committed revive escape keeps its heading (no fresh corridor pick).
         if crashing and not self._hp_crash_latched and self.escaping:
             self._hp_crash_latched = True
-        if crashing and not self._hp_crash_latched:
+        # A crash that is still above the kite line is farmed through. The flee
+        # starts on the frame HP is at or below pack_dive_hp.
+        if crashing and not self._hp_crash_latched and not farming(hp, t):
             dur = self.request_flee(t.flee_on_hp_crash_s, max_s=t.breakout_max_crash_s)
             self._hp_crash_latched = True
             self.log(
@@ -1551,6 +1705,28 @@ class Navigator:
             trigger_cover = t.cover_trigger - (0.1 if low else 0.0)
         max_s = t.breakout_max_crash_s if (crashing or flower) else t.breakout_max_s
         closing = near >= t.near_min and (cover >= trigger_cover or (cover >= t.cover_rising and rising >= t.rise_trigger))
+        # Above the kite line, do not start or keep a ring-escape or a plain
+        # breakout. A post-revive flee and a committed revive escape still run:
+        # those are request_flee / request_revive_escape, not a pack breakout.
+        ring_on = (self.escaping or self._escape_pending) and self._escape_reason == "ring"
+        keep_flee = not ring_on and (
+            self._flee_remaining > 0
+            or self._escape_pending
+            or (self.escaping and self._escape_reason == "revive")
+        )
+        if farming(hp, t) and not keep_flee:
+            if (
+                self.breakout is not None
+                or self.escaping
+                or self._escape_pending
+                or self._flee_remaining > 0
+            ):
+                self._escape_remaining = 0.0
+                self._escape_pending = False
+                self._flee_remaining = 0.0
+                if self.breakout is not None:
+                    self._end_breakout()
+            return
 
         if self.breakout is not None and self._escape_remaining > 0:
             self._update_escape(pts, px, py, dt)
@@ -1582,6 +1758,11 @@ class Navigator:
             return
         if self._flee_remaining > 0 and self.breakout is None:
             # Post-revive / HP-crash: commit to a corridor even if the ring is not closing yet.
+            # The farm heading points at the pack. A tie among open corridors must
+            # not follow it back in.
+            near = _nearest_threat(pts, px, py)
+            if near is not None and near[0] > 1e-3:
+                self.heading = math.atan2(-near[2], -near[1])
             self._start_breakout(pts, px, py)
             return
         if not closing:
@@ -2373,15 +2554,23 @@ class Navigator:
         self._expire_leash()
         self._note_open_policy()
         phase = self.phase
-        kite = self._kite_direction(pts, px, py, dt)
+        kite = self._kite_direction(pts, px, py, dt, hp)
         spot = result.chest or result.chest_arrow
         self._aim_hint = (float(spot[0]), float(spot[1])) if spot is not None else None
         self._update_breakout(pts, px, py, dt, hp)
         escape = self.breakout is not None and self._escape_remaining > 0
         here = float(_danger_at(pts, np.array([px]), np.array([py]), self.tune.radius)[0])
         self._commit = self._chest_commit(hp)
+        if farming(hp, self.tune) and gems_in_range(
+            result.gems, px, py, gem_tune_for(self.tune, self.game_s).gem_radius,
+        ) > 0:
+            # Gems outrank the chest, so the tight-orbit lock must not steal the heading.
+            self._commit = False
         lane = self._chest_lane_open(pts, px, py) if self._commit else False
         self._chase = self._leash_chase(here, hp, lane)
+        if farming(hp, self.tune) and self._commit and self._chase == "orbit":
+            # A shut lane used to tight-orbit away from the pack. Walk the chest.
+            self._chase = "step"
         self._orbit_aim = self._orbit_heading(pts, px, py, here) if self._chase == "orbit" else None
         self._note_leash_chase(here)
         # Denser early XP: boost gem pull before the flower without changing late knobs.
@@ -2598,12 +2787,21 @@ class Navigator:
                 else self._aim_from_leash(px, py, chest_at)
             )
             if heading is not None:
-                choice = _nearest_dir(heading)
-                dec.vector = choice
-                if self._chase == "orbit":
-                    dec.mode = "leash-orbit"
-                elif "escape" in dec.mode or dec.mode == "breakout":
-                    dec.mode = "leash-step"
+                snapped = _nearest_dir(heading)
+                # Do not let the chest lock step onto a sprite inside the ring.
+                into_body = False
+                if farming(hp, self.tune) and self.tune.engage_standoff > 0:
+                    closing = _standoff_closing(pts, px, py, self.tune.engage_standoff)
+                    si = DIRS.index(snapped)
+                    peak = float(closing.max()) if closing.size else 0.0
+                    into_body = peak > 1e-6 and float(closing[si]) >= peak - 1e-6
+                if not into_body:
+                    choice = snapped
+                    dec.vector = choice
+                    if self._chase == "orbit":
+                        dec.mode = "leash-orbit"
+                    elif "escape" in dec.mode or dec.mode == "breakout":
+                        dec.mode = "leash-step"
         if choice != self.current:
             self._since_change = 0.0
         self.current = choice
@@ -2692,6 +2890,13 @@ class Navigator:
         if self.tune.critical_hp <= 0:
             return
         if hp is None:
+            return
+        # Above the kite line the bot is farming. The sticky critical band
+        # (exit at 0.40) must not keep stripping gems after HP has recovered.
+        if farming(hp, self.tune):
+            if self._critical_on:
+                self._critical_on = False
+                self.log(f"[nav] critical HP off hp={hp:.2f} game~{self.game_s:.0f}s")
             return
         caution = self._crowd_hp_caution(hp)
         if self._critical_on:

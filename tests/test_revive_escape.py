@@ -242,7 +242,7 @@ def _ring_nav(game_s, tune=None):
 def test_flower_window_closing_ring_commits_escape_through_gap():
     nav, clock, logs = _ring_nav(318.0)
     pts = result(ring(480, 256, 170, 40, gap_deg=(-1, 25)))  # gap right
-    out = run(nav, clock, pts, 10, hp=1.0)
+    out = run(nav, clock, pts, 10, hp=0.24)
     assert nav.escaping and nav.last.mode.startswith("ring-escape")
     assert any(line.startswith("[nav] ring escape (1, 0)") for line in logs)
     assert sum(1 for v in out[-6:] if v[0] == 1) >= 4
@@ -251,20 +251,20 @@ def test_flower_window_closing_ring_commits_escape_through_gap():
 def test_ring_escape_is_not_abandoned_when_cover_dips():
     """Plain breakouts stop after 1.1 s once 'closing' is false; the ring commit holds."""
     nav, clock, logs = _ring_nav(318.0)
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 2, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 2, hp=0.24)
     assert nav.escaping
     h0 = nav.breakout
-    out = run(nav, clock, result(blob(330, 256, n=8, spread=30)), 18, hp=1.0)  # ~1.5 s, sparse
+    out = run(nav, clock, result(blob(330, 256, n=8, spread=30)), 18, hp=0.24)  # ~1.5 s, sparse
     assert nav.escaping and nav.breakout is not None
     assert all(_dot(v, h0) >= -1e-6 for v in out)
-    run(nav, clock, result([]), 14, hp=1.0)
+    run(nav, clock, result([]), 14, hp=0.24)
     assert not nav.escaping
     assert any("ring escape done" in line for line in logs)
 
 
 def test_outside_flower_window_plain_breakout_unchanged():
     nav, clock, logs = _ring_nav(100.0)
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 10, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 10, hp=0.24)
     assert nav.breakouts >= 1 and not nav.escaping
     assert nav.last.mode.startswith("breakout")
     assert not any("ring escape" in line for line in logs)
@@ -274,14 +274,14 @@ def test_ring_commit_defaults_on_and_explicit_zero_disables():
     assert Tuning().ring_commit_s == 2.5
     assert Tuning().flower_noreverse_s == 4.0
     nav, clock, logs = _ring_nav(318.0, tune=Tuning(ring_commit_s=0.0))
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 10, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 10, hp=0.24)
     assert nav.breakouts >= 1 and not nav.escaping
     assert nav.last.mode.startswith("breakout")
 
 
 def test_revive_overrides_running_ring_escape():
     nav, clock, logs = _ring_nav(318.0)
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 4, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 4, hp=0.24)
     assert nav._escape_reason == "ring"
     nav.request_revive_escape()
     assert nav._escape_reason == "revive" and nav._escape_remaining == nav.tune.revive_escape_s
@@ -291,7 +291,7 @@ def test_revive_overrides_running_ring_escape():
 
 def test_plain_flee_cancels_committed_escape():
     nav, clock, _ = _ring_nav(318.0)
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 4, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 4, hp=0.24)
     assert nav.escaping
     nav.request_flee(2.0)
     assert not nav.escaping and nav._flee_remaining >= 2.0  # extends, never shortens
@@ -302,7 +302,7 @@ def test_plain_flee_cancels_committed_escape():
 
 def _start_ring_escape_right():
     nav, clock, logs = _ring_nav(318.0)
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 1, hp=1.0)  # gap right
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=(-1, 25))), 1, hp=0.24)  # gap right
     assert nav.escaping and nav._escape_reason == "ring"
     assert _nearest(nav.breakout) == (1, 0)
     assert nav._escape_s <= nav.tune.escape_repick_s
@@ -317,7 +317,7 @@ def test_ring_escape_never_reverses_inside_early_window():
     crowd = result(blob(620, 256, n=40, spread=40) + blob(600, 150, n=20, spread=30) + blob(600, 360, n=20, spread=30))
     costs = escape_costs(crowd.threats, 480, 256, nav.tune)
     assert DIRS[int(np.argmin(costs))][0] == -1  # unconstrained pick would be a reversal
-    out = run(nav, clock, crowd, 4, hp=1.0)  # still within escape_repick_s
+    out = run(nav, clock, crowd, 4, hp=0.24)  # still within escape_repick_s
     assert nav._escape_s <= nav.tune.escape_repick_s
     assert _dot(nav.breakout, h0) >= -1e-6
     assert all(_dot(v, h0) >= -1e-6 for v in out)
@@ -328,7 +328,7 @@ def test_ring_escape_early_window_does_not_reset_origin():
     nav, clock, _ = _start_ring_escape_right()
     origin = nav._escape_origin
     crowd = result(blob(620, 256, n=40, spread=40) + blob(600, 150, n=20, spread=30) + blob(600, 360, n=20, spread=30))
-    run(nav, clock, crowd, 4, hp=1.0)
+    run(nav, clock, crowd, 4, hp=0.24)
     assert nav._escape_origin == origin
 
 

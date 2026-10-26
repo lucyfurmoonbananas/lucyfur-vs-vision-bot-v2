@@ -26,10 +26,10 @@ def _nav(game_s: float, **kw):
 
 
 def _break_then_end(nav, clock, gap):
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=gap)), 6, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=gap)), 6, hp=0.24)
     assert nav.breakout is not None
     first = nav.breakout
-    run(nav, clock, result([]), 16, hp=1.0)  # > breakout_min_s, not closing -> ends
+    run(nav, clock, result([]), 16, hp=0.24)  # > breakout_min_s, not closing -> ends
     assert nav.breakout is None
     return first
 
@@ -38,7 +38,7 @@ def test_flower_breakout_does_not_reverse_the_last_one():
     nav, clock, logs = _nav(318.0)
     first = _break_then_end(nav, clock, GAP_RIGHT)
     assert first[0] > 0.5
-    out = run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=1.0)
+    out = run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=0.24)
     assert nav.breakout is not None
     assert nav.breakout[0] >= -1e-6  # within 90 deg of "right", never back left
     assert all(v[0] >= 0 for v in out)
@@ -48,7 +48,7 @@ def test_flower_breakout_does_not_reverse_the_last_one():
 def test_outside_flower_window_reversal_is_allowed():
     nav, clock, logs = _nav(100.0)
     _break_then_end(nav, clock, GAP_RIGHT)
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=0.24)
     assert nav.breakout is not None and nav.breakout[0] < -0.5
     assert not any("no-reverse" in line for line in logs)
 
@@ -60,7 +60,7 @@ def test_flower_window_keeps_noreverse_past_ttl():
     assert first[0] > 0.5
     nav.game_s += 5.0  # still inside flower (280-360); old TTL would forget the heading
     assert nav._in_flower()
-    out = run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=1.0)
+    out = run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=0.24)
     assert nav.breakout is not None
     assert nav.breakout[0] >= -1e-6  # still anchored to last rightward breakout
     assert all(v[0] >= 0 for v in out)
@@ -71,24 +71,24 @@ def test_noreverse_expires_after_flower_window_ends():
     _break_then_end(nav, clock, GAP_RIGHT)
     nav.game_s = 370.0  # past flower_phase_hi; TTL has also elapsed
     assert not nav._in_flower()
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=0.24)
     assert nav.breakout is not None and nav.breakout[0] < -0.5
 
 
 def test_disabled_rule_keeps_old_behaviour():
     nav, clock, logs = _nav(318.0, flower_noreverse_s=0.0)
     _break_then_end(nav, clock, GAP_RIGHT)
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=0.24)
     assert nav.breakout is not None and nav.breakout[0] < -0.5
     assert not any("no-reverse" in line for line in logs)
 
 
 def test_running_flower_breakout_recheck_never_flips_back():
     nav, clock, _ = _nav(318.0)
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_RIGHT)), 4, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_RIGHT)), 4, hp=0.24)
     assert nav.breakout is not None and nav.breakout[0] > 0.5
     # Right corridor now shut, left wide open: the 0.4 s re-check may turn, not reverse.
-    out = run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 12, hp=1.0)
+    out = run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 12, hp=0.24)
     assert nav.breakout is None or nav.breakout[0] >= -1e-6
     assert all(v[0] >= 0 for v in out)
 
@@ -120,13 +120,13 @@ def test_running_breakout_recheck_anchors_to_origin_not_latest():
     with origin at +x, heading must stay x>=0.
     """
     nav, clock, _ = _nav(318.0)
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_RIGHT)), 4, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_RIGHT)), 4, hp=0.24)
     assert nav.breakout is not None and nav.breakout[0] > 0.5
     assert nav._breakout_origin is not None and nav._breakout_origin[0] > 0.5
     # Simulate a 90° re-aim already happened; force the next 0.4 s re-check.
     nav.breakout = (0.0, 1.0)
     nav._breakout_check = 0.4
-    out = run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 12, hp=1.0)
+    out = run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 12, hp=0.24)
     if nav.breakout is not None:
         assert nav.breakout[0] >= -1e-6
         assert nav._breakout_origin is not None and nav._breakout_origin[0] > 0.5
@@ -151,17 +151,17 @@ def test_consecutive_ring_escapes_do_not_flip_after_ttl():
     nav = Navigator(tune=tune, clock=clock, log=logs.append)
     nav.game_s = 281.0
     # First ring escape through right gap
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_RIGHT)), 4, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_RIGHT)), 4, hp=0.24)
     assert nav.escaping or nav.breakout is not None
     first = nav.breakout or nav._last_break_dir
     assert first is not None and first[0] > 0.5
     # Let the escape finish and age past the old 4 s TTL while still in flower
-    run(nav, clock, result([]), 40, hp=1.0)  # clear field, end escape/breakout
+    run(nav, clock, result([]), 40, hp=0.24)  # clear field, end escape/breakout
     nav.game_s = 289.0
     assert nav._in_flower()
     assert nav._recent_break_dir() is not None
     assert nav._recent_break_dir()[0] > 0.5
     # New closing ring with gap on the LEFT — must NOT reverse into (-1, ...)
-    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=1.0)
+    run(nav, clock, result(ring(480, 256, 170, 40, gap_deg=GAP_LEFT)), 6, hp=0.24)
     assert nav.breakout is not None
     assert nav.breakout[0] >= -1e-6

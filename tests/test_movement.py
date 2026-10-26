@@ -58,14 +58,15 @@ def dot(v, ux, uy) -> float:
 
 
 def test_one_sided_close_crowd_moves_away():
-    dec = score_directions(np.array(blob(560, 256), np.float32), P, None, 0.0)
+    # Above pack_dive_hp this crowd is approached. The kite band still leaves it.
+    dec = score_directions(np.array(blob(560, 256), np.float32), P, None, 0.0, hp=0.20)
     assert dec.vector[0] == -1
 
 
 def test_one_sided_crowd_with_kiting_goes_around_not_into_it():
     clock = Clock()
     nav = Navigator(clock=clock)
-    vecs = run(nav, clock, result(blob(720, 256, n=20, spread=40)), 24)
+    vecs = run(nav, clock, result(blob(720, 256, n=20, spread=40)), 24, hp=0.20)
     # Never walks toward the crowd; mostly tangential (vertical) or away.
     assert all(v[0] <= 0 or v[1] != 0 for v in vecs)
     assert all(v != (1, 0) for v in vecs)
@@ -75,11 +76,11 @@ def test_one_sided_crowd_with_kiting_goes_around_not_into_it():
 def test_surrounded_escapes_through_the_gap():
     # Ring of enemies 70 px out with a gap toward the lower-left (~135 deg).
     pts = ring(P[0], P[1], 70, 36, gap_deg=(110, 160))
-    dec = score_directions(np.array(pts, np.float32), P, None, 0.0)
+    dec = score_directions(np.array(pts, np.float32), P, None, 0.0, hp=0.20)
     assert dec.vector == (-1, 1)
     clock = Clock()
     nav = Navigator(clock=clock)
-    vecs = run(nav, clock, result(pts), 6)
+    vecs = run(nav, clock, result(pts), 6, hp=0.20)
     assert vecs[-1] in ((-1, 1), (-1, 0), (0, 1))
 
 
@@ -115,7 +116,7 @@ def test_hysteresis_no_jitter_between_equal_options():
 def test_prefers_least_dense_sector():
     # Dense on the right, a single bat on the left: go left-ish, not right.
     pts = blob(600, 256, n=30, spread=60) + [(380, 256, 1.0)]
-    dec = score_directions(np.array(pts, np.float32), P, None, 0.0)
+    dec = score_directions(np.array(pts, np.float32), P, None, 0.0, hp=0.20)
     assert dec.vector[0] <= 0 and dec.vector != (0, 0)
     # The lone bat blocks straight left; a diagonal around it is fine.
     assert dec.vector != (1, 0)
@@ -125,9 +126,9 @@ def test_gems_pull_only_when_safe():
     gem = [(400, 256)]
     safe = score_directions(np.zeros((0, 3), np.float32), P, None, 0.0, gems=gem)
     assert safe.vector == (-1, 0)
-    # Crowd sitting right on the gem: don't go for it.
+    # Crowd sitting right on the gem, at the kite line: don't go for it.
     pts = np.array(blob(420, 256, n=15, spread=15), np.float32)
-    risky = score_directions(pts, P, None, 0.0, gems=gem)
+    risky = score_directions(pts, P, None, 0.0, gems=gem, hp=0.20)
     assert risky.vector[0] >= 0
 
 
@@ -135,7 +136,7 @@ def test_low_hp_is_more_defensive():
     # A pack at 120 px and a strong pull (kite) toward it.
     pts = np.array(blob(600, 256, n=12, spread=15), np.float32)
     full = score_directions(pts, P, (1.0, 0.0), 1.0, hp=1.0)
-    low = score_directions(pts, P, (1.0, 0.0), 1.0, hp=0.3)
+    low = score_directions(pts, P, (1.0, 0.0), 1.0, hp=0.20)
     right = (1, 0)
     assert low.scores[right] < full.scores[right]
     assert low.vector[0] <= 0
@@ -174,7 +175,7 @@ def test_orbit_flips_when_the_loop_is_blocked():
     real = pathfind.score_directions
     pathfind.score_directions = lambda *a, **k: Decision((0, -1), {d: 0.0 for d in DIRS}, 0.0, "stub")
     try:
-        run(nav, clock, result(pts), 12)
+        run(nav, clock, result(pts), 12, hp=0.20)
     finally:
         pathfind.score_directions = real
     assert nav.orbit == -start
@@ -189,10 +190,12 @@ def test_simulated_swarm_poe_survives_two_minutes():
     sim = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(sim)
     # Chasing swarm with 1:00 / 2:00 bat bursts; Poe has 70 max HP.
+    # Pack-dive farms until about 25% HP (~52 damage), then kites. The cap is
+    # one life minus the burst that crosses that line. Standing still dies.
     new = sim.simulate("new", 125, seed=0)
-    assert new["damage"] < 35
+    assert new["damage"] < 62
     still = sim.simulate("still", 60, seed=0)
-    assert still["damage"] > 10 * max(new["damage"], 1.0)
+    assert still["damage"] > 4 * max(new["damage"], 1.0)
 
 
 def test_all_decisions_are_valid_wasd_vectors():
@@ -235,7 +238,7 @@ def test_closing_ring_triggers_breakout_through_the_gap():
     nav = Navigator(clock=clock)
     nav.game_s = 300.0
     pts = ring(480, 256, 170, 40, gap_deg=(-1, 25))  # gap to the right
-    out = run(nav, clock, result(pts), 10, hp=1.0)
+    out = run(nav, clock, result(pts), 10, hp=0.24)
     assert nav.breakouts >= 1
     # Default ring_commit_s promotes this to a committed ring-escape in the flower window.
     assert nav.last.mode.startswith("breakout") or nav.last.mode.startswith("ring-escape")
@@ -246,13 +249,14 @@ def test_breakout_commits_then_resumes_loops():
     clock = Clock()
     nav = Navigator(clock=clock)
     pts = ring(480, 256, 170, 40, gap_deg=(170, 200))  # gap to the left
-    run(nav, clock, result(pts), 6, hp=1.0)
+    run(nav, clock, result(pts), 6, hp=0.24)
     assert nav.breakout is not None
     heading = nav.breakout
     # Ring gone: keeps the breakout for its minimum time, then drops it.
-    run(nav, clock, result([]), 3)
+    # hp stays in the kite band; above pack_dive_hp the breakout is cancelled.
+    run(nav, clock, result([]), 3, hp=0.24)
     assert nav.breakout == heading
-    run(nav, clock, result([]), 30)
+    run(nav, clock, result([]), 30, hp=0.24)
     assert nav.breakout is None
     assert abs(math.atan2(math.sin(nav.heading - math.pi), math.cos(nav.heading - math.pi))) < 1.6
 
@@ -305,7 +309,7 @@ def test_gems_still_pull_at_moderate_danger():
     dec = score_directions(pts, P, None, 0.0, gems=[(330, 150), (340, 160), (320, 140)])
     assert dec.vector[0] == -1 and dec.vector[1] == -1
     # Not when HP is low.
-    low = score_directions(pts, P, None, 0.0, gems=[(330, 150), (340, 160), (320, 140)], hp=0.3)
+    low = score_directions(pts, P, None, 0.0, gems=[(330, 150), (340, 160), (320, 140)], hp=0.20)
     assert low.scores[(-1, -1)] < dec.scores[(-1, -1)]
 
 
@@ -347,7 +351,7 @@ def test_request_flee_drops_pre_death_breakout():
     nav.game_s = 300.0
     ring_pts = result(ring(480, 256, 170, 40, gap_deg=(-1, 25)))  # gap right
     while nav.breakout is None or nav._breakout_s < 2.3:
-        run(nav, clock, ring_pts, 1, hp=1.0)
+        run(nav, clock, ring_pts, 1, hp=0.24)
     clock.t += 3.0  # death + REVIVE screen
     nav.request_flee(2.0)
     out = run(nav, clock, result(blob(600, 256, n=20, spread=40)), 20, hp=1.0)
@@ -363,9 +367,9 @@ def test_hp_crash_forces_breakout_without_encirclement():
     sparse = result(blob(600, 256, n=10, spread=30))
     run(nav, clock, sparse, 6, hp=1.0)
     assert nav.breakouts == 0
-    # Crash: 1.0 -> 0.65 within the look-back window (Δ <= -0.3).
+    # Crash through the kite line: 1.0 -> 0.20 within the look-back window.
     run(nav, clock, sparse, 2, hp=1.0)
-    out = run(nav, clock, sparse, 6, hp=0.65)
+    out = run(nav, clock, sparse, 6, hp=0.20)
     assert nav._hp_crashing is True
     assert nav.breakouts >= 1
     assert nav.breakout is not None
@@ -382,7 +386,7 @@ def test_hp_crash_uses_request_flee_duration():
     nav = Navigator(clock=clock)
     sparse = result(blob(600, 256, n=10, spread=30))
     run(nav, clock, sparse, 4, hp=1.0)
-    run(nav, clock, sparse, 2, hp=0.65)
+    run(nav, clock, sparse, 2, hp=0.20)
     assert nav._hp_crash_latched is True
     # Fresh latch: remaining should be ~flee_on_hp_crash_s minus a couple frames.
     expected = nav.tune.flee_on_hp_crash_s
@@ -395,16 +399,18 @@ def test_flower_phase_lowers_cover_trigger():
     """Around game_s 280–360 a partial ring should break out sooner than early-game."""
     clock = Clock()
     # cover ≈ 0.50: below early cover_trigger (0.55), at/above flower mid (0.45).
-    # Steady density so the rising-EMA path does not fire.
+    # Steady density so the rising-EMA path does not fire. HP is in the kite
+    # band but above low_hp so the early trigger is not also lowered.
+    tune = Tuning(low_hp=0.10, critical_hp=0.10)
     partial = ring(480, 256, 160, 32, gap_deg=(0, 170))
-    early = Navigator(clock=clock)
+    early = Navigator(tune=tune, clock=clock)
     early.game_s = 60.0
-    run(early, clock, result(partial), 16, hp=1.0)
+    run(early, clock, result(partial), 16, hp=0.24)
     assert early.breakouts == 0
     clock2 = Clock()
-    mid = Navigator(clock=clock2)
+    mid = Navigator(tune=tune, clock=clock2)
     mid.game_s = 300.0  # inside flower window
-    run(mid, clock2, result(partial), 16, hp=1.0)
+    run(mid, clock2, result(partial), 16, hp=0.24)
     assert mid.breakouts >= 1
 
 
@@ -541,10 +547,10 @@ def test_hp_crash_flee_and_flower_window_are_logged():
     sparse = result(blob(600, 256, n=10, spread=30))
     run(nav, clock, sparse, 8, hp=1.0)
     assert not any("HP-crash" in ln for ln in lines)
-    run(nav, clock, sparse, 6, hp=0.65)
+    run(nav, clock, sparse, 6, hp=0.20)
     crash = [ln for ln in lines if "HP-crash flee" in ln]
     assert len(crash) == 1  # edge-triggered once per crash bout
-    assert "hp 1.00->0.65" in crash[0]
+    assert "hp 1.00->0.20" in crash[0]
 
     nav.game_s = 300.0
     run(nav, clock, sparse, 4, hp=0.65)
