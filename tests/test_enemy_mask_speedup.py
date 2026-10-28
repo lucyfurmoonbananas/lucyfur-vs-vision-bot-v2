@@ -11,6 +11,7 @@ import pytest
 
 from vs_vision_bot.vision import (
     DARK_MAX,
+    GHOUL_GREEN_MIN,
     MIN_DARK_AREA,
     REF_H,
     REF_W,
@@ -40,6 +41,8 @@ def _reference_enemy_mask(frame: np.ndarray) -> np.ndarray:
     # Bright leaf pixels and purple berries / flowers that sit inside bush rings.
     lime = (g > 90) & (g > r + 20) & (g > b + 20)
     purple = (r > 70) & (b > 70) & (g < np.minimum(r, b) - 15)
+    ghoul_green = lime & (g > 110) & (r - b >= 3) & (r - b <= 12)
+    ghoul_min = max(8, int(GHOUL_GREEN_MIN * scale))
     keep = np.zeros(n, dtype=bool)
     max_flat = max(4, int(round(8 * h / REF_H)))
     for i in range(1, n):
@@ -60,8 +63,17 @@ def _reference_enemy_mask(frame: np.ndarray) -> np.ndarray:
         comp = labels == i
         pix = frame[comp]
         # Bush outlines are green/brown tinted; bat / ghoul bodies are gray-black.
+        # Same even-green exception as enemy_mask: a close ghoul outline is
+        # tinted, and the padded band holds its body.
         chroma = float((pix.max(axis=1) - pix.min(axis=1)).mean()) if len(pix) else 0.0
-        if chroma >= 8.0 and area < int(200 * scale):
+        pad = 4
+        y0, y1 = max(0, y - pad), min(h, y + bh + pad)
+        x0, x1 = max(0, x - pad), min(w, x + bw + pad)
+        band = np.zeros((h, w), dtype=bool)
+        band[y0:y1, x0:x1] = True
+        band[comp] = False
+        ghoul = int(ghoul_green[band].sum()) >= ghoul_min
+        if chroma >= 8.0 and area < int(200 * scale) and not ghoul:
             continue
         dist = cv2.distanceTransform(comp.astype(np.uint8), cv2.DIST_L2, 3)
         max_t = float(dist.max())
@@ -76,13 +88,9 @@ def _reference_enemy_mask(frame: np.ndarray) -> np.ndarray:
             continue
         # Small thin rings hugging lime leaves or purple berries / flowers.
         if area < int(100 * scale) and max_t <= 2.0:
-            pad = 4
-            y0, y1 = max(0, y - pad), min(h, y + bh + pad)
-            x0, x1 = max(0, x - pad), min(w, x + bw + pad)
-            band = np.zeros((h, w), dtype=bool)
-            band[y0:y1, x0:x1] = True
-            band[comp] = False
-            if int(lime[band].sum()) >= 40 or int(purple[band].sum()) >= 8:
+            if not ghoul and (
+                int(lime[band].sum()) >= 40 or int(purple[band].sum()) >= 8
+            ):
                 continue
         keep[i] = True
     return keep[labels]

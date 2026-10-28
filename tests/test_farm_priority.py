@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from vs_vision_bot.pathfind import Tuning, score_directions
+from vs_vision_bot.pathfind import (
+    Tuning,
+    gem_tune_for,
+    score_directions,
+    skeleton_phase,
+    skeleton_plow_tune,
+)
 
 from tests.test_movement import Clock, P, blob, result, ring, run
 from vs_vision_bot.pathfind import Navigator
@@ -121,34 +127,92 @@ def test_pack_dive_hp_zero_restores_the_flee():
     assert dec.vector[0] < 0
 
 
-def test_dense_pack_is_grazed_at_the_garlic_ring_not_entered():
-    """Run 11 walked onto sprite centers and burst from full HP to 0.
+def test_above_quarter_runs_into_a_dense_pack():
+    """Default engage_standoff is 0. Above 25% HP a pack on top of Poe is entered.
 
-    Inside engage_standoff the step backs off. Just outside it, the pack is
-    still approached so Garlic keeps melting the edge.
+    VS_TUNE=engage_standoff=34 still grazes that ring instead of the center.
     """
-    standoff = Tuning().engage_standoff
-    assert standoff == 34.0
+    assert Tuning().engage_standoff == 0.0
     inside = np.array(blob(P[0] + 18, P[1], n=10, spread=6, seed=4), np.float32)
-    on_ring = np.array([(P[0] + standoff, P[1], 1.0)], np.float32)
     outside = np.array(blob(P[0] + 120, P[1], n=10, spread=10, seed=5), np.float32)
     for hp in (0.26, 1.0, None):
-        assert score_directions(inside, P, None, 0.0, hp=hp).vector[0] <= 0, hp
-        assert score_directions(on_ring, P, None, 0.0, hp=hp).vector[0] <= 0, hp
+        assert score_directions(inside, P, None, 0.0, hp=hp).vector[0] > 0, hp
         assert score_directions(outside, P, None, 0.0, hp=hp).vector[0] > 0, hp
-
-    # A gem sitting on the sprites must not pull the step through them.
+    # A gem buried in the sprites is collected by walking into them.
     buried = score_directions(inside, P, None, 0.0, gems=[(P[0] + 18, P[1])], hp=1.0)
-    assert buried.vector[0] <= 0
+    assert buried.vector[0] > 0
     # A gem off the pack still wins.
     clear = score_directions(outside, P, None, 0.0, gems=[(P[0] - 160, P[1])], hp=1.0)
     assert clear.vector[0] < 0
+
+    grazed = Tuning(engage_standoff=34.0)
+    on_ring = np.array([(P[0] + 34.0, P[1], 1.0)], np.float32)
+    for hp in (0.26, 1.0, None):
+        assert score_directions(inside, P, None, 0.0, hp=hp, tune=grazed).vector[0] <= 0, hp
+        assert score_directions(on_ring, P, None, 0.0, hp=hp, tune=grazed).vector[0] <= 0, hp
 
     clock = Clock()
     nav = Navigator(clock=clock, log=lambda *_: None)
     res = result(blob(P[0] + 18, P[1], n=10, spread=6, seed=4))
     res.chest = (P[0] + 40, P[1])
     vecs = run(nav, clock, res, 6, hp=1.0)
-    assert all(v[0] <= 0 for v in vecs)
+    assert all(v[0] > 0 for v in vecs)
     assert nav.breakouts == 0
     assert not nav.last.mode.startswith("ring-escape")
+
+
+def test_skeleton_phase_plows_into_the_pack_and_aims_gems():
+    """2:00–5:00 and 8:00–10:00, above 25% HP: no standoff, no breakout, into the pack.
+
+    The 8:00 wave is past early_gem_until_s, so the plow puts the early gem
+    target back. At or below 25% HP the kite returns. A tuned standoff of 34
+    does not survive the skeleton window.
+    """
+    assert Tuning().early_gem_target_gain >= 1.4
+    assert skeleton_phase(180.0) and skeleton_phase(299.0) and skeleton_phase(520.0)
+    assert not skeleton_phase(300.0) and not skeleton_phase(400.0)
+    assert not skeleton_phase(320.0)  # flower window, after the 5:00 skeleton cutoff
+
+    inside = np.array(blob(P[0] + 18, P[1], n=10, spread=6, seed=4), np.float32)
+    for game_s in (180.0, 520.0):
+        clock = Clock()
+        nav = Navigator(
+            tune=Tuning(engage_standoff=34.0), clock=clock, log=lambda *_: None,
+        )
+        nav.game_s = game_s
+        vecs = run(nav, clock, result(inside), 6, hp=1.0)
+        assert all(v[0] > 0 for v in vecs), game_s
+        assert nav.breakouts == 0
+        assert not nav.escaping
+
+    # Closed ring during the skeleton wave is still a pack, not a breakout.
+    gap = ring(480, 256, 160, 40, gap_deg=(-1, 25))
+    clock = Clock()
+    nav = Navigator(clock=clock, log=lambda *_: None)
+    nav.game_s = 180.0
+    run(nav, clock, result(gap), 8, hp=1.0)
+    assert nav.breakouts == 0 and not nav.escaping
+
+    # Same ring in the flower window is a wall: graze it, do not ring-escape
+    # and do not keep walking into the bodies.
+    clock = Clock()
+    wall = Navigator(clock=clock, log=lambda *_: None)
+    wall.game_s = 320.0
+    into = run(wall, clock, result(gap), 8, hp=1.0)
+    assert wall.breakouts == 0 and not wall.escaping
+    assert wall.cover >= wall.tune.ring_commit_cover
+    # The east gap is the opening. Grazing does not spend the steps on it.
+    assert sum(1 for v in into if v[0] > 0) < len(into)
+
+    # 8:00 restores the early gem clump pull. Below the kite line it does not.
+    late = gem_tune_for(Tuning(engage_standoff=34.0), 520.0)
+    assert late.gem_target_gain == 0.0
+    assert late.engage_standoff == 34.0
+    plowed = skeleton_plow_tune(late, 520.0, 1.0)
+    assert plowed.engage_standoff == 0.0
+    assert plowed.gem_target_gain >= 1.4
+    assert plowed.gem_gain >= Tuning().early_gem_gain
+    assert plowed.farm_gain > Tuning().farm_gain
+    held = skeleton_plow_tune(late, 520.0, 0.25)
+    assert held.gem_target_gain == 0.0
+    assert held.engage_standoff == 34.0

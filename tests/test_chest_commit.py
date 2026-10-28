@@ -173,7 +173,11 @@ def test_crowded_chest_is_closed_on_instead_of_orbited_away():
     vecs, dists = _pursue(nav, clock, pts, chest, 36, hp=1.0)
     fresh = [ln for ln in logs if ln.startswith("[chest] ") or ln.startswith("[leash] orbit ")]
     assert any(ln.startswith("[chest] seek chest ") for ln in fresh)
-    assert not any(ln.startswith("[chest] clear ") for ln in fresh)
+    # Walking into the pack can reach the chest. That drop clears the seek.
+    # A clear with the leash still out is the old seek/clear cycle.
+    reached = any("drop reached" in ln for ln in logs)
+    if not reached:
+        assert not any(ln.startswith("[chest] clear ") for ln in fresh)
     radii = []
     for ln in fresh:
         if ln.startswith("[leash] orbit r="):
