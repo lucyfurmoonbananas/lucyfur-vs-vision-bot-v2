@@ -166,12 +166,12 @@ class Tuning:
     critical_exit_hp: float = 0.40
     # Pack-dive above this fraction (0 disables). Above it, and while the bar
     # is still unknown, walk into packs and XP gems first and into a chest when
-    # no gem is in range. At or below it, kite and break out. The walk stops at
-    # engage_standoff (Garlic's knockback ring) instead of the sprite center.
+    # no gem is in range. At or below it, kite and break out.
     # VS_TUNE=pack_dive_hp=0
     pack_dive_hp: float = 0.25
-    # Pull toward a pack that is still outside the Garlic ring. A gem or a chest
-    # outranks it. Bodies already inside the ring outrank both.
+    # Pull toward a pack, including one already touching Poe. A gem or a chest
+    # outranks it. A positive engage_standoff (VS_TUNE=engage_standoff=34) is
+    # what backs off a body inside that radius; the default does not.
     farm_gain: float = 3.0
     # High-HP dive. Garlic kills inside ~40 px (sim aura) and the engage standoff
     # is 34, but the danger kernel is 42 and the kite's near band is 110, so a
@@ -375,7 +375,10 @@ class Tuning:
     # -1 disables the gate (engage regardless of gems).
     early_engage_max_gems: int = 0
     engage_radius: float = 260.0
-    engage_standoff: float = 34.0
+    # 0: while farming, step into the pack. 34 is Garlic's knockback ring and
+    # restores the graze (back off any body already inside it).
+    # VS_TUNE=engage_standoff=34
+    engage_standoff: float = 0.0
     # Man-eater flower ring (~4:40–6:00): HP can drop 1.0→0.1 in 2–3 s.
     hp_crash_delta: float = -0.3       # peak-to-now drop that counts as crashing
     hp_crash_window_s: float = 1.5     # look-back for that drop
@@ -473,6 +476,56 @@ def dive_level(hp: float | None, tune: Tuning) -> float:
     if hp < tune.low_hp or (tune.critical_hp > 0 and hp < tune.critical_hp):
         return 0.0
     return float(min(1.0, (hp - tune.dive_hp_lo) / (tune.dive_hp_hi - tune.dive_hp_lo)))
+
+
+# Mad Forest skeletons, 2:00–5:00 and 8:00–10:00. Garlic deletes them, and the
+# gem clusters they drop are the fast early levels. The flower ring starts at
+# flower_phase_lo inside the first window; that wall is handled separately.
+SKELETON_WINDOWS = ((120.0, 300.0), (480.0, 600.0))
+# The ring stays closed after flower_phase_hi until the 8:00 skeleton wave.
+FLOWER_WALL_UNTIL_S = 480.0
+
+
+def skeleton_phase(game_s: float) -> bool:
+    """True during a skeleton wave (2:00–5:00 or 8:00–10:00)."""
+    return any(lo <= game_s < hi for lo, hi in SKELETON_WINDOWS)
+
+
+def flower_wall(game_s: float, cover: float, tune: Tuning) -> bool:
+    """Impassable Man-eater ring. Ordinary packs, including skeletons, are not.
+
+    During the flower window, cover at ``cover_trigger_mid`` is the ring.
+    From the end of that window until 8:00, only a still-closed wall
+    (``ring_commit_cover``) counts, so the bot goes back to farming as it opens.
+    """
+    if cover < tune.cover_trigger_mid:
+        return False
+    if tune.flower_phase_lo <= game_s <= tune.flower_phase_hi:
+        return True
+    return tune.flower_phase_hi < game_s < FLOWER_WALL_UNTIL_S and cover >= tune.ring_commit_cover
+
+
+def skeleton_plow_tune(tune: Tuning, game_s: float, hp: float | None) -> Tuning:
+    """Drop the standoff and restore the early gem pull on a skeleton wave.
+
+    No-op outside the wave or at/below ``pack_dive_hp``. ``engage_standoff``
+    is forced to 0 even when the caller set 34. Gem target stays at least
+    ``early_gem_target_gain`` so the 8:00 wave, which is past
+    ``early_gem_until_s``, still aims at one clump.
+    """
+    if not farming(hp, tune) or not skeleton_phase(game_s):
+        return tune
+    over: dict[str, float] = {
+        "engage_standoff": 0.0,
+        "farm_gain": max(tune.farm_gain * 2.0, tune.farm_gain + 3.0),
+    }
+    if tune.early_gem_target_gain > 0:
+        over["gem_target_gain"] = max(tune.gem_target_gain, tune.early_gem_target_gain)
+    if tune.early_gem_gain > tune.gem_gain:
+        over["gem_gain"] = tune.early_gem_gain
+    if tune.early_gem_radius > tune.gem_radius:
+        over["gem_radius"] = tune.early_gem_radius
+    return replace(tune, **over)
 
 
 def farming(hp: float | None, tune: Tuning) -> bool:
@@ -1611,7 +1664,9 @@ class Navigator:
         if pts.shape[0] == 0:
             return roam
         if farming(hp, self.tune):
-            into = _pack_aim(pts, px, py, self.tune.engage_standoff)
+            # Skeleton waves ignore a tuned standoff and walk into the pack.
+            standoff = 0.0 if skeleton_phase(self.game_s) else self.tune.engage_standoff
+            into = _pack_aim(pts, px, py, standoff)
             if into is None:
                 return roam
             self.heading = math.atan2(into[1], into[0])
@@ -1724,7 +1779,9 @@ class Navigator:
             or self._escape_pending
             or (self.escaping and self._escape_reason == "revive")
         )
-        if farming(hp, t) and not keep_flee:
+        # A flower wall is the one crowd that is not a pack to dive. Skeletons
+        # and every other pack above the kite line keep farming.
+        if farming(hp, t) and not keep_flee and not flower_wall(self.game_s, cover, t):
             if (
                 self.breakout is not None
                 or self.escaping
@@ -2604,7 +2661,9 @@ class Navigator:
         self._orbit_aim = self._orbit_heading(pts, px, py, here) if self._chase == "orbit" else None
         self._note_leash_chase(here)
         # Denser early XP: boost gem pull before the flower without changing late knobs.
-        score_tune = gem_tune_for(self.tune, self.game_s)
+        # Skeleton waves (including 8:00, past early_gem_until_s) plow into the
+        # pack and aim at a gem clump with at least early_gem_target_gain.
+        score_tune = skeleton_plow_tune(gem_tune_for(self.tune, self.game_s), self.game_s, hp)
         # A commit keeps the sighting through a ring-escape. Clearing it here is
         # the seek -> breakout away -> clear cycle from the Oct 26 runs.
         seen = self._chest_seen(result, escape and not self._commit, dt)
@@ -2820,8 +2879,9 @@ class Navigator:
                 snapped = _nearest_dir(heading)
                 # Do not let the chest lock step onto a sprite inside the ring.
                 into_body = False
-                if farming(hp, self.tune) and self.tune.engage_standoff > 0:
-                    closing = _standoff_closing(pts, px, py, self.tune.engage_standoff)
+                standoff = 0.0 if skeleton_phase(self.game_s) else self.tune.engage_standoff
+                if farming(hp, self.tune) and standoff > 0:
+                    closing = _standoff_closing(pts, px, py, standoff)
                     si = DIRS.index(snapped)
                     peak = float(closing.max()) if closing.size else 0.0
                     into_body = peak > 1e-6 and float(closing[si]) >= peak - 1e-6

@@ -219,6 +219,14 @@ def _masks(w: int, h: int) -> tuple[np.ndarray, np.ndarray]:
 # check in enemy_mask; also the crop margin for its per-component work.
 BAND_PAD = 4
 
+# Mad Forest green ghouls / mantises have an even green body: green above 110
+# with red just a little above blue (3..12). Hedge leaves and ferns are warmer
+# yellow-green (red well above blue) and the clover pickups lean blue (blue >=
+# red). A thin dark outline whose padded box holds at least this many such
+# pixels is an enemy, not a bush. Measured Oct 27 2026 on 5:14 / 6:11 death
+# frames: ghoul boxes 118-380 px, hedge ring, ferns and clovers 0-25.
+GHOUL_GREEN_MIN = 60
+
 
 def enemy_mask(frame: np.ndarray) -> np.ndarray:
     """
@@ -246,6 +254,8 @@ def enemy_mask(frame: np.ndarray) -> np.ndarray:
     # Bright leaf pixels and purple berries / flowers that sit inside bush rings.
     lime = (g > 90) & (g > r + 20) & (g > b + 20)
     purple = (r > 70) & (b > 70) & (g < np.minimum(r, b) - 15)
+    ghoul_green = lime & (g > 110) & (r - b >= 3) & (r - b <= 12)
+    ghoul_min = max(8, int(GHOUL_GREEN_MIN * scale))
     keep = np.zeros(n, dtype=bool)
     max_flat = max(4, int(round(8 * h / REF_H)))
     for i in range(1, n):
@@ -273,8 +283,12 @@ def enemy_mask(frame: np.ndarray) -> np.ndarray:
         comp = labels[y0:y1, x0:x1] == i
         pix = frame[y0:y1, x0:x1][comp]
         # Bush outlines are green/brown tinted; bat / ghoul bodies are gray-black.
+        # A green ghoul pressed against Poe (flower ring, ~(465, 220)) is the
+        # tinted case: chroma >= 8 on a small outline, with an even-green body
+        # in the pad. That body keeps it. Hedge leaves are warmer and stay out.
         chroma = float((pix.max(axis=1) - pix.min(axis=1)).mean()) if len(pix) else 0.0
-        if chroma >= 8.0 and area < int(200 * scale):
+        ghoul = int(ghoul_green[y0:y1, x0:x1][~comp].sum()) >= ghoul_min
+        if chroma >= 8.0 and area < int(200 * scale) and not ghoul:
             continue
         dist = cv2.distanceTransform(comp.astype(np.uint8), cv2.DIST_L2, 3)
         max_t = float(dist.max())
@@ -291,7 +305,7 @@ def enemy_mask(frame: np.ndarray) -> np.ndarray:
         # the bbox padded by BAND_PAD px (the crop above), minus the component.
         if area < int(100 * scale) and max_t <= 2.0:
             band = ~comp
-            if (
+            if not ghoul and (
                 int(lime[y0:y1, x0:x1][band].sum()) >= 40
                 or int(purple[y0:y1, x0:x1][band].sum()) >= 8
             ):
