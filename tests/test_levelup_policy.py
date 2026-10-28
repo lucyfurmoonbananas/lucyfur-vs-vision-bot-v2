@@ -107,28 +107,28 @@ def test_scripted_offers_max_garlic_then_one_second_weapon():
     ]
     picks, reasons = _play(garlic_offers, levels)
     assert picks[0] == "Garlic" and reasons[0] == "main"
-    assert picks[1] == "Magic Wand" and reasons[1] == "fallback"  # nothing owned or partner
+    assert picks[1] == "Santa Water" and reasons[1] == "fallback"  # nothing owned or partner
     assert picks[2] == "Pummarola" and reasons[2] == "partner"  # as soon as it is offered
     assert picks[3:] == ["Garlic"] * 6
     assert reasons[3:] == ["main"] * 6
     assert levels["Garlic"] == 8
-    assert levels["Magic Wand"] == 1  # the one forced level, not a second project yet
+    assert levels["Santa Water"] == 1  # the one forced level, not a second project yet
     assert levels["Pummarola"] == 1
     assert evolution_ready(levels)
 
-    # Main is done: level the weapon we already own, and take its partner early.
+    # Main is done: level Santa Water, and take Attractorb (La Borra) early.
     later = [
-        [("Magic Wand", False), ("Armor", True), ("King Bible", True)],
-        [("Empty Tome", True), ("Magic Wand", False), ("Santa Water", True)],
-        [("Santa Water", True), ("Armor", True), ("Magic Wand", False)],
+        [("Santa Water", False), ("Armor", True), ("King Bible", True)],
+        [("Attractorb", True), ("Santa Water", False), ("Magic Wand", True)],
+        [("Magic Wand", True), ("Armor", True), ("Santa Water", False)],
         [("Hollow Heart", True), ("Axe", True), ("Spinach", True)],
     ]
     picks, reasons = _play(later, levels)
-    assert picks == ["Magic Wand", "Empty Tome", "Magic Wand", "Hollow Heart"]
+    assert picks == ["Santa Water", "Attractorb", "Santa Water", "Hollow Heart"]
     assert reasons == ["second", "partner", "second", "fallback"]
-    assert levels["Magic Wand"] == 3
-    assert levels["Empty Tome"] == 1
-    assert "King Bible" not in levels and "Santa Water" not in levels and "Axe" not in levels
+    assert levels["Santa Water"] == 3
+    assert levels["Attractorb"] == 1
+    assert "King Bible" not in levels and "Magic Wand" not in levels and "Axe" not in levels
 
 
 def test_partner_beats_a_main_level_when_both_are_offered():
@@ -157,6 +157,50 @@ def test_magic_wand_is_main_when_garlic_is_not_held():
     cards = _offer([("King Bible", True), ("Magic Wand", True), ("Garlic", True)], {})
     pick = choose_pick(cards, owned=set(), levels={})
     assert cards[pick.index].name == "Garlic" and pick.reason == "main"
+
+
+def test_santa_water_is_the_first_second_weapon_and_armor_l2_yields():
+    from vs_vision_bot.menus import CROWD_WEAPONS, OTHER, PRIORITY, SECOND_ORDER, _choose_static
+
+    assert SECOND_ORDER[:4] == ("Garlic", "Santa Water", "King Bible", "Magic Wand")
+    assert CROWD_WEAPONS[:2] == ("Santa Water", "King Bible")
+    assert PRIORITY[:10] == [
+        "Garlic", "Soul Eater", "Pummarola",
+        "Santa Water", "La Borra", "Attractorb",
+        "King Bible", "Unholy Vespers", "Spellbinder", "Candelabrador",
+    ]
+    assert "King Bible" not in OTHER and "Unholy Vespers" not in OTHER
+    levels = {"Garlic": 8, "Pummarola": 1}
+    cards = _offer([("Magic Wand", True), ("Santa Water", True), ("King Bible", True)], levels)
+    pick = choose_pick(cards, hp=1.0, owned=set(levels), levels=levels, game_s=700.0)
+    assert cards[pick.index].name == "Santa Water"
+    # Santa Water already maxed with its partner: King Bible is the third weapon.
+    bible = {"Garlic": 8, "Pummarola": 1, "Santa Water": 8, "Attractorb": 1}
+    cards = _offer([("Magic Wand", True), ("King Bible", True), ("Runetracer", True)], bible)
+    pick = choose_pick(cards, hp=1.0, owned=set(bible), levels=bible, game_s=700.0)
+    assert cards[pick.index].name == "King Bible"
+    # Candelabrador is the AoE passive, ahead of Spinach and Duplicator.
+    candle = {"Garlic": 4, "Pummarola": 1}
+    cards = _offer([("Spinach", True), ("Candelabrador", True), ("Duplicator", True)], candle)
+    pick = choose_pick(cards, hp=1.0, owned=set(candle), levels=candle)
+    assert cards[pick.index].name == "Candelabrador"
+
+    # test7 run 2, 155s, hp=0.33: Armor L2 must not beat Garlic.
+    held = {"Garlic": 5, "Armor": 1}
+    cards = _offer([("Garlic", False), ("Armor", False)], held)
+    pick = choose_pick(cards, hp=0.33, owned=set(held), levels=held)
+    assert cards[pick.index].name == "Garlic"
+    # Still critical, and Garlic is already past 4: Armor L2 may lead.
+    deep = {"Garlic": 6, "Armor": 1}
+    cards = _offer([("Garlic", False), ("Armor", False)], deep)
+    pick = choose_pick(cards, hp=0.20, owned=set(deep), levels=deep)
+    assert cards[pick.index].name == "Armor"
+
+    # test7 run 3: Fire Wand as a third weapon while Garlic is 3.
+    two = {"Garlic": 3, "Magic Wand": 1}
+    cards = _offer([("Fire Wand", True), ("Attractorb", True), ("Spinach", True)], two)
+    idx = _choose_static(cards, hp=0.9, owned=set(two), levels=two)
+    assert cards[idx].name == "Attractorb"
 
 
 def test_owned_level_beats_a_new_unwanted_item_when_the_plan_is_absent():
@@ -725,7 +769,7 @@ def test_unfinished_main_takes_a_passive_instead_of_opening_a_weapon():
     assert cards[pick.index].name == "Wings"
     only_weapons = _offer([("Santa Water", True), ("Magic Wand", True), ("Knife", True)], levels)
     pick = choose_pick(only_weapons, hp=1.0, owned=set(levels), levels=levels)
-    assert only_weapons[pick.index].name == "Magic Wand" and pick.reason == "fallback"
+    assert only_weapons[pick.index].name == "Santa Water" and pick.reason == "fallback"
 
 
 def test_done_page_is_marked_as_the_reward_followup(monkeypatch):

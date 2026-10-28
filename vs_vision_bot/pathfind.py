@@ -375,10 +375,12 @@ class Tuning:
     # -1 disables the gate (engage regardless of gems).
     early_engage_max_gems: int = 0
     engage_radius: float = 260.0
-    # 0: while farming, step into the pack. 34 is Garlic's knockback ring and
-    # restores the graze (back off any body already inside it).
-    # VS_TUNE=engage_standoff=34
-    engage_standoff: float = 0.0
+    # Body-hitbox floor inside Garlic's ~34px aura. 1-hit skeletons still pop
+    # at the aura edge. A multi-hit ghoul or bat that survives the first tick
+    # is not stepped onto (d=0). 0 disables the floor. 34 is the full graze,
+    # which also pushes backward off the pack.
+    # VS_TUNE=engage_standoff=0
+    engage_standoff: float = 28.0
     # Man-eater flower ring (~4:40–6:00): HP can drop 1.0→0.1 in 2–3 s.
     hp_crash_delta: float = -0.3       # peak-to-now drop that counts as crashing
     hp_crash_window_s: float = 1.5     # look-back for that drop
@@ -491,8 +493,9 @@ def skeleton_phase(game_s: float) -> bool:
     return any(lo <= game_s < hi for lo, hi in SKELETON_WINDOWS)
 
 
-# Garlic knockback ring. Used when a closed wall has to be grazed. The default
-# engage_standoff stays 0 so an ordinary pack, and a skeleton pack, is entered.
+# Garlic knockback ring. Flower graze and an explicit standoff at least this
+# large also push backward off a body. The 28px floor only refuses the step
+# onto the sprite.
 GRAZE_STANDOFF = 34.0
 
 
@@ -500,7 +503,7 @@ def flower_graze(game_s: float, tune: Tuning) -> bool:
     """4:20–8:00: hold Garlic's ring instead of walking into whatever is closing.
 
     The first skeleton plow runs until here. A one-sided skeleton pack before
-    4:20, and the 8:00 wave, still use engage_standoff 0.
+    4:20, and the 8:00 wave, keep the 28px body floor (no backward push).
     """
     return tune.flower_phase_lo - 20.0 <= game_s < FLOWER_WALL_UNTIL_S
 
@@ -511,17 +514,17 @@ def flower_wall(game_s: float, cover: float, tune: Tuning) -> bool:
 
 
 def skeleton_plow_tune(tune: Tuning, game_s: float, hp: float | None) -> Tuning:
-    """Drop the standoff and restore the early gem pull on a skeleton wave.
+    """Boost pack and gem pull on a skeleton wave. The body floor stays.
 
     No-op outside the wave or at/below ``pack_dive_hp``. ``engage_standoff``
-    is forced to 0 even when the caller set 34. Gem target stays at least
+    is left alone: the default 28px floor still refuses a step onto a sprite,
+    and an explicit 0 still walks onto centers. Gem target stays at least
     ``early_gem_target_gain`` so the 8:00 wave, which is past
     ``early_gem_until_s``, still aims at one clump.
     """
     if flower_graze(game_s, tune) or not farming(hp, tune) or not skeleton_phase(game_s):
         return tune
     over: dict[str, float] = {
-        "engage_standoff": 0.0,
         "farm_gain": max(tune.farm_gain * 2.0, tune.farm_gain + 3.0),
     }
     # early_gem_until_s=0 is the off switch for the early gem pull, including here.
@@ -1125,9 +1128,13 @@ def score_directions(
                 + 2.0
             )
             scores = scores - np.float32(block) * (closing / peak)
-        away = _pack_aim(pts, px, py, tune.engage_standoff)
-        if away is not None and tune.farm_gain > 0:
-            scores = scores + tune.farm_gain * (_UNIT[:, 0] * away[0] + _UNIT[:, 1] * away[1])
+        # Refuse the step onto the sprite. A backward shove off the whole pack
+        # is only the full Garlic graze (34px). At the 28px floor a gem or the
+        # next skeleton just off that body still wins.
+        if tune.engage_standoff >= GRAZE_STANDOFF:
+            away = _pack_aim(pts, px, py, tune.engage_standoff)
+            if away is not None and tune.farm_gain > 0:
+                scores = scores + tune.farm_gain * (_UNIT[:, 0] * away[0] + _UNIT[:, 1] * away[1])
 
     if current in DIRS:
         scores[DIRS.index(current)] += tune.hysteresis * (1.0 - 0.6 * panic)
@@ -1672,12 +1679,10 @@ class Navigator:
         if pts.shape[0] == 0:
             return roam
         if farming(hp, self.tune):
-            # Skeleton waves ignore a tuned standoff and walk into the pack.
-            # A closed flower ring is grazed instead.
+            # Skeleton waves keep the body floor (default 28). Flower graze
+            # uses the full 34px ring, which also pushes backward.
             if flower_graze(self.game_s, self.tune):
-                standoff = GRAZE_STANDOFF
-            elif skeleton_phase(self.game_s):
-                standoff = 0.0
+                standoff = max(self.tune.engage_standoff, GRAZE_STANDOFF)
             else:
                 standoff = self.tune.engage_standoff
             into = _pack_aim(pts, px, py, standoff)
@@ -2894,7 +2899,9 @@ class Navigator:
                 snapped = _nearest_dir(heading)
                 # Do not let the chest lock step onto a sprite inside the ring.
                 into_body = False
-                standoff = 0.0 if skeleton_phase(self.game_s) else self.tune.engage_standoff
+                standoff = self.tune.engage_standoff
+                if flower_graze(self.game_s, self.tune):
+                    standoff = max(standoff, GRAZE_STANDOFF)
                 if farming(hp, self.tune) and standoff > 0:
                     closing = _standoff_closing(pts, px, py, standoff)
                     si = DIRS.index(snapped)

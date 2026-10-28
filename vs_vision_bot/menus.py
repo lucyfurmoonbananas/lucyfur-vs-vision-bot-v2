@@ -44,32 +44,34 @@ PRIORITY: list[str] = [
     "Garlic",
     "Soul Eater",
     "Pummarola",
+    "Santa Water",
+    "La Borra",
+    "Attractorb",
+    "King Bible",
+    "Unholy Vespers",
+    "Spellbinder",
+    "Candelabrador",
+    "Empty Tome",
+    "Spinach",
+    "Duplicator",
+    "Magic Wand",
+    "Holy Wand",
     "Tirajisú",
     "Tiragisú",
     "Runetracer",
     "NO FUTURE",
-    "Magic Wand",
-    "Holy Wand",
-    "Empty Tome",
     "Vandalier",
     "Peachone",
     "Ebony Wings",
     "Lightning Ring",
     "Thunder Loop",
-    "Duplicator",
     "Cross",
     "Heaven Sword",
     "Armor",
     "Clover",
-    "Spinach",
-    "Santa Water",
-    "La Borra",
-    "Attractorb",
     "Pentagram",
     "Gorgeous Moon",
     "Crown",
-    "Candelabrador",
-    "Spellbinder",
     "Stone Mask",
     "Hollow Heart",
 ]
@@ -77,7 +79,6 @@ PRIORITY: list[str] = [
 AVOID: list[str] = ["Whip", "Axe", "Knife", "Silver Wind", "Phiera Der Tuphello"]
 # Other known names so OCR noise snaps to a real item instead of a priority one.
 OTHER: list[str] = [
-    "King Bible",
     "Fire Wand",
     "Bone",
     "Cherry Bomb",
@@ -104,7 +105,6 @@ OTHER: list[str] = [
     "Gold Coin",
     "Coin Bag",
     "Bloody Tear",
-    "Unholy Vespers",
     "Hellfire",
     "Death Spiral",
     "Mannajja",
@@ -690,7 +690,7 @@ DEFENSE: tuple[str, ...] = (CHICKEN, "Armor", "Hollow Heart", "Pummarola", "Tira
 # Passives that do nothing for survival right now: never taken while HP is low if anything better is offered.
 LUXURY: frozenset[str] = frozenset(
     {"Duplicator", "Spellbinder", "Stone Mask", "Crown", "Candelabrador", "Clover", "Empty Tome",
-     "Attractorb", "Skull O'Maniac", "Bracer", "Wings", "Spinach"}
+     "Skull O'Maniac", "Bracer", "Wings", "Spinach"}
 )
 
 
@@ -753,9 +753,9 @@ EVOLUTION_BASES: dict[str, frozenset[str]] = _evolution_bases()
 # Next weapon to max once the main is done. Avoid-list weapons stay last.
 SECOND_ORDER: tuple[str, ...] = (
     "Garlic",
-    "Magic Wand",
-    "King Bible",
     "Santa Water",
+    "King Bible",
+    "Magic Wand",
     "Runetracer",
     "Lightning Ring",
     "Fire Wand",
@@ -1239,7 +1239,43 @@ def _level_targets(levels: dict[str, int], second: str | None) -> list[str]:
     return out
 
 
-def _card_rank(c: Card, idx: int, hp: float | None, weapons: int, early: bool = False) -> tuple[int, int]:
+def _armor_upgrade_yields_to_garlic(
+    name: str | None, new: bool, hp: float | None, garlic_lv: int,
+) -> bool:
+    """Armor L2+ does not outrank an unfinished Garlic above 25% HP, or while Garlic < 4.
+
+    test7 run 2 at hp=0.33 took Armor L2 over a Garlic level. A first point of
+    Armor (a new card) is unchanged.
+    """
+    if name != "Armor" or new:
+        return False
+    if garlic_lv <= 0 or garlic_lv >= WEAPON_MAX_LEVEL:
+        return False
+    if hp is not None and hp > 0.25:
+        return True
+    return garlic_lv < 4
+
+
+def _holds_two_damage_weapons(levels: dict[str, int] | None) -> bool:
+    """Two damage weapons in hand and the main still under 8: do not open a third."""
+    if not levels:
+        return False
+    main = main_weapon_name(levels)
+    if main is None or levels.get(main, 0) <= 0 or levels.get(main, 0) >= WEAPON_MAX_LEVEL:
+        return False
+    quiet = {"Laurel", "Clock Lancet"}
+    n = sum(1 for name, lv in levels.items() if lv > 0 and name in WEAPONS and name not in quiet)
+    return n >= 2
+
+
+def _card_rank(
+    c: Card,
+    idx: int,
+    hp: float | None,
+    weapons: int,
+    early: bool = False,
+    levels: dict[str, int] | None = None,
+) -> tuple[int, int]:
     """Static priority. This is what spreads levels: a new crowd weapon is tier 2
     and any other new weapon is tier 4, while a Garlic level is tier 3 and every
     other owned weapon level is tier 6. Used only when the inventory is unknown.
@@ -1255,7 +1291,9 @@ def _card_rank(c: Card, idx: int, hp: float | None, weapons: int, early: bool = 
     if name in EVOLUTIONS and not c.new:
         return (0, EVOLUTIONS.index(name))
     if low and name in DEFENSE:
-        return (1, DEFENSE.index(name))
+        garlic_lv = (levels or {}).get("Garlic", 0)
+        if not _armor_upgrade_yields_to_garlic(name, c.new, hp, garlic_lv):
+            return (1, DEFENSE.index(name))
     if early and c.new and name in EARLY_AVOID_NEW:
         return (EARLY_AVOID_RANK, idx)
     if name in AVOID:
@@ -1265,6 +1303,13 @@ def _card_rank(c: Card, idx: int, hp: float | None, weapons: int, early: bool = 
     if c.new and name in WEAPONS:
         if not slots_free:
             return (35, idx)
+        # test7 run 3 opened Fire Wand while Garlic was still 3 and a second
+        # weapon was already held. Passives and the two held weapons come first.
+        # A card we already hold is a level, even if OCR still says "new".
+        # Blocking it is what made a stuck level-up click Stone Mask after
+        # Lightning Ring had just been taken.
+        if _holds_two_damage_weapons(levels) and (levels or {}).get(name, 0) <= 0:
+            return (22, SECOND_ORDER.index(name) if name in SECOND_ORDER else 50)
         if name in CROWD_WEAPONS:
             return (2, CROWD_WEAPONS.index(name))
         # A/B (VS_LAUREL_DAMAGE=0): a new Laurel is no kill weapon; low HP still takes it via DEFENSE.
@@ -1308,6 +1353,7 @@ def _choose_static(
     hp: float | None = None,
     owned: set[str] | None = None,
     game_s: float | None = None,
+    levels: dict[str, int] | None = None,
 ) -> int:
     """Old priority list. Still the pick when ``levels`` is missing or the read disagrees.
 
@@ -1336,7 +1382,10 @@ def _choose_static(
     known |= {c.name for c in cards if c.name and not c.new}
     weapons = owned_weapon_count(known)
     early = is_early_run(game_s, weapons)
-    return min(range(len(cards)), key=lambda i: _card_rank(cards[i], i, hp, weapons, early))
+    return min(
+        range(len(cards)),
+        key=lambda i: _card_rank(cards[i], i, hp, weapons, early, levels),
+    )
 
 
 def _defer_new_weapons(cards: list[Card], levels: dict[str, int]) -> bool:
@@ -1401,8 +1450,9 @@ def _focused_rank(
         evo = EVOLUTION_PAIRS.get(main, (None, ""))[1] if main else ""
         return (0, EVOLUTIONS.index(name), "main" if name == evo else "second")
     if low and name in DEFENSE:
-        missing = main is not None and name == partner_of(main) and levels.get(name, 0) <= 0
-        return (1, DEFENSE.index(name), "partner" if missing else "fallback")
+        if not _armor_upgrade_yields_to_garlic(name, c.new, hp, main_lv if main == "Garlic" else 0):
+            missing = main is not None and name == partner_of(main) and levels.get(name, 0) <= 0
+            return (1, DEFENSE.index(name), "partner" if missing else "fallback")
     if early and c.new and name in EARLY_AVOID_NEW:
         return (EARLY_AVOID_RANK, idx, "fallback")
     if main is None and name in ("Garlic", "Magic Wand"):
@@ -1582,7 +1632,7 @@ def choose_pick(
                 )
                 reason = reason if reason in PICK_REASONS else "fallback"
                 return CardPick(cards.index(usable[idx]), reason)
-        return CardPick(_choose_static(cards, hp, owned, game_s), "fallback")
+        return CardPick(_choose_static(cards, hp, owned, game_s, levels), "fallback")
     low = hp_is_low(hp, blind_low=blind_low, critical=critical, low_held=low_held)
     idx, reason = _choose_focused(cards, hp, eff, game_s, low=low, evolved=evolved)
     return CardPick(idx, reason if reason in PICK_REASONS else "fallback")
