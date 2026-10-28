@@ -54,9 +54,12 @@ def test_engage_pull_points_at_enemy_and_gates():
     assert not engage_pull(LEFT_ARR, *P, here=0.1, hp=t.early_engage_hp - 0.01, tune=t).any()
     assert not engage_pull(LEFT_ARR, *P, here=t.safe_danger, hp=1.0, tune=t).any()
     assert not engage_pull(LEFT_ARR, *P, here=0.1, hp=1.0, tune=replace(t, engage_gain=0.0)).any()
-    touching = np.array([(P[0] - 20.0, P[1], 0.22)], dtype=np.float32)  # inside standoff
+    touching = np.array([(P[0] - 20.0, P[1], 0.22)], dtype=np.float32)  # 20px, inside a 34px graze
     far = np.array([(P[0] - 400.0, P[1], 0.22)], dtype=np.float32)  # beyond engage_radius
-    assert not engage_pull(touching, *P, here=0.1, hp=1.0, tune=t).any()
+    # Default standoff is 0, so a body at 20px is pulled. The graze opts out of that.
+    assert engage_pull(touching, *P, here=0.1, hp=1.0, tune=t).any()
+    graze = replace(t, engage_standoff=34.0)
+    assert not engage_pull(touching, *P, here=0.1, hp=1.0, tune=graze).any()
     assert not engage_pull(far, *P, here=0.1, hp=1.0, tune=t).any()
     # Fades with danger.
     lo = engage_pull(LEFT_ARR, *P, here=0.1, hp=1.0, tune=t).max()

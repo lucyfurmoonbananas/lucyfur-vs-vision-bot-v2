@@ -193,13 +193,16 @@ def test_skeleton_phase_plows_into_the_pack_and_aims_gems():
     run(nav, clock, result(gap), 8, hp=1.0)
     assert nav.breakouts == 0 and not nav.escaping
 
-    # Same ring in the flower window is a wall: leave it even at full HP.
+    # Same ring in the flower window is a wall: graze it, do not ring-escape
+    # and do not keep walking into the bodies.
     clock = Clock()
     wall = Navigator(clock=clock, log=lambda *_: None)
     wall.game_s = 320.0
-    run(wall, clock, result(gap), 8, hp=1.0)
-    assert wall.escaping or wall.breakouts >= 1
-    assert wall.last.mode.startswith("ring-escape") or wall.last.mode.startswith("breakout")
+    into = run(wall, clock, result(gap), 8, hp=1.0)
+    assert wall.breakouts == 0 and not wall.escaping
+    assert wall.cover >= wall.tune.ring_commit_cover
+    # The east gap is the opening. Grazing does not spend the steps on it.
+    assert sum(1 for v in into if v[0] > 0) < len(into)
 
     # 8:00 restores the early gem clump pull. Below the kite line it does not.
     late = gem_tune_for(Tuning(engage_standoff=34.0), 520.0)

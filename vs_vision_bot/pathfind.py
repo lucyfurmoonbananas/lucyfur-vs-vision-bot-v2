@@ -491,18 +491,23 @@ def skeleton_phase(game_s: float) -> bool:
     return any(lo <= game_s < hi for lo, hi in SKELETON_WINDOWS)
 
 
-def flower_wall(game_s: float, cover: float, tune: Tuning) -> bool:
-    """Impassable Man-eater ring. Ordinary packs, including skeletons, are not.
+# Garlic knockback ring. Used when a closed wall has to be grazed. The default
+# engage_standoff stays 0 so an ordinary pack, and a skeleton pack, is entered.
+GRAZE_STANDOFF = 34.0
 
-    During the flower window, cover at ``cover_trigger_mid`` is the ring.
-    From the end of that window until 8:00, only a still-closed wall
-    (``ring_commit_cover``) counts, so the bot goes back to farming as it opens.
+
+def flower_graze(game_s: float, tune: Tuning) -> bool:
+    """4:20–8:00: hold Garlic's ring instead of walking into whatever is closing.
+
+    The first skeleton plow runs until here. A one-sided skeleton pack before
+    4:20, and the 8:00 wave, still use engage_standoff 0.
     """
-    if cover < tune.cover_trigger_mid:
-        return False
-    if tune.flower_phase_lo <= game_s <= tune.flower_phase_hi:
-        return True
-    return tune.flower_phase_hi < game_s < FLOWER_WALL_UNTIL_S and cover >= tune.ring_commit_cover
+    return tune.flower_phase_lo - 20.0 <= game_s < FLOWER_WALL_UNTIL_S
+
+
+def flower_wall(game_s: float, cover: float, tune: Tuning) -> bool:
+    """A closed ring during the graze window. One escape is allowed; see step."""
+    return flower_graze(game_s, tune) and cover >= tune.ring_commit_cover
 
 
 def skeleton_plow_tune(tune: Tuning, game_s: float, hp: float | None) -> Tuning:
@@ -513,12 +518,15 @@ def skeleton_plow_tune(tune: Tuning, game_s: float, hp: float | None) -> Tuning:
     ``early_gem_target_gain`` so the 8:00 wave, which is past
     ``early_gem_until_s``, still aims at one clump.
     """
-    if not farming(hp, tune) or not skeleton_phase(game_s):
+    if flower_graze(game_s, tune) or not farming(hp, tune) or not skeleton_phase(game_s):
         return tune
     over: dict[str, float] = {
         "engage_standoff": 0.0,
         "farm_gain": max(tune.farm_gain * 2.0, tune.farm_gain + 3.0),
     }
+    # early_gem_until_s=0 is the off switch for the early gem pull, including here.
+    if tune.early_gem_until_s <= 0:
+        return replace(tune, **over)
     if tune.early_gem_target_gain > 0:
         over["gem_target_gain"] = max(tune.gem_target_gain, tune.early_gem_target_gain)
     if tune.early_gem_gain > tune.gem_gain:
@@ -1665,7 +1673,13 @@ class Navigator:
             return roam
         if farming(hp, self.tune):
             # Skeleton waves ignore a tuned standoff and walk into the pack.
-            standoff = 0.0 if skeleton_phase(self.game_s) else self.tune.engage_standoff
+            # A closed flower ring is grazed instead.
+            if flower_graze(self.game_s, self.tune):
+                standoff = GRAZE_STANDOFF
+            elif skeleton_phase(self.game_s):
+                standoff = 0.0
+            else:
+                standoff = self.tune.engage_standoff
             into = _pack_aim(pts, px, py, standoff)
             if into is None:
                 return roam
@@ -1779,9 +1793,7 @@ class Navigator:
             or self._escape_pending
             or (self.escaping and self._escape_reason == "revive")
         )
-        # A flower wall is the one crowd that is not a pack to dive. Skeletons
-        # and every other pack above the kite line keep farming.
-        if farming(hp, t) and not keep_flee and not flower_wall(self.game_s, cover, t):
+        if farming(hp, t) and not keep_flee:
             if (
                 self.breakout is not None
                 or self.escaping
@@ -2664,6 +2676,9 @@ class Navigator:
         # Skeleton waves (including 8:00, past early_gem_until_s) plow into the
         # pack and aim at a gem clump with at least early_gem_target_gain.
         score_tune = skeleton_plow_tune(gem_tune_for(self.tune, self.game_s), self.game_s, hp)
+        if farming(hp, self.tune) and flower_graze(self.game_s, self.tune):
+            # The forming ring is held at Garlic's edge, before cover hits 0.75.
+            score_tune = replace(score_tune, engage_standoff=max(score_tune.engage_standoff, GRAZE_STANDOFF))
         # A commit keeps the sighting through a ring-escape. Clearing it here is
         # the seek -> breakout away -> clear cycle from the Oct 26 runs.
         seen = self._chest_seen(result, escape and not self._commit, dt)
