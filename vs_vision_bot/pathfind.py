@@ -1435,13 +1435,13 @@ class Navigator:
         self._breakout_check = 0.0
         self.breakouts = 0
         self.cover = 0.0
-        self._touch_ring = False
         self._flee_remaining = 0.0  # >0: force breakout (post-revive flee)
         self._hp_hist: list[tuple[float, float]] = []  # (wall_t, hp) for crash detect
         self._hp_crashing = False
         self._hp_crash_latched = False  # edge-trigger flee once per crash bout
         self._hp_crash_peak = 0.0       # peak HP of the current crash look-back (for the log)
         self._flower_on = False         # edge-trigger the flower-window log line
+        self._touch_ring = False        # farm-mode breakout from a ring already on Poe
         self._escape_remaining = 0.0    # >0: committed post-REVIVE escape running
         self._escape_s = 0.0            # time spent in the current escape
         self._escape_pending = False    # escape requested, heading not picked yet
@@ -1564,12 +1564,12 @@ class Navigator:
 
     def _end_breakout(self) -> None:
         """Drop the current breakout, remembering its heading for the no-reversal rule."""
+        self._touch_ring = False
         if self.breakout is not None:
             self._last_break_dir = self.breakout
             self._last_break_end = self.game_s
         self.breakout = None
         self._breakout_origin = None
-        self._touch_ring = False
 
     def _in_flower(self) -> bool:
         t = self.tune
