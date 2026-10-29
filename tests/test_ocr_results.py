@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 
 import cv2
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,21 @@ def test_gold_prefers_the_full_earned_number_over_a_clipped_fragment():
     assert ocr.parse_stats(stage)["gold"] is None
     zero = "Survived: 02:20\nGold earned: 0\nLevel reached: 4\nEnemies defeated: 271\nGold x 1\n"
     assert ocr.parse_stats(zero)["gold"] == "0"
+
+
+def test_test13_gold_earned_is_the_digit_six():
+    """results_20261029_134442.png gold earned is 6, one glyph against the divider.
+
+    The OCR line "Gold earned: 6" matches that glyph. A longer earned number
+    still beats a one-digit fragment.
+    """
+    im = cv2.imread(str(ROOT / "tests" / "fixtures" / "results_test13_0733.png"))
+    assert im is not None
+    band = im[126:148, 300:490].max(axis=2)
+    cols = np.where((band > 140).sum(axis=0) > 2)[0]
+    assert cols.size and int(cols.max() - cols.min()) < 28
+    assert ocr.parse_stats("Survived: 07:33\nGold earned: 6\nLevel reached: 15\nEnemies defeated: 1208\nGold x 1\n")["gold"] == "6"
+    assert ocr.parse_stats("Gold earned: 3\nGold earned: 6\nGold x 1\n")["gold"] == "6"
 
 
 def test_gold_crop_covers_the_value_column():

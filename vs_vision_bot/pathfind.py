@@ -509,6 +509,11 @@ OUTLINE_REACH = 48.0
 # More than one full-weight point. Real mask cells top out at 0.25, so this is
 # five or more outline cells, not a single sprite center 40px away.
 OUTLINE_MASS = 1.25
+# Bodies pressed against Poe. A distant pack stays a dive. A ring whose
+# weight sits inside this reach, and which occupies most sectors, is a
+# surround: danger jumps and the farm does not walk further in.
+TOUCH_REACH = 42.0
+TOUCH_MASS = 1.25
 # A filled pack at this range already lifts the 42px kernel (the dive crowd
 # reads ~1.7). test10 run2 sat at 1.0-1.4 while HP fell from 1.00 to 0.50.
 OUTLINE_KERNEL = 1.55
@@ -1054,6 +1059,13 @@ def score_directions(
     if outline:
         # The kernel under-counts pixels that are the edge of an overlapping body.
         here += _threat_mass(pts, px, py, OUTLINE_REACH)
+    touch = _threat_mass(pts, px, py, TOUCH_REACH)
+    cover_now, _near_w = encirclement(pts, px, py, tune.sector_radius, tune.sector_thr)
+    if cover_now >= tune.cover_trigger and touch >= TOUCH_MASS:
+        # test13 run 3, 1:11-1:14: a ring of ghouls and mudmen, danger ~1.7,
+        # HP 1.00 -> 0.47, still farming. Close bodies in a surround count
+        # several times so the logged danger matches the hit.
+        here += touch * 3.0
     if farm:
         scores = np.zeros(len(DIRS), dtype=np.float32)
     else:
@@ -1423,6 +1435,7 @@ class Navigator:
         self._breakout_check = 0.0
         self.breakouts = 0
         self.cover = 0.0
+        self._touch_ring = False
         self._flee_remaining = 0.0  # >0: force breakout (post-revive flee)
         self._hp_hist: list[tuple[float, float]] = []  # (wall_t, hp) for crash detect
         self._hp_crashing = False
@@ -1556,6 +1569,7 @@ class Navigator:
             self._last_break_end = self.game_s
         self.breakout = None
         self._breakout_origin = None
+        self._touch_ring = False
 
     def _in_flower(self) -> bool:
         t = self.tune
@@ -1836,6 +1850,8 @@ class Navigator:
             )
         cover, near = encirclement(pts, px, py, t.sector_radius, t.sector_thr)
         self.cover = cover
+        touch = _threat_mass(pts, px, py, TOUCH_REACH)
+        ringed = cover >= t.cover_trigger and touch >= TOUCH_MASS
         if self._escape_reason == "revive" and cover >= t.cover_trigger:
             self._revive_ring = True
         if not self._near_init:
@@ -1865,7 +1881,7 @@ class Navigator:
             or self._escape_pending
             or (self.escaping and self._escape_reason == "revive")
         )
-        if farming(hp, t) and not keep_flee:
+        if farming(hp, t) and not keep_flee and not ringed and not self._touch_ring:
             if (
                 self.breakout is not None
                 or self.escaping
@@ -1878,6 +1894,8 @@ class Navigator:
                 if self.breakout is not None:
                     self._end_breakout()
             return
+        if ringed:
+            self._touch_ring = True
 
         if self.breakout is not None and self._escape_remaining > 0:
             self._update_escape(pts, px, py, dt)
