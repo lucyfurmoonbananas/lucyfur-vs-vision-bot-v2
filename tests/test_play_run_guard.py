@@ -218,7 +218,8 @@ def test_session_loop_still_stops_after_8_real_failures(box):
     assert "### Run 9" in md and "### Run 10" not in md
 
 
-def test_session_loop_ab_early_gem_target_with_laurel(box):
+def test_session_loop_ab_defaults_off(box):
+    """Manual runs do not alternate Laurel or the early-gem target."""
     _tmp, session, env = box
     (session / "play_run.sh").write_text(
         "#!/bin/bash\n"
@@ -232,6 +233,33 @@ def test_session_loop_ab_early_gem_target_with_laurel(box):
     shutil.copy(SESSION_LOOP, session / "session_loop.sh")
     shutil.copy(ROOT / "scripts" / "run_metrics.py", session / "run_metrics.py")
     md = _loop(dict(env, VS_TUNE="ring_commit_s=2.5"), session)
+    envs = (session / "envs.txt").read_text().splitlines()
+    assert envs == [
+        "1 tune=ring_commit_s=2.5 laurel=<unset>",
+        "2 tune=ring_commit_s=2.5 laurel=<unset>",
+        "3 tune=ring_commit_s=2.5 laurel=<unset>",
+        "4 tune=ring_commit_s=2.5 laurel=<unset>",
+    ]
+    assert md.count("- Early gem target: ON") == 5 and md.count("- Early gem target: OFF") == 0
+
+
+def test_session_loop_ab_early_gem_target_with_laurel(box):
+    _tmp, session, env = box
+    (session / "play_run.sh").write_text(
+        "#!/bin/bash\n"
+        '[ "$1" -le 4 ] || exit 2\n'
+        'echo "$1 tune=${VS_TUNE-<unset>} laurel=${VS_LAUREL_DAMAGE-<unset>}" >> "$VS_SESSION/envs.txt"\n'
+        'echo "[levelup] cards=[\'Whip\'] new=[True] -> pick #1 Whip (hp=1.0, weapons=1, game~=50s)" > "$VS_SESSION/run$1.log"\n'
+        'echo "[levelup] picked #1 Whip (total picks 1)" >> "$VS_SESSION/run$1.log"\n'
+        "exit 0\n"
+    )
+    (session / "play_run.sh").chmod(0o755)
+    shutil.copy(SESSION_LOOP, session / "session_loop.sh")
+    shutil.copy(ROOT / "scripts" / "run_metrics.py", session / "run_metrics.py")
+    md = _loop(
+        dict(env, VS_TUNE="ring_commit_s=2.5", VS_LAUREL_AB="on", VS_GEM_AB="on"),
+        session,
+    )
     envs = (session / "envs.txt").read_text().splitlines()
     assert envs == [
         "1 tune=ring_commit_s=2.5,early_gem_target_gain=0 laurel=0",

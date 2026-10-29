@@ -215,12 +215,12 @@ def test_test9_does_not_spend_early_slots_and_takes_santa_water():
         pick = choose_pick(cards, hp=hp, owned=set(levels), game_s=game_s, levels=dict(levels))
         return cards[pick.index].name
 
-    # Weapon-only screens. Keeper weapons lose to the avoid list so the slot
-    # stays available for Santa Water and King Bible.
-    assert picked([("Axe", True), ("Magic Wand", True), ("Knife", True)], garlic, game_s=9) == "Axe"
+    # Weapon-only screens still click. The avoid list does not win that click
+    # when a real weapon is also offered (test11 opened Axe because it was first).
+    assert picked([("Axe", True), ("Magic Wand", True), ("Knife", True)], garlic, game_s=9) == "Magic Wand"
     assert picked(
         [("Pako Battiliar", True), ("Runetracer", True), ("Axe", True)], garlic, game_s=20,
-    ) != "Runetracer"
+    ) == "Runetracer"
     # Every card is on the avoid list. The click cannot be a keeper weapon.
     wind = picked([("Silver Wind", True), ("Whip", True), ("Axe", True)], garlic, game_s=40)
     assert wind == "Silver Wind"
@@ -244,7 +244,7 @@ def test_test9_does_not_spend_early_slots_and_takes_santa_water():
         late, game_s=296,
     ) == "Santa Water"
     assert picked([("Santa Water", True), ("Armor", True)], {"Garlic": 3}, hp=0.25) == "Armor"
-    assert picked([("Santa Water", True), ("Armor", True)], {"Garlic": 3}, hp=0.90) == "Armor"
+    assert picked([("Santa Water", True), ("Armor", True)], {"Garlic": 3}, hp=0.90) == "Santa Water"
     # The early-second rule does not take Magic Wand.
     assert picked(
         [("Magic Wand", True), ("King Bible", True), ("Bracer", True)], garlic, game_s=100,
@@ -260,16 +260,16 @@ def test_test10_garlic_and_candle_beat_santa_water_and_no_third_weapon():
         pick = choose_pick(cards, hp=hp, owned=set(levels), game_s=game_s, levels=dict(levels))
         return cards[pick.index].name
 
-    # Run 2, 37s. Hollow Heart is the survival pick; Garlic is only level 2.
+    # Above 25% HP Santa Water beats Hollow Heart. A Garlic level still beats Santa Water.
     assert picked(
         [("Hollow Heart", True), ("Ebony Wings", True), ("Santa Water", False)],
         {"Garlic": 2, "Santa Water": 1}, hp=1.0, game_s=37,
-    ) == "Hollow Heart"
-    # Run 2, 138s. Candelabrador has to be a real pick, not lose to Santa Water.
+    ) == "Santa Water"
+    # Santa Water beats the candle and a new Laurel once it is the offered weapon.
     assert picked(
         [("Santa Water", False), ("Laurel", True), ("Candelabrador", True), ("Parm Aegis", True)],
         {"Garlic": 3, "Santa Water": 2, "Hollow Heart": 2}, hp=0.36, game_s=138,
-    ) == "Candelabrador"
+    ) == "Santa Water"
     # A Garlic level still beats Santa Water.
     assert picked(
         [("Santa Water", False), ("Garlic", False), ("Whip", True)],
@@ -299,6 +299,86 @@ def test_test10_garlic_and_candle_beat_santa_water_and_no_third_weapon():
     ) == "Pummarola"
 
 
+def test_test11_cap_and_santa_water_above_quarter_hp():
+    """test11 run 1: Axe, Knife, Candelabrador, Whip, then Magic Wand, Garlic stuck at 7.
+
+    The cap ranked every extra weapon the same, so the first card on a weapon-only
+    screen was opened. King Bible's early return also skipped the cap once two
+    damage weapons were held. Armor at 39% HP beat Santa Water.
+    """
+    def picked(spec, levels, hp=1.0, game_s=0.0):
+        cards = _offer(spec, levels)
+        pick = choose_pick(cards, hp=hp, owned=set(levels), game_s=game_s, levels=dict(levels))
+        return cards[pick.index].name
+
+    garlic = {"Garlic": 1}
+    # 9s. Clock Lancet does not add a damage weapon. Axe must not win by being first.
+    assert picked(
+        [("Axe", True), ("Magic Wand", True), ("Clock Lancet", True)],
+        garlic, hp=1.0, game_s=9,
+    ) == "Clock Lancet"
+    # A passive on that screen is the cap. The weapon-only case above is the exception.
+    assert picked(
+        [("Axe", True), ("Magic Wand", True), ("Hollow Heart", True)],
+        garlic, hp=1.0, game_s=9,
+    ) == "Hollow Heart"
+    # 20s, after Axe was already opened. Still weapon-only: Lightning Ring, not Knife.
+    two = {"Garlic": 1, "Axe": 1}
+    assert picked(
+        [("Knife", True), ("Peachone", True), ("Lightning Ring", True), ("Ebony Wings", True)],
+        two, hp=1.0, game_s=20,
+    ) == "Lightning Ring"
+    assert picked(
+        [("Knife", True), ("Peachone", True), ("Hollow Heart", True)],
+        two, hp=1.0, game_s=20,
+    ) == "Hollow Heart"
+    # 38s. Candelabrador was the fallback over both heals.
+    assert picked(
+        [("Hollow Heart", True), ("Tirajisú", True), ("Candelabrador", True)],
+        two, hp=1.0, game_s=38,
+    ) == "Hollow Heart"
+    # 126s weapon-only, and the same screen with a passive.
+    assert picked(
+        [("Whip", True), ("Lightning Ring", True), ("Pako Battiliar", True)],
+        {"Garlic": 2, "Axe": 1, "Knife": 1}, hp=0.36, game_s=126,
+    ) == "Lightning Ring"
+    assert picked(
+        [("Whip", True), ("Lightning Ring", True), ("Stone Mask", True)],
+        {"Garlic": 2, "Axe": 1, "Knife": 1}, hp=0.36, game_s=126,
+    ) == "Stone Mask"
+    # King Bible used to skip the cap and open a third damage weapon.
+    assert picked(
+        [("King Bible", True), ("Bracer", True)],
+        {"Garlic": 3, "Santa Water": 1}, hp=1.0, game_s=100,
+    ) == "Bracer"
+    # 155s. Armor outranked a Garlic level at 36% HP.
+    assert picked(
+        [("Whip", False), ("Garlic", False), ("Armor", True)],
+        {"Garlic": 3, "Axe": 1, "Knife": 1, "Whip": 1}, hp=0.36, game_s=155,
+    ) == "Garlic"
+    # 292s. Santa Water is taken above 25% HP, Armor does not outrank it.
+    held = {
+        "Garlic": 5, "Armor": 1, "Axe": 1, "Candelabrador": 1,
+        "Hollow Heart": 2, "Knife": 1, "Pummarola": 1, "Whip": 1,
+    }
+    assert picked(
+        [("Armor", False), ("Santa Water", True), ("Stone Mask", True)],
+        held, hp=0.39, game_s=292,
+    ) == "Santa Water"
+    # Six weapons already owned. Santa Water is still allowed.
+    full = dict(held)
+    full.update({"Magic Wand": 1, "King Bible": 1, "Runetracer": 1, "Cross": 1})
+    assert picked(
+        [("Armor", False), ("Santa Water", True), ("Stone Mask", True)],
+        full, hp=0.39, game_s=300,
+    ) == "Santa Water"
+    # 593s. Hollow Heart must not outrank a Garlic level above 25% HP.
+    assert picked(
+        [("Garlic", False), ("Bracer", False), ("Hollow Heart", False)],
+        dict(held, Bracer=1, **{"Hollow Heart": 3}), hp=0.31, game_s=593,
+    ) == "Garlic"
+
+
 def test_owned_level_beats_a_new_unwanted_item_when_the_plan_is_absent():
     levels = {"Garlic": 4, "Pummarola": 1, "Bone": 1}
     cards = _offer([("Whip", True), ("Bone", False), ("Knife", True)], levels)
@@ -310,7 +390,7 @@ def test_survival_passives_after_the_partner_beat_a_new_weapon():
     levels = {"Garlic": 3, "Pummarola": 1}
     cards = _offer([("Santa Water", True), ("Armor", True), ("Hollow Heart", True)], levels)
     pick = choose_pick(cards, hp=1.0, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Armor" and pick.reason == "fallback"
+    assert cards[pick.index].name == "Santa Water" and pick.reason == "second"
     pick = choose_pick(cards, hp=0.25, owned=set(levels), levels=levels)
     assert cards[pick.index].name == "Armor"
     # Pummarola still leads the survival trio once it is already the partner.
@@ -778,7 +858,7 @@ def test_hurt_bar_still_takes_defense_when_it_is_actually_offered():
     assert offered[pick.index].name == "Garlic" and pick.reason == "main"
     defense = _offer([("Garlic", False), ("Armor", True), ("Hollow Heart", True)], levels)
     pick = choose_pick(defense, hp=0.4, owned=set(levels), levels=levels)
-    assert defense[pick.index].name == "Armor"
+    assert defense[pick.index].name == "Garlic" and pick.reason == "main"
 
 
 def test_uncertain_screen_levels_an_owned_weapon_before_a_new_crowd_weapon():
