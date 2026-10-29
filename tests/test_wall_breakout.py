@@ -76,6 +76,16 @@ def test_surge_picks_the_south_gap_when_that_side_is_thinnest():
     assert nav.breakout[1] > 0.5
 
 
+def test_empty_escape_cone_falls_back_to_every_direction():
+    """test12 ~4:40: HP read 0 after a pause and the escape cone had no heading."""
+    from vs_vision_bot.pathfind import DIRS, _pick_best
+
+    scores = {d: float(i) for i, d in enumerate(DIRS)}
+    scores[(1, 0)] = 10.0
+    assert _pick_best(scores, [], (1, 0)) == (1, 0)
+    assert _pick_best({}, [], None) == (0, 0)
+
+
 def test_tied_breakout_cone_follows_the_heading_not_north():
     """DIRS starts at (0, -1). Equal scores in an east 90-degree cone used to pick north."""
     tune = Tuning(

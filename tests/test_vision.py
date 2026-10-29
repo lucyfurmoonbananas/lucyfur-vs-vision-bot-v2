@@ -1,10 +1,12 @@
 import cv2
 import numpy as np
+import numpy as np
 
 from vs_vision_bot.config import Config
 from vs_vision_bot.vision import (
     Vision,
     detect_gems,
+    enemy_mask,
     detect_level_up_menu,
     detect_threat_blobs,
     draw_synthetic_arena,
@@ -96,6 +98,27 @@ def test_parse_timer_text_rejects_garbage():
     assert parse_timer_text("3:99") is None
     assert parse_timer_text("99:01") is None
     assert parse_timer_text("0125") is None
+
+
+def test_cyan_only_glowing_bat_is_a_threat_and_not_a_gem():
+    """1:00 swarm bats have the cyan ring and no dark body. The danger map missed them."""
+    from vs_vision_bot.pathfind import score_directions
+    from vs_vision_bot.vision import threat_points
+
+    frame = draw_synthetic_arena(960, 540, monsters=[])
+    _paint_gem(frame, 600, 200)
+    # Outline only: erase the dark fill the boss painter uses.
+    # Bright cyan body, no dark pixels. Cell centers land just outside 28px.
+    cv2.ellipse(frame, (508, 256), (20, 14), 0, 0, 360, (254, 202, 110), -1)
+    gems = detect_gems(frame)
+    assert any(abs(x - 600) < 8 and abs(y - 200) < 8 for x, y in gems)
+    assert not any(abs(x - 508) < 40 and abs(y - 256) < 30 for x, y in gems)
+    pts = threat_points(enemy_mask(frame))
+    near = pts[np.hypot(pts[:, 0] - 508, pts[:, 1] - 256) < 36] if len(pts) else pts
+    assert len(near) > 0 and float(near[:, 2].sum()) > 0.5
+    dec = score_directions(pts, (480.0, 256.0), None, 0.0, hp=1.0)
+    assert dec.danger_here > 0.3
+    assert dec.vector[0] <= 0
 
 
 def test_synthetic_gem_found_glowing_bat_rejected():

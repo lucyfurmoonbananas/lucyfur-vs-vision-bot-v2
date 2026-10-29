@@ -139,13 +139,18 @@ def test_heartbeat_disabled_and_thread_lifecycle():
     clock.t += 10_000
     assert off.check() is None and not fired
 
-    real = LoopHeartbeat(fired.append, limit_s=0.05, poll_s=0.01)
-    real.start()
-    import time
+    clock2 = FakeClock()
+    steps = {"n": 0}
 
-    deadline = time.monotonic() + 2.0
-    while not fired and time.monotonic() < deadline:
-        time.sleep(0.01)
+    def wait(_poll: float) -> bool:
+        steps["n"] += 1
+        clock2.t += 1.0
+        return steps["n"] >= 2
+
+    real = LoopHeartbeat(fired.append, limit_s=0.05, poll_s=0.01, clock=clock2, wait=wait)
+    real.start()
+    assert real._thread is not None
+    real._thread.join(timeout=2.0)
     real.stop()
     assert fired and fired[0].reason == "loop_blocked"
 
