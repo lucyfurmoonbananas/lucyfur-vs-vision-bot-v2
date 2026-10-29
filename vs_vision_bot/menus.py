@@ -1840,6 +1840,18 @@ BUILD_LOW_HP = 0.25
 BUILD_LOW_TAKES: tuple[str, ...] = ("Floor Chicken", "Armor", "Hollow Heart")
 
 
+def _missing_held_passive(name: str, levels: dict[str, int]) -> bool:
+    """True when the local held-partner ranker would claim ``name``.
+
+    That function is added by the uncommitted level-up patch. Without it,
+    Armor stays off the build list above 25% HP.
+    """
+    fn = globals().get("_held_partner_name")
+    if fn is None or not name:
+        return False
+    return fn(name, levels) is not None
+
+
 def _build_window(game_s: float | None) -> bool:
     """True before 10:00. An unknown clock keeps the ranker the local commits use."""
     return game_s is not None and game_s < BUILD_UNTIL_S
@@ -1878,13 +1890,19 @@ def _build_screen_pick(
             return (9, i)
         if low and name in BUILD_LOW_TAKES:
             return (0, BUILD_LOW_TAKES.index(name), i)
+        # The local patch ranks a missing passive (Armor for a held Runetracer)
+        # above a new King Bible. It stays under Garlic and Pummarola.
+        if _missing_held_passive(name, held) and name not in ("Garlic", "Pummarola"):
+            return (4, i)
         if name not in BUILD_ITEMS or name in BANNED_WHILE_BUILD:
             return (9, i)
         if name == "Santa Water" and card.new and santa_new_wins:
             return (1, 0, i)
         if name == "Garlic":
             return (2, 0 if not card.new else 1, i)
-        return (3, BUILD_ITEMS.index(name), i)
+        if name == "Pummarola":
+            return (3, 0, i)
+        return (5, BUILD_ITEMS.index(name), i)
 
     best = min(range(len(cards)), key=rank)
     tier = rank(best)[0]
@@ -1895,7 +1913,7 @@ def _build_screen_pick(
         reason = "main"
     elif name == "Santa Water" or name == "King Bible":
         reason = "second"
-    elif name in ("Pummarola", "Attractorb", "Spellbinder"):
+    elif name in ("Pummarola", "Attractorb", "Spellbinder") or _missing_held_passive(name, held):
         reason = "partner"
     else:
         reason = "fallback"
