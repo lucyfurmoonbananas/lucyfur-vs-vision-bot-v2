@@ -64,7 +64,7 @@ def _play(offers: list[list[tuple[str, bool]]], levels: dict[str, int], hp: floa
     reasons: list[str] = []
     for spec in offers:
         cards = _offer(spec, levels)
-        pick = choose_pick(cards, hp=hp, owned=set(levels), levels=dict(levels))
+        pick = choose_pick(cards, hp=hp, owned=set(levels), game_s=100.0, levels=dict(levels))
         name = cards[pick.index].name
         assert pick.reason in ("main", "partner", "second", "fallback")
         picks.append(name)
@@ -90,8 +90,8 @@ def test_static_priority_still_spreads_when_levels_are_unknown():
     owned = {"Garlic"}
     cards = [_card("Garlic", False), _card("King Bible", True), _card("Lightning Ring", True)]
     # A Garlic level beats a new crowd weapon. The old spread took King Bible.
-    assert choose_card(cards, hp=1.0, owned=owned) == 0
-    assert choose_pick(cards, hp=1.0, owned=owned).reason == "main"
+    assert choose_card(cards, hp=1.0, owned=owned, game_s=100.0) == 0
+    assert choose_pick(cards, hp=1.0, owned=owned, game_s=100.0).reason == "main"
 
 
 def test_scripted_offers_max_garlic_then_one_second_weapon():
@@ -158,10 +158,10 @@ def test_once_partner_is_owned_main_levels_beat_more_partner_levels():
 def test_magic_wand_is_main_when_garlic_is_not_held():
     levels = {"Magic Wand": 2}
     cards = _offer([("Garlic", True), ("Magic Wand", False), ("Empty Tome", True)], levels)
-    pick = choose_pick(cards, owned=set(levels), levels=levels)
+    pick = choose_pick(cards, owned=set(levels), levels=levels, game_s=100.0)
     assert cards[pick.index].name == "Garlic" and pick.reason == "main"
     cards = _offer([("Garlic", True), ("Magic Wand", False), ("King Bible", True)], levels)
-    pick = choose_pick(cards, owned=set(levels), levels=levels)
+    pick = choose_pick(cards, owned=set(levels), levels=levels, game_s=100.0)
     assert cards[pick.index].name == "Garlic" and pick.reason == "main"
     # Neither held: Garlic is the main to acquire, not a crowd weapon.
     cards = _offer([("King Bible", True), ("Magic Wand", True), ("Garlic", True)], {})
@@ -203,7 +203,7 @@ def test_santa_water_is_the_first_second_weapon_and_armor_l2_yields():
     # Still critical, and Garlic is already past 4: Armor L2 may lead.
     deep = {"Garlic": 6, "Armor": 1}
     cards = _offer([("Garlic", False), ("Armor", False)], deep)
-    pick = choose_pick(cards, hp=0.20, owned=set(deep), levels=deep)
+    pick = choose_pick(cards, hp=0.20, owned=set(deep), levels=deep, game_s=100.0)
     assert cards[pick.index].name == "Armor"
 
     # test7 run 3: Fire Wand as a third weapon while Garlic is 3.
@@ -607,7 +607,7 @@ def test_survival_passives_after_the_partner_beat_a_new_weapon():
     assert cards[pick.index].name == "Pummarola"
     # At or below 25% HP Armor may beat a Garlic level. Floor Chicken does too.
     cards = _offer([("Garlic", False), ("Armor", True)], levels)
-    pick = choose_pick(cards, hp=0.2, owned=set(levels), levels=levels)
+    pick = choose_pick(cards, hp=0.2, owned=set(levels), levels=levels, game_s=100.0)
     assert cards[pick.index].name == "Armor" and pick.reason == "fallback"
     cards = _offer([("Garlic", False), ("Floor Chicken", True)], levels)
     pick = choose_pick(cards, hp=0.2, owned=set(levels), levels=levels)
@@ -627,11 +627,11 @@ def test_level_ocr_far_from_the_tracker_falls_back_to_spreading():
     # A wild OCR level is not an inventory, but the card is still Garlic. A
     # Garlic level beats a new King Bible instead of spreading to it.
     cards = [_card("Garlic", False, level=6), _card("King Bible", True)]
-    pick = choose_pick(cards, owned=set(levels), levels=levels)
+    pick = choose_pick(cards, owned=set(levels), levels=levels, game_s=100.0)
     assert cards[pick.index].name == "Garlic" and pick.reason == "main"
     # A shaky name is the same fallback, and the tracker is not rewritten.
     cards = [_card("Garlic", False, level=2, score=0.7), _card("King Bible", True)]
-    pick = choose_pick(cards, owned=set(levels), levels=levels)
+    pick = choose_pick(cards, owned=set(levels), levels=levels, game_s=100.0)
     assert pick.reason == "second" and cards[pick.index].name == "King Bible"
     eff, certain = assess_inventory(cards, levels)
     assert certain is False and eff.get("Garlic") == 2
@@ -657,7 +657,7 @@ def test_early_pentagram_stays_last_when_the_inventory_is_known():
 def test_birds_are_a_second_project_after_the_main_is_maxed():
     levels = {"Garlic": 8, "Pummarola": 1, "Peachone": 1}
     cards = _offer([("Ebony Wings", True), ("Peachone", False), ("King Bible", True)], levels)
-    pick = choose_pick(cards, owned=set(levels), levels=levels)
+    pick = choose_pick(cards, owned=set(levels), levels=levels, game_s=100.0)
     assert cards[pick.index].name == "King Bible" and pick.reason == "second"
     levels["Ebony Wings"] = 1
     cards = _offer([("Ebony Wings", False), ("Peachone", False), ("Santa Water", True)], levels)

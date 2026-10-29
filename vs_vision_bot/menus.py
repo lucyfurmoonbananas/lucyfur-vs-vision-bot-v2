@@ -1841,8 +1841,8 @@ BUILD_LOW_TAKES: tuple[str, ...] = ("Floor Chicken", "Armor", "Hollow Heart")
 
 
 def _build_window(game_s: float | None) -> bool:
-    """True before 10:00. An unknown clock is still the early build."""
-    return game_s is None or game_s < BUILD_UNTIL_S
+    """True before 10:00. An unknown clock keeps the ranker the local commits use."""
+    return game_s is not None and game_s < BUILD_UNTIL_S
 
 
 def _build_screen_pick(
