@@ -49,6 +49,34 @@ def test_score_at_or_below_quarter_does_not_walk_into_the_pack():
         assert dec.vector != into.vector
 
 
+def test_touching_ring_breaks_out_above_quarter_hp():
+    """test13 run 3, 1:11: ghouls and mudmen on Poe, danger 1.7, HP 1.00 to 0.47.
+
+    A pack still gets dived. A distant ring still gets dived. A ring whose
+    bodies are already touching, and which covers most directions, raises
+    danger and leaves farm mode.
+    """
+    from vs_vision_bot.pathfind import _danger_at
+
+    close = np.array(ring(P[0], P[1], 36, 24), np.float32)
+    raw = float(_danger_at(close, np.array([P[0]]), np.array([P[1]]), Tuning().radius)[0])
+    dec = score_directions(close, P, None, 0.0, hp=1.0)
+    assert dec.danger_here > raw * 2
+    clock = Clock()
+    nav = Navigator(clock=clock, log=lambda *_: None)
+    nav.game_s = 74.0
+    run(nav, clock, result(close), 6, hp=1.0)
+    assert nav.breakouts > 0 or nav.escaping
+    assert "farm" not in nav.last.mode
+
+    far = np.array(ring(P[0], P[1], 160, 24), np.float32)
+    clock2 = Clock()
+    held = Navigator(clock=clock2, log=lambda *_: None)
+    held.game_s = 74.0
+    run(held, clock2, result(far), 4, hp=1.0)
+    assert held.breakouts == 0 and not held.escaping
+
+
 def test_nav_above_quarter_dives_the_pack_and_skips_the_ring():
     """A closed ring with an east gap is a breakout today. Above 25% it is a farm."""
     clock = Clock()

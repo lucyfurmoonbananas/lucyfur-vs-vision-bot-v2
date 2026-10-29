@@ -102,7 +102,7 @@ def test_scripted_offers_max_garlic_then_one_second_weapon():
         [("Santa Water", True), ("Garlic", False), ("Knife", True)],
         # Garlic just hit 3. Santa Water is now the pick on a weapon-only screen.
         [("Santa Water", True), ("Magic Wand", True), ("Knife", True)],
-        [("Pummarola", True), ("Garlic", False), ("Empty Tome", True)],
+        [("Pummarola", True), ("Empty Tome", True), ("King Bible", True)],
     ]
     # Five more Garlic levels (offer 3 reaches 4, then 4 -> 8).
     garlic_offers += [
@@ -137,8 +137,12 @@ def test_scripted_offers_max_garlic_then_one_second_weapon():
 
 
 def test_partner_beats_a_main_level_when_both_are_offered():
+    """test13: a Garlic level comes before Pummarola. Pummarola still beats a weapon."""
     levels = {"Garlic": 4}
     cards = _offer([("Garlic", False), ("Pummarola", True), ("King Bible", True)], levels)
+    pick = choose_pick(cards, owned=set(levels), levels=levels)
+    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
+    cards = _offer([("Pummarola", True), ("King Bible", True), ("Peachone", True)], levels)
     pick = choose_pick(cards, owned=set(levels), levels=levels)
     assert cards[pick.index].name == "Pummarola" and pick.reason == "partner"
 
@@ -147,7 +151,7 @@ def test_once_partner_is_owned_main_levels_beat_more_partner_levels():
     levels = {"Garlic": 4, "Pummarola": 1}
     cards = _offer([("Pummarola", False), ("Garlic", False), ("Santa Water", True)], levels)
     pick = choose_pick(cards, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
+    assert cards[pick.index].name == "Santa Water" and pick.reason == "second"
 
 
 def test_magic_wand_is_main_when_garlic_is_not_held():
@@ -233,8 +237,7 @@ def test_test9_does_not_spend_early_slots_and_takes_santa_water():
         [("Silver Wind", True), ("Whip", True), ("Candelabrador", True)], garlic, game_s=40,
     ) == "Candelabrador"
 
-    # A Pummarola level is a survival pick and stays ahead of Santa Water
-    # while Garlic is under 8. Santa Water still beats a plain extra weapon.
+    # Garlic is already 6 and the clock is past 0:30, so Santa Water wins.
     late = {
         "Garlic": 6, "Attractorb": 2, "Magic Wand": 4, "Pummarola": 1,
         "Runetracer": 3, "Silver Wind": 1,
@@ -242,7 +245,7 @@ def test_test9_does_not_spend_early_slots_and_takes_santa_water():
     assert picked(
         [("Santa Water", True), ("Pummarola", False), ("Lightning Ring", True)],
         late, game_s=296,
-    ) == "Pummarola"
+    ) == "Santa Water"
     assert picked(
         [("Santa Water", True), ("Lightning Ring", True), ("Axe", True)],
         late, game_s=296,
@@ -274,11 +277,11 @@ def test_test10_garlic_and_candle_beat_santa_water_and_no_third_weapon():
         [("Santa Water", False), ("Laurel", True), ("Candelabrador", True), ("Parm Aegis", True)],
         {"Garlic": 3, "Santa Water": 2, "Hollow Heart": 2}, hp=0.36, game_s=138,
     ) == "Santa Water"
-    # A Garlic level still beats Santa Water.
+    # Garlic is already 3, so the gate is open and Santa Water wins above 25% HP.
     assert picked(
         [("Santa Water", False), ("Garlic", False), ("Whip", True)],
         {"Garlic": 3, "Santa Water": 1}, hp=1.0, game_s=66,
-    ) == "Garlic"
+    ) == "Santa Water"
     # Run 3, 19s had no passive, so a click was forced. With a passive on the
     # same kind of screen the third weapon is not opened.
     two = {"Garlic": 1, "King Bible": 1}
@@ -292,15 +295,15 @@ def test_test10_garlic_and_candle_beat_santa_water_and_no_third_weapon():
         [("Heaven Sword", True), ("Axe", True), ("Peachone", True)],
         {"Garlic": 1}, hp=1.0, game_s=7,
     ) != "Axe"
-    # Candelabrador loses to a Garlic level and to the Pummarola partner.
+    # Garlic is already 3, so Santa Water wins over the level and the partner.
     assert picked(
         [("Candelabrador", True), ("Garlic", False), ("Santa Water", False)],
         {"Garlic": 3, "Santa Water": 1}, hp=1.0, game_s=66,
-    ) == "Garlic"
+    ) == "Santa Water"
     assert picked(
         [("Candelabrador", True), ("Pummarola", True), ("Santa Water", True)],
         {"Garlic": 3}, hp=1.0, game_s=50,
-    ) == "Pummarola"
+    ) == "Santa Water"
 
 
 def test_test12_santa_water_waits_for_garlic_or_ninety_seconds():
@@ -331,7 +334,7 @@ def test_test12_santa_water_waits_for_garlic_or_ninety_seconds():
     assert picked(
         [("Santa Water", True), ("Garlic", False), ("Whip", True)],
         {"Garlic": 3}, hp=1.0, game_s=40,
-    ) == "Garlic"
+    ) == "Santa Water"
     assert picked(
         [("Santa Water", True), ("Armor", True), ("Hollow Heart", True)],
         {"Garlic": 3}, hp=0.9, game_s=40,
@@ -493,7 +496,7 @@ def test_birds_are_a_second_project_after_the_main_is_maxed():
     levels["Ebony Wings"] = 1
     cards = _offer([("Ebony Wings", False), ("Peachone", False), ("Santa Water", True)], levels)
     pick = choose_pick(cards, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Peachone" and pick.reason == "second"
+    assert cards[pick.index].name == "Santa Water" and pick.reason == "second"
 
 
 def test_evolution_ready_is_main_at_8_plus_its_partner():
@@ -917,7 +920,7 @@ def test_uncertain_screen_levels_an_owned_weapon_before_a_new_crowd_weapon():
         _card("Candelabrador", True, score=0.7),
     ]
     pick = choose_pick(cards, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
+    assert cards[pick.index].name == "Santa Water" and pick.reason == "second"
 
 
 def test_owned_weapon_level_beats_extra_armor_and_a_new_passive():
@@ -991,6 +994,52 @@ def test_unfinished_main_takes_a_passive_instead_of_opening_a_weapon():
     only_weapons = _offer([("Santa Water", True), ("Magic Wand", True), ("Knife", True)], levels)
     pick = choose_pick(only_weapons, hp=1.0, owned=set(levels), levels=levels)
     assert only_weapons[pick.index].name == "Santa Water" and pick.reason == "second"
+
+
+def test_test13_garlic_then_pummarola_and_santa_after_thirty_seconds():
+    """test13: Pummarola beat a Garlic level, and Santa Water lost at 0:31.
+
+    Laurel, Hollow Heart, Lightning Ring, and Peachone also filled early picks.
+    A Garlic level wins over all of those. After 0:30, or once Garlic is L3,
+    Santa Water wins above 25% HP even against a Garlic level.
+    """
+    def picked(spec, levels, hp=1.0, game_s=0.0):
+        cards = _offer(spec, levels)
+        pick = choose_pick(cards, hp=hp, owned=set(levels), game_s=game_s, levels=dict(levels))
+        return cards[pick.index].name
+
+    early = {"Garlic": 2, "Laurel": 2, "Hollow Heart": 1, "Peachone": 1}
+    assert picked(
+        [("Garlic", False), ("Pummarola", True), ("Eight The Sparrow", True)],
+        {"Garlic": 1, "Laurel": 1, "Peachone": 2}, hp=1.0, game_s=71,
+    ) == "Garlic"
+    assert picked(
+        [("Laurel", False), ("Hollow Heart", False), ("Garlic", False)],
+        early, hp=0.44, game_s=20,
+    ) == "Garlic"
+    assert picked(
+        [("Lightning Ring", True), ("Peachone", True), ("Garlic", False)],
+        {"Garlic": 2}, hp=1.0, game_s=20,
+    ) == "Garlic"
+    # 0:31, Garlic still 1. The shortened gate takes Santa Water.
+    assert picked(
+        [("King Bible", True), ("Santa Water", True), ("Magic Wand", True)],
+        {"Garlic": 1, "Clock Lancet": 2}, hp=1.0, game_s=31,
+    ) == "Santa Water"
+    # Still before 0:30 and Garlic under 3: the Garlic level wins.
+    assert picked(
+        [("Santa Water", True), ("Garlic", False), ("Knife", True)],
+        {"Garlic": 2}, hp=1.0, game_s=19,
+    ) == "Garlic"
+    # Past the gate, Santa Water beats the Garlic level above 25% HP.
+    assert picked(
+        [("Garlic", False), ("Santa Water", False), ("Whip", True)],
+        {"Garlic": 4, "Santa Water": 1}, hp=0.75, game_s=200,
+    ) == "Santa Water"
+    assert picked(
+        [("Santa Water", True), ("Armor", True)],
+        {"Garlic": 4}, hp=0.25, game_s=200,
+    ) == "Armor"
 
 
 def test_done_page_is_marked_as_the_reward_followup(monkeypatch):

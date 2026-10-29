@@ -1297,14 +1297,14 @@ def _santa_water_now(hp: float | None) -> bool:
 # test11 Run 2 (Lv99) took Garlic and Attractorb first and Santa Water at 1:49.
 # test12 took it at 0:08 and Garlic was still 2-4 at 3:00.
 SANTA_WATER_MIN_GARLIC = 3
-SANTA_WATER_AFTER_S = 90.0
+SANTA_WATER_AFTER_S = 30.0
 _pick_game_s: contextvars.ContextVar[float | None] = contextvars.ContextVar(
     "vs_pick_game_s", default=None
 )
 
 
 def _santa_water_ready(levels: dict[str, int] | None) -> bool:
-    """Garlic is L3+, or the run is past ~1:30. Before that, level Garlic."""
+    """Garlic is L3+, or the run is past 0:30. Before that, level Garlic."""
     if (levels or {}).get("Garlic", 0) >= SANTA_WATER_MIN_GARLIC:
         return True
     game_s = _pick_game_s.get()
@@ -1413,7 +1413,7 @@ def _card_rank(
         # The low-HP shield shortcut must not spend that slot.
         # Above 25% HP, Armor and Hollow Heart stay behind Santa Water.
         behind_santa = (
-            name in ("Armor", "Hollow Heart")
+            name in ("Armor", "Hollow Heart", "Laurel", "Pummarola")
             and _santa_water_now(hp)
             and 0 < garlic_lv < WEAPON_MAX_LEVEL
         )
@@ -1438,11 +1438,8 @@ def _card_rank(
             # Behind Santa Water (4) and the survival group (5). Still beats a capped weapon.
             return (6, 0)
     if name == "Santa Water" and _santa_water_now(hp) and _santa_water_ready(levels):
-        gl = (levels or {}).get("Garlic", 0)
-        if levels and 0 < gl < 8:
-            # Behind a Garlic level (3). Ahead of Armor / Hollow Heart (5 and 7).
-            return (4, 0)
-        return (2, 0)
+        # After the gate this beats a Garlic level (3) and Pummarola (5).
+        return (1, 0)
     if c.new and name in WEAPONS:
         if not slots_free:
             return (35, idx)
@@ -1600,14 +1597,11 @@ def _focused_rank(
     if name in EVOLUTIONS and not c.new:
         evo = EVOLUTION_PAIRS.get(main, (None, ""))[1] if main else ""
         return (0, EVOLUTIONS.index(name), "main" if name == evo else "second")
-    # Santa Water whenever it is offered above 25% HP, even with six weapons
-    # already owned (this return is before the slot cap). A Garlic level is
-    # (4, 0) and a Pummarola level is (4, 1), so both outrank it. Armor and
-    # Hollow Heart are (4, 3)/(4, 4) and do not.
+    # After Garlic is L3 or the clock is past 0:30, Santa Water wins above
+    # 25% HP, including over a Garlic level and Pummarola. This return is
+    # before the slot cap, so a full weapon bar does not block it.
     if name == "Santa Water" and _santa_water_now(hp) and _santa_water_ready(levels):
-        if main == "Garlic" and 0 < main_lv < WEAPON_MAX_LEVEL:
-            return (4, 2, "second")
-        return (6, 2, "second")
+        return (2, 0, "second")
     if (
         c.new
         and not protect_weapons
@@ -1629,7 +1623,7 @@ def _focused_rank(
     if low and name in DEFENSE:
         third = c.new and name in WEAPONS and _holds_two_damage_weapons(levels)
         behind_santa = (
-            name in ("Armor", "Hollow Heart")
+            name in ("Armor", "Hollow Heart", "Laurel", "Pummarola")
             and _santa_water_now(hp)
             and main == "Garlic"
             and 0 < main_lv < WEAPON_MAX_LEVEL
@@ -1646,6 +1640,14 @@ def _focused_rank(
     if main is None and name in ("Garlic", "Magic Wand"):
         return (2, 0 if name == "Garlic" else 1, "main")
     if main and name == partner_of(main) and levels.get(name, 0) <= 0:
+        # test13 took Pummarola over a Garlic level at 1:11. While Garlic is
+        # under 8 and HP is above 25%, the Garlic level comes first.
+        if (
+            main == "Garlic"
+            and 0 < main_lv < WEAPON_MAX_LEVEL
+            and _santa_water_now(hp)
+        ):
+            return (4, 1, "partner")
         return (3, 0, "partner")
     if main and name == main and not c.new and main_lv < WEAPON_MAX_LEVEL:
         return (4, 0, "main")
