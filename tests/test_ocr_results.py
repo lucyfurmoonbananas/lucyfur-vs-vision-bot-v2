@@ -17,7 +17,34 @@ RAW = ("Survived: | Level reached: | Enemies defeated: \n"
 
 
 def test_first_kill_match_wins_over_dollar_misread():
-    assert ocr.parse_stats(RAW) == {"survival": "06:51", "level": "7", "kills": "527"}
+    assert ocr.parse_stats(RAW) == {"survival": "06:51", "level": "7", "kills": "527", "gold": "170"}
+
+
+def test_gold_prefers_the_full_earned_number_over_a_clipped_fragment():
+    """test10 read Gold earned as 3, 0 and 35. The value column is the long number.
+
+    "Gold x 1" is the stage coin multiplier and is not earned gold.
+    """
+    clipped = RAW + "Gold earned: 3\nGold earned: 0\nGold earned: 35\nGold x 1\n"
+    assert ocr.parse_stats(clipped)["gold"] == "170"
+    stage = "Survived: 02:20\nLevel reached: 5\nEnemies defeated: 271\nGold x 1\n"
+    assert ocr.parse_stats(stage)["gold"] is None
+    zero = "Survived: 02:20\nGold earned: 0\nLevel reached: 4\nEnemies defeated: 271\nGold x 1\n"
+    assert ocr.parse_stats(zero)["gold"] == "0"
+
+
+def test_gold_crop_covers_the_value_column():
+    """results_run1_527.png gold is 170, right-aligned. x=380 clips it; gray>170 drops the 0."""
+    im = cv2.imread(str(ROOT / "tests" / "fixtures" / "results_run1_527.png"))
+    assert im is not None and im.shape[1] == 960
+    _y0, _y1, _x0, x1 = ocr.GOLD_CROP
+    assert x1 >= 520
+    # Right edge of the "0" (x=476-484, y=108-160): gray 170 sees nothing, max-channel does.
+    col = im[108:160, 476:484]
+    gray = cv2.cvtColor(col, cv2.COLOR_BGR2GRAY)
+    mx = col.max(axis=2)
+    assert int((gray > 170).sum()) == 0
+    assert int((mx > ocr.GOLD_THRESH).sum()) > 0
 
 
 @pytest.mark.skipif(shutil.which("tesseract") is None, reason="tesseract not installed")

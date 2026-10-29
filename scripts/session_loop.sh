@@ -13,7 +13,10 @@ export DISPLAY=:6
 export PATH="/home/box/.local/bin:/home/box/micromamba/envs/vstools/bin:$PATH"
 export TESSDATA_PREFIX=/home/box/micromamba/envs/vstools/share/tessdata
 export PATH="/home/box/.local/share/Steam:$PATH"
-CUTOFF_HHMM=${VS_CUTOFF_HHMM:-0545}   # no new runs at/after this CT time ('none' = off)
+# Manual runs do not stop at 05:45 CT. Set VS_CUTOFF_HHMM=0545 for an overnight loop.
+# Exported so play_run.sh (its own default is 0545) inherits the same switch.
+CUTOFF_HHMM=${VS_CUTOFF_HHMM:-none}
+export VS_CUTOFF_HHMM="$CUTOFF_HHMM"
 MAX_FAILS=${VS_MAX_FAILS:-8}
 MAX_RUNS=${VS_MAX_RUNS:-40}
 RUN_GAP_S=${VS_RUN_GAP_S:-3}

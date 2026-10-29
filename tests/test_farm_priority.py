@@ -127,6 +127,37 @@ def test_pack_dive_hp_zero_restores_the_flee():
     assert dec.vector[0] < 0
 
 
+def test_outline_contact_blocks_the_step_the_kernel_calls_safe():
+    """test10 run2, ~67-70s: HP 1.00 to 0.50 in farm mode while danger stayed ~1.1.
+
+    An outline ring at ~40px is outside the 28px floor, and the 42px kernel
+    reads about 1. That mass is already a hit: do not step into it, report a
+    higher danger, and do not shove backward. A far pack is still approached.
+    engage_standoff=0 still walks onto the outline.
+    """
+    import math
+
+    from vs_vision_bot.pathfind import OUTLINE_MASS, _danger_at
+
+    pts = []
+    for i in range(8):
+        ang = math.radians(-50 + 100 * i / 7)
+        pts.append((P[0] + 40 * math.cos(ang), P[1] + 40 * math.sin(ang), 0.25))
+    outline = np.array(pts, np.float32)
+    assert float(outline[:, 2].sum()) >= OUTLINE_MASS
+    raw = float(_danger_at(outline, np.array([P[0]]), np.array([P[1]]), Tuning().radius)[0])
+    assert raw < 1.5
+    dec = score_directions(outline, P, None, 0.0, hp=1.0)
+    assert dec.vector[0] <= 0
+    assert dec.danger_here > raw
+    opened = Tuning(engage_standoff=0.0)
+    assert score_directions(outline, P, None, 0.0, hp=1.0, tune=opened).vector[0] > 0
+    far = np.array(blob(P[0] + 120, P[1], n=10, spread=10, seed=5), np.float32)
+    assert score_directions(far, P, None, 0.0, hp=1.0).vector[0] > 0
+    speck = np.array([(P[0] + 40.0, P[1], 0.25)], np.float32)
+    assert score_directions(speck, P, None, 0.0, hp=1.0).vector[0] > 0
+
+
 def test_body_floor_refuses_the_sprite_without_a_backward_shove():
     """28px floor: do not step onto a body already inside it, and do not flee the pack.
 

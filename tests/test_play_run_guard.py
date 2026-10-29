@@ -185,6 +185,22 @@ def _loop(env, session: Path) -> str:
     return (session / "session-log.md").read_text()
 
 
+def test_session_loop_cutoff_defaults_to_none_for_manual_runs(box):
+    """A manual loop must not inherit play_run.sh's 0545 cutoff."""
+    _tmp, session, env = box
+    (session / "play_run.sh").write_text(
+        "#!/bin/bash\n"
+        'echo "cutoff=${VS_CUTOFF_HHMM-<unset>}" > "$VS_SESSION/cutoff.txt"\n'
+        "exit 2\n"
+    )
+    (session / "play_run.sh").chmod(0o755)
+    shutil.copy(SESSION_LOOP, session / "session_loop.sh")
+    child = dict(env)
+    child.pop("VS_CUTOFF_HHMM", None)
+    _loop(child, session)
+    assert (session / "cutoff.txt").read_text().strip() == "cutoff=none"
+
+
 def test_session_loop_does_not_count_watchdog_rc3_as_failures(box):
     _tmp, session, env = box
     _session_with_fake_play_run(session, [3] * 10 + [0])
