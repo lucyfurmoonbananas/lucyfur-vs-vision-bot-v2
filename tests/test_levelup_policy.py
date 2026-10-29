@@ -203,7 +203,7 @@ def test_santa_water_is_the_first_second_weapon_and_armor_l2_yields():
     deep = {"Garlic": 6, "Armor": 1}
     cards = _offer([("Garlic", False), ("Armor", False)], deep)
     pick = choose_pick(cards, hp=0.20, owned=set(deep), levels=deep)
-    assert cards[pick.index].name == "Armor"
+    assert cards[pick.index].name == "Garlic"
 
     # test7 run 3: Fire Wand as a third weapon while Garlic is 3.
     two = {"Garlic": 3, "Magic Wand": 1}
@@ -319,7 +319,7 @@ def test_test12_santa_water_waits_for_garlic_or_ninety_seconds():
         return cards[pick.index].name
 
     early = [("Ebony Wings", True), ("Magic Wand", True), ("Eight The Sparrow", True), ("Santa Water", True)]
-    assert picked(early, {"Garlic": 1}, hp=1.0, game_s=8) == "Magic Wand"
+    assert picked(early, {"Garlic": 1}, hp=1.0, game_s=8) == "Santa Water"
     assert picked(
         [("Santa Water", True), ("Garlic", False), ("Knife", True)],
         {"Garlic": 2}, hp=1.0, game_s=19,
@@ -425,6 +425,39 @@ def test_test11_cap_and_santa_water_above_quarter_hp():
     ) == "Garlic"
 
 
+def test_test14_santa_water_is_the_second_weapon_and_garlic_survives_low_hp():
+    """test14 run 2 took Ebony Wings over Santa Water at 0:08.
+
+    At 2:24 Pummarola beat a Garlic level at hp=0.25. At 4:33 Tirajisú beat
+    one at hp=0.28. Run 1 did not see Santa Water until 7:12, and took it.
+    """
+    def picked(spec, levels, hp=1.0, game_s=0.0):
+        cards = _offer(spec, levels)
+        pick = choose_pick(cards, hp=hp, owned=set(levels), game_s=game_s, levels=dict(levels))
+        return cards[pick.index].name
+
+    assert picked(
+        [("Santa Water", True), ("Ebony Wings", True)],
+        {"Garlic": 1}, hp=1.0, game_s=8,
+    ) == "Santa Water"
+    assert picked(
+        [("Santa Water", True), ("Garlic", False), ("Knife", True)],
+        {"Garlic": 2}, hp=1.0, game_s=8,
+    ) == "Garlic"
+    assert picked(
+        [("Pummarola", False), ("Garlic", False), ("Runetracer", True)],
+        {"Garlic": 2, "Pummarola": 1}, hp=0.25, game_s=144,
+    ) == "Garlic"
+    assert picked(
+        [("Garlic", False), ("Tirajisú", True), ("Duplicator", True), ("Axe", True)],
+        {"Garlic": 3, "Pummarola": 3}, hp=0.28, game_s=273,
+    ) == "Garlic"
+    assert picked(
+        [("Garlic", False), ("Floor Chicken", True), ("Tirajisú", True)],
+        {"Garlic": 3}, hp=0.2, game_s=200,
+    ) == "Floor Chicken"
+
+
 def test_owned_level_beats_a_new_unwanted_item_when_the_plan_is_absent():
     levels = {"Garlic": 4, "Pummarola": 1, "Bone": 1}
     cards = _offer([("Whip", True), ("Bone", False), ("Knife", True)], levels)
@@ -443,10 +476,13 @@ def test_survival_passives_after_the_partner_beat_a_new_weapon():
     cards = _offer([("Hollow Heart", True), ("Pummarola", False), ("Armor", True)], levels)
     pick = choose_pick(cards, hp=1.0, owned=set(levels), levels=levels)
     assert cards[pick.index].name == "Pummarola"
-    # Low HP still takes defense ahead of a main level (existing survive rule).
+    # Floor Chicken is the low-HP exception. Armor is not.
     cards = _offer([("Garlic", False), ("Armor", True)], levels)
     pick = choose_pick(cards, hp=0.2, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Armor"
+    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
+    cards = _offer([("Garlic", False), ("Floor Chicken", True)], levels)
+    pick = choose_pick(cards, hp=0.2, owned=set(levels), levels=levels)
+    assert cards[pick.index].name == "Floor Chicken"
     pick = choose_pick(cards, hp=0.9, owned=set(levels), levels=levels)
     assert cards[pick.index].name == "Garlic" and pick.reason == "main"
 
