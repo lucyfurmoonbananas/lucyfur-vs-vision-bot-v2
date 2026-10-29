@@ -210,19 +210,32 @@ def gate_heuristic_menu(
     return streak >= need, streak
 
 
+def _overlay_may_clear_latch(tracker: object) -> bool:
+    """A real low bar (``low_held``) is not an overlay lie.
+
+    test7 cleared the latch on every level-up while HP was actually ~0.17, so
+    the next frame logged ``critical HP on hp=0.00`` again.
+    """
+    return not bool(getattr(tracker, "low_held", False))
+
+
 def note_menu_overlay(nav: object, pilot: object, menu_kind: str | None, armed: bool = False) -> bool:
     """Clear a false critical / HP-crash when a chest or level-up covers the bar.
 
     Returns whether that overlay is still up. The frame the menu closes resumes
     the HP tracker so the darkened 0.00 samples do not latch the next step.
+    A tracker that is already holding a real low reading is left latched.
     """
     tracker = getattr(pilot, "_hp", None)
+    # Read before resume: resume itself drops low_held, and a real low bar
+    # must stay latched on both the open and the close of the menu.
+    genuine_low = not _overlay_may_clear_latch(tracker)
     if menu_kind in ("chest", "levelup"):
         suspend = getattr(tracker, "suspend_for_overlay", None)
         if callable(suspend):
             suspend()
         clear = getattr(nav, "clear_menu_overlay_latch", None)
-        if callable(clear):
+        if callable(clear) and not genuine_low:
             clear()
         return True
     if armed:
@@ -230,7 +243,7 @@ def note_menu_overlay(nav: object, pilot: object, menu_kind: str | None, armed: 
         if callable(resume):
             resume()
         clear = getattr(nav, "clear_menu_overlay_latch", None)
-        if callable(clear):
+        if callable(clear) and not genuine_low:
             clear()
     return False
 

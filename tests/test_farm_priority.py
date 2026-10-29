@@ -127,38 +127,39 @@ def test_pack_dive_hp_zero_restores_the_flee():
     assert dec.vector[0] < 0
 
 
-def test_above_quarter_runs_into_a_dense_pack():
-    """Default engage_standoff is 0. Above 25% HP a pack on top of Poe is entered.
+def test_body_floor_refuses_the_sprite_without_a_backward_shove():
+    """28px floor: do not step onto a body already inside it, and do not flee the pack.
 
-    VS_TUNE=engage_standoff=34 still grazes that ring instead of the center.
+    A gem beside that body still wins. engage_standoff=0 walks onto the center.
+    engage_standoff=34 also pushes backward.
     """
-    assert Tuning().engage_standoff == 0.0
+    assert Tuning().engage_standoff == 28.0
     inside = np.array(blob(P[0] + 18, P[1], n=10, spread=6, seed=4), np.float32)
     outside = np.array(blob(P[0] + 120, P[1], n=10, spread=10, seed=5), np.float32)
     for hp in (0.26, 1.0, None):
-        assert score_directions(inside, P, None, 0.0, hp=hp).vector[0] > 0, hp
+        step = score_directions(inside, P, None, 0.0, hp=hp)
+        assert step.vector[0] <= 0, hp
         assert score_directions(outside, P, None, 0.0, hp=hp).vector[0] > 0, hp
-    # A gem buried in the sprites is collected by walking into them.
-    buried = score_directions(inside, P, None, 0.0, gems=[(P[0] + 18, P[1])], hp=1.0)
-    assert buried.vector[0] > 0
-    # A gem off the pack still wins.
-    clear = score_directions(outside, P, None, 0.0, gems=[(P[0] - 160, P[1])], hp=1.0)
-    assert clear.vector[0] < 0
-
+    # Gem north of a body on the east: take the gem. The 34px graze shoves west.
+    beside = score_directions(
+        inside, P, None, 0.0, gems=[(P[0], P[1] - 80)], hp=1.0,
+    )
+    assert beside.vector[1] < 0 and beside.vector[0] <= 0
+    opened = Tuning(engage_standoff=0.0)
+    assert score_directions(inside, P, None, 0.0, hp=1.0, tune=opened).vector[0] > 0
     grazed = Tuning(engage_standoff=34.0)
-    on_ring = np.array([(P[0] + 34.0, P[1], 1.0)], np.float32)
-    for hp in (0.26, 1.0, None):
-        assert score_directions(inside, P, None, 0.0, hp=hp, tune=grazed).vector[0] <= 0, hp
-        assert score_directions(on_ring, P, None, 0.0, hp=hp, tune=grazed).vector[0] <= 0, hp
+    shoved = score_directions(
+        inside, P, None, 0.0, gems=[(P[0], P[1] - 80)], hp=1.0, tune=grazed,
+    )
+    assert shoved.vector[0] < 0
 
     clock = Clock()
     nav = Navigator(clock=clock, log=lambda *_: None)
     res = result(blob(P[0] + 18, P[1], n=10, spread=6, seed=4))
-    res.chest = (P[0] + 40, P[1])
+    res.gems = [(P[0], P[1] - 80)]
     vecs = run(nav, clock, res, 6, hp=1.0)
-    assert all(v[0] > 0 for v in vecs)
+    assert all(v[1] < 0 for v in vecs)
     assert nav.breakouts == 0
-    assert not nav.last.mode.startswith("ring-escape")
 
 
 def test_skeleton_phase_plows_into_the_pack_and_aims_gems():
@@ -174,16 +175,19 @@ def test_skeleton_phase_plows_into_the_pack_and_aims_gems():
     assert not skeleton_phase(320.0)  # flower window, after the 5:00 skeleton cutoff
 
     inside = np.array(blob(P[0] + 18, P[1], n=10, spread=6, seed=4), np.float32)
+    outside = np.array(blob(P[0] + 120, P[1], n=10, spread=10, seed=5), np.float32)
     for game_s in (180.0, 520.0):
         clock = Clock()
-        nav = Navigator(
-            tune=Tuning(engage_standoff=34.0), clock=clock, log=lambda *_: None,
-        )
+        nav = Navigator(clock=clock, log=lambda *_: None)
         nav.game_s = game_s
-        vecs = run(nav, clock, result(inside), 6, hp=1.0)
+        held = run(nav, clock, result(inside), 6, hp=1.0)
+        assert all(v[0] <= 0 for v in held), game_s
+        assert nav.breakouts == 0 and not nav.escaping
+        clock2 = Clock()
+        far = Navigator(clock=clock2, log=lambda *_: None)
+        far.game_s = game_s
+        vecs = run(far, clock2, result(outside), 6, hp=1.0)
         assert all(v[0] > 0 for v in vecs), game_s
-        assert nav.breakouts == 0
-        assert not nav.escaping
 
     # Closed ring during the skeleton wave is still a pack, not a breakout.
     gap = ring(480, 256, 160, 40, gap_deg=(-1, 25))
@@ -209,7 +213,11 @@ def test_skeleton_phase_plows_into_the_pack_and_aims_gems():
     assert late.gem_target_gain == 0.0
     assert late.engage_standoff == 34.0
     plowed = skeleton_plow_tune(late, 520.0, 1.0)
-    assert plowed.engage_standoff == 0.0
+    assert plowed.engage_standoff == 34.0
+    assert skeleton_plow_tune(gem_tune_for(Tuning(), 520.0), 520.0, 1.0).engage_standoff == 28.0
+    assert skeleton_plow_tune(
+        gem_tune_for(Tuning(engage_standoff=0.0), 520.0), 520.0, 1.0,
+    ).engage_standoff == 0.0
     assert plowed.gem_target_gain >= 1.4
     assert plowed.gem_gain >= Tuning().early_gem_gain
     assert plowed.farm_gain > Tuning().farm_gain

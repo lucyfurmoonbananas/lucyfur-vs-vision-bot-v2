@@ -82,6 +82,10 @@ def test_chest_overlay_clears_a_confirmed_zero_and_the_crash_flee():
 
     armed = main_mod.note_menu_overlay(nav, pilot, "chest", False)
     assert armed is True
+    # The tracker is already holding a real low read. The chest screen must not
+    # drop it; test7 re-logged critical HP on hp=0.00 every time it did.
+    assert nav._critical_on is True
+    assert not any("cleared (overlay)" in line for line in logs)
     for _ in range(6):
         pilot._hp.add(0.0)
     assert pilot.hp_low_held is True  # still the pre-menu latch; zeros during the menu do not stick
@@ -89,10 +93,25 @@ def test_chest_overlay_clears_a_confirmed_zero_and_the_crash_flee():
     assert armed is False
     assert pilot.hp_low_held is False
     assert hp_for_nav(pilot.hp, pilot.hp_blind, pilot.hp_low_held) == pytest.approx(1.0)
+    assert nav._critical_on is True
+    assert not any("cleared (overlay)" in line for line in logs)
+
+
+def test_overlay_still_clears_a_false_latch_when_hp_is_not_held_low():
+    clock = Clock()
+    logs: list[str] = []
+    nav = Navigator(clock=clock, log=logs.append)
+    pilot = MenuPilot(tap=lambda _k: None, log=logs.append)
+    for _ in range(5):
+        pilot._hp.add(1.0)
+    assert pilot.hp_low_held is False
+    run(nav, clock, result(blob(600, 256, n=8, spread=30)), 4, hp=0.12)
+    assert nav._critical_on
+    armed = main_mod.note_menu_overlay(nav, pilot, "levelup", False)
+    assert armed is True
     assert nav._critical_on is False
-    assert nav._flee_remaining == 0.0
-    assert nav.breakout is None
-    assert any("overlay" in line for line in logs)
+    assert any("cleared (overlay)" in line for line in logs)
+    main_mod.note_menu_overlay(nav, pilot, None, armed)
 
 
 def test_revive_hold_does_not_ping_pong_across_the_hemisphere():

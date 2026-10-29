@@ -65,9 +65,8 @@ def test_defaults_match_the_garlic_standoff():
     assert tune.dive_hp_lo == 0.5
     assert tune.dive_radius_scale == 0.7
     assert tune.dive_gem_gain == 1.5
-    # Default standoff is 0: above 25% HP the step runs into the pack.
-    # VS_TUNE=engage_standoff=34 still holds the scaled kernel inside the graze.
-    assert tune.engage_standoff == 0.0
+    # 28px is the body floor inside the 34px aura. 0 walks onto sprite centers.
+    assert tune.engage_standoff == 28.0
     assert tune.early_gem_target_gain >= 1.4
     assert tune.radius * tune.dive_radius_scale < Tuning(engage_standoff=34.0).engage_standoff
     assert dive_level(1.0, tune) == 1.0
