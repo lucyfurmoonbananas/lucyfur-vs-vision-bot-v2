@@ -176,9 +176,9 @@ def test_low_hp_prefers_healing_and_defense_over_duplicator():
     offer = _cards(("Duplicator", False), ("Axe", True), ("Laurel", True))
     assert choose_card(offer, hp=0.14) == 2  # Laurel shield, not Duplicator
     offer = _cards(("Duplicator", False), ("Hollow Heart", True), ("Pummarola", True))
-    assert choose_card(offer, hp=0.3) == 1
+    assert choose_card(offer, hp=0.3, game_s=100.0) == 2
     offer = _cards(("Spellbinder", True), ("Pummarola", True), ("Hollow Heart", True))
-    assert choose_card(offer, hp=0.3) == 2
+    assert choose_card(offer, hp=0.3, game_s=100.0) == 1
     # Low HP with no defense offered: a weapon level beats a luxury passive.
     offer = _cards(("Duplicator", False), ("Cross", False))
     assert choose_card(offer, hp=0.2, owned={"Garlic", "Cross"}) == 1
@@ -189,7 +189,7 @@ def test_low_hp_prefers_healing_and_defense_over_duplicator():
 
 def test_new_crowd_weapons_first_while_slots_are_free():
     owned = {"Garlic"}
-    assert choose_card(_cards(("Garlic", False), ("King Bible", True)), hp=1.0, owned=owned) == 1
+    assert choose_card(_cards(("Garlic", False), ("King Bible", True)), hp=1.0, owned=owned, game_s=100.0) == 0
     assert choose_card(_cards(("Magic Wand", True), ("Lightning Ring", True)), hp=1.0, owned=owned) == 1
     assert choose_card(_cards(("Santa Water", True), ("Lightning Ring", True), ("King Bible", True))) == 0
     # A new weapon beats a passive while slots are free.

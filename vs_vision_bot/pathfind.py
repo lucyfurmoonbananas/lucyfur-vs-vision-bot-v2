@@ -1449,6 +1449,7 @@ class Navigator:
         self._flower_on = False         # edge-trigger the flower-window log line
         self._touch_ring = False        # farm-mode breakout from a ring already on Poe
         self._crowd_ring = False        # late closing crowd, bodies still outside 42px
+        self._gems_hold_chest = False   # gems cancelled the chest commit; do not orbit-flee
         self._escape_remaining = 0.0    # >0: committed post-REVIVE escape running
         self._escape_s = 0.0            # time spent in the current escape
         self._escape_pending = False    # escape requested, heading not picked yet
@@ -1867,10 +1868,22 @@ class Navigator:
             self.game_s >= CROWD_BREAK_AFTER_S
             and cover >= t.cover_trigger
             and pts.shape[0] > 0
+            and not (skeleton_phase(self.game_s) and farming(hp, t))
         ):
             crowd = float(
                 _danger_at(pts, np.array([px]), np.array([py]), t.radius)[0]
             ) >= CROWD_BREAK_DANGER
+        # 2:00-4:20 and 8:00-10:00, above 25% HP: no ring breakout. test11 Run 2
+        # farmed cover 0.94 danger 10 through the skeletons. The touch ring
+        # stayed on once the flower graze starts (4:20): the 4:30 horde sim
+        # dies if that closing ring cannot leave.
+        if (
+            skeleton_phase(self.game_s)
+            and farming(hp, t)
+            and not flower_graze(self.game_s, t)
+        ):
+            ringed = False
+            crowd = False
         if self._escape_reason == "revive" and cover >= t.cover_trigger:
             self._revive_ring = True
         if not self._near_init:
@@ -2626,6 +2639,11 @@ class Navigator:
         # Wall commits set escaping. A commit (openable chest, dive HP) keeps
         # the chase through that escape. A flower-window breakout still leaves.
         commit = self._commit
+        # Gems outrank the chest by cancelling the commit. Orbiting anyway
+        # scores with kite_floor, which is escape mode at full HP (test15 Run 1,
+        # 2:00-5:00, breakouts=0, dive=0). Farm the gems instead of fleeing.
+        if self._gems_hold_chest:
+            return ""
         if (
             not self._leash_enabled()
             or self.tune.chest_leash_radius <= 0
@@ -2778,6 +2796,7 @@ class Navigator:
         escape = self.breakout is not None and self._escape_remaining > 0
         here = float(_danger_at(pts, np.array([px]), np.array([py]), self.tune.radius)[0])
         self._commit = self._chest_commit(hp)
+        self._gems_hold_chest = False
         if (
             farming(hp, self.tune)
             and not self._evolution_ready
@@ -2785,6 +2804,7 @@ class Navigator:
                 result.gems, px, py, gem_tune_for(self.tune, self.game_s).gem_radius,
             ) > 0
         ):
+            self._gems_hold_chest = True
             # Gems outrank the chest, so the tight-orbit lock must not steal the heading.
             # An evolution that is already ready is the exception: test14 run 3
             # cleared chest sightings for gems from the moment Soul Eater was ready.

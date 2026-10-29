@@ -285,6 +285,51 @@ def test_skeleton_phase_plows_into_the_pack_and_aims_gems():
     assert held.engage_standoff == 34.0
 
 
+def test_skeleton_window_does_not_flee_a_chest_or_a_touching_ring():
+    """test15 Run 1 at full HP, 2:00-5:00: escape mode, breakouts=0, dive=0.
+
+    A chest leash orbited with kite_floor, which turns farm off. Run 3 also
+    broke out of touching rings above 25% HP and was Lv9 at 4:00. test11 Run 2
+    farmed danger 10 through the same window. The touch ring still breaks out
+    outside the skeleton waves.
+    """
+    from vs_vision_bot.pathfind import TOUCH_MASS, _threat_mass
+
+    clock = Clock()
+    nav = Navigator(clock=clock, log=lambda *_: None)
+    nav.game_s = 180.0
+    pack = blob(480, 120, n=20, spread=40, seed=1)
+    res = result(pack, gems=[(300.0, 256.0), (320.0, 280.0)])
+    res.chest = (233.0, 81.0)
+    vecs = run(nav, clock, res, 6, hp=1.0)
+    assert nav.breakouts == 0 and not nav.escaping
+    assert nav.last.mode.startswith("farm")
+    assert nav.dive > 0
+    assert all(v[0] < 0 for v in vecs)
+
+    touch = np.array(ring(P[0], P[1], 36, 24), np.float32)
+    assert _threat_mass(touch, P[0], P[1], 42.0) >= TOUCH_MASS
+    skel = Navigator(clock=Clock(), log=lambda *_: None)
+    skel.game_s = 180.0
+    run(skel, skel.clock, result(touch), 6, hp=0.44)
+    assert skel.breakouts == 0 and not skel.escaping
+    assert "farm" in skel.last.mode
+
+    early = Navigator(clock=Clock(), log=lambda *_: None)
+    early.game_s = 74.0
+    run(early, early.clock, result(touch), 6, hp=1.0)
+    assert early.breakouts > 0 or early.escaping
+    assert "farm" not in early.last.mode
+
+    # 4:20-5:00 is still the skeleton window, and also the flower graze.
+    # A ring already on Poe has to be able to leave; the 4:30 horde sim dies
+    # if this breakout is suppressed.
+    flower = Navigator(clock=Clock(), log=lambda *_: None)
+    flower.game_s = 270.0
+    run(flower, flower.clock, result(touch), 6, hp=1.0)
+    assert flower.breakouts > 0 or flower.escaping
+
+
 def test_evolution_ready_walks_a_chest_past_gems():
     """test14 run 3: Soul Eater was ready and chest sightings were cleared for gems.
 

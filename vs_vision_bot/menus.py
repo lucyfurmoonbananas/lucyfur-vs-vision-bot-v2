@@ -1423,11 +1423,10 @@ def _card_rank(
             return (6, 0)
     if name == "Santa Water" and _santa_water_now(hp):
         # No tracked Garlic: the old crowd order (Santa Water, then King Bible).
-        if not levels or levels.get("Garlic", 0) <= 0:
+        # A new Santa Water also beats a Garlic level. A Santa level does not.
+        if not levels or levels.get("Garlic", 0) <= 0 or levels.get("Santa Water", 0) <= 0:
             return (2, 0)
-        # L3+ beats a Garlic level (3). Before that, (3, 1) still beats every
-        # other new weapon, so Ebony Wings cannot take the second slot.
-        return (1, 0) if _santa_water_ready(levels) else (3, 1)
+        return (3, 1)
     if c.new and name in WEAPONS:
         if not slots_free:
             return (35, idx)
@@ -1606,7 +1605,9 @@ def _focused_rank(
     # is L3 it also beats a Garlic level. Before that, (4, 2) loses to the
     # Garlic level at (4, 0) and beats Ebony Wings and the other extra weapons.
     if name == "Santa Water" and _santa_water_now(hp):
-        if _santa_water_ready(levels):
+        # Not held yet: a new Santa Water beats a Garlic level. Once it is
+        # held, the Garlic level leads again, including after Garlic is L3.
+        if levels.get("Santa Water", 0) <= 0:
             return (2, 0, "second")
         return (4, 2, "second")
     # Above 25% HP, once Garlic is finished: the passive of a maxed weapon
@@ -1823,6 +1824,102 @@ class CardPick:
     reason: str  # main, partner, second, or fallback
 
 
+# Before 10:00 the build is these seven cards. Anything else waits.
+BUILD_ITEMS: tuple[str, ...] = (
+    "Garlic", "Pummarola", "Santa Water", "Attractorb",
+    "King Bible", "Spellbinder", "Candelabrador",
+)
+BUILD_UNTIL_S = 600.0
+# Explicitly never taken while a build card is on the screen, at any HP.
+BANNED_WHILE_BUILD: frozenset[str] = frozenset({
+    "Crown", "Stone Mask", "Laurel", "Clock Lancet", "Fire Wand",
+    "Tirajisú", "Tiragisú",
+})
+# Armor and these heals may replace a build card only at or below 25% HP.
+BUILD_LOW_HP = 0.25
+BUILD_LOW_TAKES: tuple[str, ...] = ("Floor Chicken", "Armor", "Hollow Heart")
+
+
+def _missing_held_passive(name: str, levels: dict[str, int]) -> bool:
+    """True when the local held-partner ranker would claim ``name``.
+
+    That function is added by the uncommitted level-up patch. Without it,
+    Armor stays off the build list above 25% HP.
+    """
+    fn = globals().get("_held_partner_name")
+    if fn is None or not name:
+        return False
+    return fn(name, levels) is not None
+
+
+def _build_window(game_s: float | None) -> bool:
+    """True before 10:00. An unknown clock keeps the ranker the local commits use."""
+    return game_s is not None and game_s < BUILD_UNTIL_S
+
+
+def _build_screen_pick(
+    cards: list[Card],
+    hp: float | None,
+    levels: dict[str, int] | None,
+    game_s: float | None,
+) -> tuple[int, str] | None:
+    """Pick a build card before 10:00 when one is offered.
+
+    Above 25% HP a new Santa Water beats a Garlic level while Santa Water is
+    not yet held. A Garlic level beats every other build card. Armor and a
+    heal (Floor Chicken, Hollow Heart) are legal only at hp <= 0.25. Crown,
+    Stone Mask, Laurel, Clock Lancet, Fire Wand and Tirajisú never win while
+    a build card is on the screen.
+    """
+    if not _build_window(game_s):
+        return None
+    visible = [
+        c for c in cards
+        if not (c.score and c.score < NAME_RETRY_BELOW)
+    ]
+    if not any(c.name in BUILD_ITEMS for c in visible):
+        return None
+    held = levels or {}
+    low = hp is not None and hp <= BUILD_LOW_HP
+    santa_new_wins = (hp is None or hp > BUILD_LOW_HP) and held.get("Santa Water", 0) <= 0
+
+    def rank(i: int) -> tuple:
+        card = cards[i]
+        name = card.name
+        if card.score and card.score < NAME_RETRY_BELOW:
+            return (9, i)
+        if low and name in BUILD_LOW_TAKES:
+            return (0, BUILD_LOW_TAKES.index(name), i)
+        # The local patch ranks a missing passive (Armor for a held Runetracer)
+        # above a new King Bible. It stays under Garlic and Pummarola.
+        if _missing_held_passive(name, held) and name not in ("Garlic", "Pummarola"):
+            return (4, i)
+        if name not in BUILD_ITEMS or name in BANNED_WHILE_BUILD:
+            return (9, i)
+        if name == "Santa Water" and card.new and santa_new_wins:
+            return (1, 0, i)
+        if name == "Garlic":
+            return (2, 0 if not card.new else 1, i)
+        if name == "Pummarola":
+            return (3, 0, i)
+        return (5, BUILD_ITEMS.index(name), i)
+
+    best = min(range(len(cards)), key=rank)
+    tier = rank(best)[0]
+    if tier >= 9:
+        return None
+    name = cards[best].name
+    if name == "Garlic":
+        reason = "main"
+    elif name == "Santa Water" or name == "King Bible":
+        reason = "second"
+    elif name in ("Pummarola", "Attractorb", "Spellbinder") or _missing_held_passive(name, held):
+        reason = "partner"
+    else:
+        reason = "fallback"
+    return best, reason
+
+
 def choose_pick(
     cards: list[Card],
     hp: float | None = None,
@@ -1867,6 +1964,12 @@ def _choose_pick_timed(
     critical: bool,
     low_held: bool,
 ) -> CardPick:
+    # A capped loadout still takes gold (or Floor Chicken at low HP). A new
+    # King Bible on that screen is not a reason to skip the coin bag.
+    if not (levels and items_fully_maxed(levels, evolved)):
+        build = _build_screen_pick(cards, hp, levels, game_s)
+        if build is not None:
+            return CardPick(build[0], build[1])
     eff, certain = assess_inventory(cards, levels)
     if not certain:
         if levels is not None:
