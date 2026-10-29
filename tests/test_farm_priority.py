@@ -283,3 +283,72 @@ def test_skeleton_phase_plows_into_the_pack_and_aims_gems():
     held = skeleton_plow_tune(late, 520.0, 0.25)
     assert held.gem_target_gain == 0.0
     assert held.engage_standoff == 34.0
+
+
+def test_evolution_ready_walks_a_chest_past_gems():
+    """test14 run 3: Soul Eater was ready and chest sightings were cleared for gems.
+
+    The ~11:4x chest did open (OCR ``1id4s``, still ``Treasure Found!``, opened 3).
+    The other sightings were seek-then-clear. With an evolution ready, the chest
+    wins over a gem in range and the seek stays up.
+    """
+    clock = Clock()
+    lines: list[str] = []
+    nav = Navigator(clock=clock, log=lines.append)
+    nav.set_build_state(True, False)
+    nav.game_s = 700.0
+    pack = blob(480, 120, n=10, spread=24, seed=1)
+    both = result(pack, gems=[(300.0, 256.0)])
+    both.chest = (720.0, 256.0)
+    vecs = run(nav, clock, both, 6, hp=1.0)
+    assert all(v[0] > 0 for v in vecs)
+    assert any(ln.startswith("[chest] seek") for ln in lines)
+    assert not any(ln.startswith("[chest] clear") for ln in lines)
+
+    # No evolution: the same screen still walks the gem, not the chest.
+    clock2 = Clock()
+    plain = Navigator(clock=clock2, log=lambda *_: None)
+    plain.game_s = 700.0
+    vecs = run(plain, clock2, both, 6, hp=1.0)
+    assert all(v[0] < 0 for v in vecs)
+
+
+def test_late_closing_crowd_breaks_out_above_quarter_hp():
+    """test14 run 3, 16:19: farmed at hp 0.36-0.50 with danger 4-6, then 17.
+
+    The bodies were outside the 42px ring. After 10:00 that closed crowd
+    breaks out. The same ring early, a 160px ring, and a one-sided pack do not.
+    """
+    from vs_vision_bot.pathfind import TOUCH_MASS, _danger_at, _threat_mass
+
+    close = np.array(ring(P[0], P[1], 80, 20), np.float32)
+    touch = _threat_mass(close, P[0], P[1], 42.0)
+    danger = float(_danger_at(close, np.array([P[0]]), np.array([P[1]]), Tuning().radius)[0])
+    assert touch < TOUCH_MASS
+    assert danger >= 4.0
+
+    clock = Clock()
+    nav = Navigator(clock=clock, log=lambda *_: None)
+    nav.game_s = 960.0
+    run(nav, clock, result(close), 6, hp=0.45)
+    assert nav.breakouts > 0 or nav.escaping
+    assert "farm" not in nav.last.mode
+
+    early = Navigator(clock=Clock(), log=lambda *_: None)
+    early.game_s = 74.0
+    run(early, early.clock, result(close), 6, hp=0.45)
+    assert early.breakouts == 0 and not early.escaping
+    assert "farm" in early.last.mode
+
+    far = np.array(ring(P[0], P[1], 160, 24), np.float32)
+    held = Navigator(clock=Clock(), log=lambda *_: None)
+    held.game_s = 960.0
+    run(held, held.clock, result(far), 4, hp=0.45)
+    assert held.breakouts == 0 and not held.escaping
+
+    pack = blob(680, 256, n=16, spread=28, seed=3)
+    diver = Navigator(clock=Clock(), log=lambda *_: None)
+    diver.game_s = 960.0
+    vecs = run(diver, diver.clock, result(pack), 6, hp=0.45)
+    assert diver.breakouts == 0 and not diver.escaping
+    assert all(v[0] > 0 for v in vecs)

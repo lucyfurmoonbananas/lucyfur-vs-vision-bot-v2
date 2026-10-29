@@ -1294,21 +1294,17 @@ def _santa_water_now(hp: float | None) -> bool:
     return hp is None or hp > 0.25
 
 
-# test11 Run 2 (Lv99) took Garlic and Attractorb first and Santa Water at 1:49.
-# test12 took it at 0:08 and Garlic was still 2-4 at 3:00.
+# test14 offered Santa Water at 0:08 and took Ebony Wings. Santa Water is a
+# legal second weapon immediately. It beats a Garlic level only at L3+.
 SANTA_WATER_MIN_GARLIC = 3
-SANTA_WATER_AFTER_S = 30.0
 _pick_game_s: contextvars.ContextVar[float | None] = contextvars.ContextVar(
     "vs_pick_game_s", default=None
 )
 
 
 def _santa_water_ready(levels: dict[str, int] | None) -> bool:
-    """Garlic is L3+, or the run is past 0:30. Before that, level Garlic."""
-    if (levels or {}).get("Garlic", 0) >= SANTA_WATER_MIN_GARLIC:
-        return True
-    game_s = _pick_game_s.get()
-    return game_s is not None and game_s >= SANTA_WATER_AFTER_S
+    """Garlic is L3+. The clock no longer gates it. Before that, a Garlic level leads."""
+    return (levels or {}).get("Garlic", 0) >= SANTA_WATER_MIN_GARLIC
 
 
 def _armor_upgrade_yields_to_garlic(
@@ -1349,16 +1345,11 @@ def _extra_weapon_capped(name: str | None, new: bool, levels: dict[str, int] | N
     """
     if not new or not name or name not in WEAPONS:
         return False
-    # Santa Water is always allowed once Garlic is L3+ or the clock is past
-    # ~1:30, including when the six slots are full. Before that gate it is an
-    # extra weapon. Pentagram keeps its own clock. King Bible is allowed only
-    # as the second damage weapon; once two are held it is a third weapon.
-    if name == "Santa Water":
-        # No Garlic on the tracker: keep the old crowd rank. A known Garlic
-        # under 3 before 1:30 is an extra weapon, not the early pick.
-        if not levels or levels.get("Garlic", 0) <= 0:
-            return False
-        return not _santa_water_ready(levels)
+    # Santa Water is always a legal second weapon, including when the six
+    # slots are full. Pentagram keeps its own clock. King Bible is allowed
+    # only as the second damage weapon; once two are held it is a third weapon.
+    if name in ("Santa Water", "Garlic", "Pentagram"):
+        return False
     if name in ("Garlic", "Pentagram"):
         return False
     if name in CORE_SECOND_WEAPONS and not _holds_two_damage_weapons(levels):
@@ -1373,9 +1364,6 @@ def _capped_weapon_key(name: str) -> int:
     add a second damage weapon. A real weapon beats the avoid list. Card order
     breaks whatever is left, which is why test11 opened Axe, then Knife, then Whip.
     """
-    if name == "Santa Water":
-        # Before the gate this is a capped click. It must not beat Magic Wand.
-        return 1000
     if name in NO_DAMAGE_WEAPONS:
         return 0
     if name not in AVOID:
@@ -1411,15 +1399,11 @@ def _card_rank(
         garlic_lv = (levels or {}).get("Garlic", 0)
         # A new Laurel is a third weapon once two damage weapons are held.
         # The low-HP shield shortcut must not spend that slot.
-        # Above 25% HP, Armor and Hollow Heart stay behind Santa Water.
-        behind_santa = (
-            name in ("Armor", "Hollow Heart", "Laurel", "Pummarola")
-            and _santa_water_now(hp)
-            and 0 < garlic_lv < WEAPON_MAX_LEVEL
-        )
+        # While Garlic is under 8, only Floor Chicken outranks a Garlic level.
+        garlic_leads = name != CHICKEN and 0 < garlic_lv < WEAPON_MAX_LEVEL
         third = c.new and name in WEAPONS and _holds_two_damage_weapons(levels)
         if (
-            not behind_santa
+            not garlic_leads
             and not third
             and not _armor_upgrade_yields_to_garlic(name, c.new, hp, garlic_lv)
         ):
@@ -1437,9 +1421,13 @@ def _card_rank(
         if levels and 0 < levels.get("Garlic", 0) < 8 and _santa_water_now(hp):
             # Behind Santa Water (4) and the survival group (5). Still beats a capped weapon.
             return (6, 0)
-    if name == "Santa Water" and _santa_water_now(hp) and _santa_water_ready(levels):
-        # After the gate this beats a Garlic level (3) and Pummarola (5).
-        return (1, 0)
+    if name == "Santa Water" and _santa_water_now(hp):
+        # No tracked Garlic: the old crowd order (Santa Water, then King Bible).
+        if not levels or levels.get("Garlic", 0) <= 0:
+            return (2, 0)
+        # L3+ beats a Garlic level (3). Before that, (3, 1) still beats every
+        # other new weapon, so Ebony Wings cannot take the second slot.
+        return (1, 0) if _santa_water_ready(levels) else (3, 1)
     if c.new and name in WEAPONS:
         if not slots_free:
             return (35, idx)
@@ -1566,6 +1554,23 @@ def _owned_weapon_level_offered(cards: list[Card], levels: dict[str, int]) -> bo
     return False
 
 
+def _maxed_weapon_partner_rank(name: str, levels: dict[str, int]) -> int | None:
+    """Subrank for the passive of a weapon already at 8. A lower level comes first.
+
+    test14 run 3 left Spellbinder at L1 after King Bible hit 8, and spent the
+    picks on Armor and a new Runetracer. Empty Tome does not qualify while
+    Magic Wand is under 8. The birds are weapons, not this passive.
+    """
+    if not name or name in WEAPONS or name in EVOLUTIONS or name in BIRD_WEAPONS:
+        return None
+    if not any(
+        lv >= WEAPON_MAX_LEVEL and partner_of(weapon) == name
+        for weapon, lv in levels.items()
+    ):
+        return None
+    return 40 + int(levels.get(name, 0))
+
+
 def _focused_rank(
     c: Card,
     idx: int,
@@ -1597,11 +1602,22 @@ def _focused_rank(
     if name in EVOLUTIONS and not c.new:
         evo = EVOLUTION_PAIRS.get(main, (None, ""))[1] if main else ""
         return (0, EVOLUTIONS.index(name), "main" if name == evo else "second")
-    # After Garlic is L3 or the clock is past 0:30, Santa Water wins above
-    # 25% HP, including over a Garlic level and Pummarola. This return is
-    # before the slot cap, so a full weapon bar does not block it.
-    if name == "Santa Water" and _santa_water_now(hp) and _santa_water_ready(levels):
-        return (2, 0, "second")
+    # Santa Water is always a legal second weapon above 25% HP. Once Garlic
+    # is L3 it also beats a Garlic level. Before that, (4, 2) loses to the
+    # Garlic level at (4, 0) and beats Ebony Wings and the other extra weapons.
+    if name == "Santa Water" and _santa_water_now(hp):
+        if _santa_water_ready(levels):
+            return (2, 0, "second")
+        return (4, 2, "second")
+    # Above 25% HP, once Garlic is finished: the passive of a maxed weapon
+    # beats Armor (defense tier 1 under half HP) and a new Runetracer. At or
+    # below 25% HP the defense block still wins. While Garlic is under 8 this
+    # stays off so a Garlic level keeps the screen.
+    garlic_open = main == "Garlic" and 0 < main_lv < WEAPON_MAX_LEVEL
+    if _santa_water_now(hp) and not garlic_open:
+        partner_sub = _maxed_weapon_partner_rank(name, levels)
+        if partner_sub is not None:
+            return (0, partner_sub, "partner")
     if (
         c.new
         and not protect_weapons
@@ -1622,14 +1638,13 @@ def _focused_rank(
         return (6, 0, "fallback")
     if low and name in DEFENSE:
         third = c.new and name in WEAPONS and _holds_two_damage_weapons(levels)
-        behind_santa = (
-            name in ("Armor", "Hollow Heart", "Laurel", "Pummarola")
-            and _santa_water_now(hp)
+        garlic_leads = (
+            name != CHICKEN
             and main == "Garlic"
             and 0 < main_lv < WEAPON_MAX_LEVEL
         )
         if (
-            not behind_santa
+            not garlic_leads
             and not third
             and not _armor_upgrade_yields_to_garlic(name, c.new, hp, main_lv if main == "Garlic" else 0)
         ):
@@ -1640,13 +1655,10 @@ def _focused_rank(
     if main is None and name in ("Garlic", "Magic Wand"):
         return (2, 0 if name == "Garlic" else 1, "main")
     if main and name == partner_of(main) and levels.get(name, 0) <= 0:
-        # test13 took Pummarola over a Garlic level at 1:11. While Garlic is
-        # under 8 and HP is above 25%, the Garlic level comes first.
-        if (
-            main == "Garlic"
-            and 0 < main_lv < WEAPON_MAX_LEVEL
-            and _santa_water_now(hp)
-        ):
+        # test14 took Pummarola at hp=0.25 and Tirajisú at hp=0.28 over a
+        # Garlic level. While Garlic is under 8 the level stays first, at
+        # any HP. Floor Chicken is the defense exception.
+        if main == "Garlic" and 0 < main_lv < WEAPON_MAX_LEVEL:
             return (4, 1, "partner")
         return (3, 0, "partner")
     if main and name == main and not c.new and main_lv < WEAPON_MAX_LEVEL:
