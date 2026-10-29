@@ -89,8 +89,9 @@ def test_static_priority_still_spreads_when_levels_are_unknown():
     """No tracker: the old crowd-weapon rank is the uncertain-inventory fallback."""
     owned = {"Garlic"}
     cards = [_card("Garlic", False), _card("King Bible", True), _card("Lightning Ring", True)]
-    assert choose_card(cards, hp=1.0, owned=owned) == 1
-    assert choose_pick(cards, hp=1.0, owned=owned).reason == "fallback"
+    # A Garlic level beats a new crowd weapon. The old spread took King Bible.
+    assert choose_card(cards, hp=1.0, owned=owned) == 0
+    assert choose_pick(cards, hp=1.0, owned=owned).reason == "main"
 
 
 def test_scripted_offers_max_garlic_then_one_second_weapon():
@@ -98,7 +99,7 @@ def test_scripted_offers_max_garlic_then_one_second_weapon():
     levels = {"Garlic": 1}
     garlic_offers = [
         [("King Bible", True), ("Lightning Ring", True), ("Garlic", False)],
-        # Garlic is still 2 and the clock is early: do not take Santa Water yet.
+        # A new Santa Water beats the Garlic level while Santa Water is not held.
         [("Santa Water", True), ("Garlic", False), ("Knife", True)],
         # Garlic just hit 3. Santa Water is now the pick on a weapon-only screen.
         [("Santa Water", True), ("Magic Wand", True), ("Knife", True)],
@@ -106,17 +107,17 @@ def test_scripted_offers_max_garlic_then_one_second_weapon():
     ]
     # Five more Garlic levels (offer 3 reaches 4, then 4 -> 8).
     garlic_offers += [
-        [("Armor", True), ("Garlic", False), ("King Bible", True)] for _ in range(5)
+        [("Armor", True), ("Garlic", False), ("King Bible", True)] for _ in range(6)
     ]
     picks, reasons = _play(garlic_offers, levels)
     assert picks[0] == "Garlic" and reasons[0] == "main"
-    assert picks[1] == "Garlic" and reasons[1] == "main"
+    assert picks[1] == "Santa Water" and reasons[1] == "second"
     assert picks[2] == "Santa Water" and reasons[2] == "second"
     assert picks[3] == "Pummarola" and reasons[3] == "partner"
-    assert picks[4:] == ["Garlic"] * 5
-    assert reasons[4:] == ["main"] * 5
+    assert picks[4:] == ["Garlic"] * 6
+    assert reasons[4:] == ["main"] * 6
     assert levels["Garlic"] == 8
-    assert levels["Santa Water"] == 1  # the one forced level, not a second project yet
+    assert levels["Santa Water"] == 2
     assert levels["Pummarola"] == 1
     assert evolution_ready(levels)
 
@@ -131,7 +132,7 @@ def test_scripted_offers_max_garlic_then_one_second_weapon():
     picks, reasons = _play(later, levels)
     assert picks == ["Santa Water", "Attractorb", "Santa Water", "Hollow Heart"]
     assert reasons == ["second", "partner", "second", "fallback"]
-    assert levels["Santa Water"] == 3
+    assert levels["Santa Water"] == 4
     assert levels["Attractorb"] == 1
     assert "King Bible" not in levels and "Magic Wand" not in levels and "Axe" not in levels
 
@@ -158,10 +159,10 @@ def test_magic_wand_is_main_when_garlic_is_not_held():
     levels = {"Magic Wand": 2}
     cards = _offer([("Garlic", True), ("Magic Wand", False), ("Empty Tome", True)], levels)
     pick = choose_pick(cards, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Empty Tome" and pick.reason == "partner"
+    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
     cards = _offer([("Garlic", True), ("Magic Wand", False), ("King Bible", True)], levels)
     pick = choose_pick(cards, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Magic Wand" and pick.reason == "main"
+    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
     # Neither held: Garlic is the main to acquire, not a crowd weapon.
     cards = _offer([("King Bible", True), ("Magic Wand", True), ("Garlic", True)], {})
     pick = choose_pick(cards, owned=set(), levels={})
@@ -203,7 +204,7 @@ def test_santa_water_is_the_first_second_weapon_and_armor_l2_yields():
     deep = {"Garlic": 6, "Armor": 1}
     cards = _offer([("Garlic", False), ("Armor", False)], deep)
     pick = choose_pick(cards, hp=0.20, owned=set(deep), levels=deep)
-    assert cards[pick.index].name == "Garlic"
+    assert cards[pick.index].name == "Armor"
 
     # test7 run 3: Fire Wand as a third weapon while Garlic is 3.
     two = {"Garlic": 3, "Magic Wand": 1}
@@ -277,11 +278,11 @@ def test_test10_garlic_and_candle_beat_santa_water_and_no_third_weapon():
         [("Santa Water", False), ("Laurel", True), ("Candelabrador", True), ("Parm Aegis", True)],
         {"Garlic": 3, "Santa Water": 2, "Hollow Heart": 2}, hp=0.36, game_s=138,
     ) == "Santa Water"
-    # Garlic is already 3, so the gate is open and Santa Water wins above 25% HP.
+    # Santa Water is already held, so the Garlic level leads again.
     assert picked(
         [("Santa Water", False), ("Garlic", False), ("Whip", True)],
         {"Garlic": 3, "Santa Water": 1}, hp=1.0, game_s=66,
-    ) == "Santa Water"
+    ) == "Garlic"
     # Run 3, 19s had no passive, so a click was forced. With a passive on the
     # same kind of screen the third weapon is not opened.
     two = {"Garlic": 1, "King Bible": 1}
@@ -295,11 +296,11 @@ def test_test10_garlic_and_candle_beat_santa_water_and_no_third_weapon():
         [("Heaven Sword", True), ("Axe", True), ("Peachone", True)],
         {"Garlic": 1}, hp=1.0, game_s=7,
     ) != "Axe"
-    # Garlic is already 3, so Santa Water wins over the level and the partner.
+    # Santa Water is already held. The Garlic level beats it and the candle.
     assert picked(
         [("Candelabrador", True), ("Garlic", False), ("Santa Water", False)],
         {"Garlic": 3, "Santa Water": 1}, hp=1.0, game_s=66,
-    ) == "Santa Water"
+    ) == "Garlic"
     assert picked(
         [("Candelabrador", True), ("Pummarola", True), ("Santa Water", True)],
         {"Garlic": 3}, hp=1.0, game_s=50,
@@ -323,7 +324,7 @@ def test_test12_santa_water_waits_for_garlic_or_ninety_seconds():
     assert picked(
         [("Santa Water", True), ("Garlic", False), ("Knife", True)],
         {"Garlic": 2}, hp=1.0, game_s=19,
-    ) == "Garlic"
+    ) == "Santa Water"
     # 1:49 on the Lv99 run, Garlic still 2. The clock opens the gate.
     assert picked(
         [("Empty Tome", False), ("Axe", True), ("Cross", True), ("Santa Water", True)],
@@ -382,7 +383,7 @@ def test_test11_cap_and_santa_water_above_quarter_hp():
     assert picked(
         [("Hollow Heart", True), ("Tirajisú", True), ("Candelabrador", True)],
         two, hp=1.0, game_s=38,
-    ) == "Hollow Heart"
+    ) == "Candelabrador"
     # 126s weapon-only, and the same screen with a passive.
     assert picked(
         [("Whip", True), ("Lightning Ring", True), ("Pako Battiliar", True)],
@@ -396,7 +397,7 @@ def test_test11_cap_and_santa_water_above_quarter_hp():
     assert picked(
         [("King Bible", True), ("Bracer", True)],
         {"Garlic": 3, "Santa Water": 1}, hp=1.0, game_s=100,
-    ) == "Bracer"
+    ) == "King Bible"
     # 155s. Armor outranked a Garlic level at 36% HP.
     assert picked(
         [("Whip", False), ("Garlic", False), ("Armor", True)],
@@ -425,6 +426,86 @@ def test_test11_cap_and_santa_water_above_quarter_hp():
     ) == "Garlic"
 
 
+def test_test15_build_card_before_ten_minutes():
+    """test15 Run 1 at 1:10, full HP: Garlic / Cross / Santa Water took Garlic L2.
+
+    Above 25% HP a new Santa Water beats a Garlic level while Santa Water is
+    not held. Garlic still beats every other card. Before 10:00 a build card
+    on the screen beats Crown, Stone Mask, Laurel, Clock Lancet, Fire Wand
+    and Tirajisú. Armor and a heal win only at hp <= 0.25.
+    """
+    def picked(spec, levels, hp=1.0, game_s=70.0):
+        cards = _offer(spec, levels)
+        pick = choose_pick(cards, hp=hp, owned=set(levels), game_s=game_s, levels=dict(levels))
+        return cards[pick.index].name
+
+    assert picked(
+        [("Garlic", False), ("Cross", True), ("Santa Water", True)],
+        {"Garlic": 1}, hp=1.0, game_s=70,
+    ) == "Santa Water"
+    assert picked(
+        [("Garlic", False), ("Santa Water", False), ("Cross", True)],
+        {"Garlic": 2, "Santa Water": 1}, hp=1.0, game_s=90,
+    ) == "Garlic"
+    assert picked(
+        [("Pummarola", True), ("Garlic", False), ("Runetracer", True)],
+        {"Garlic": 2}, hp=1.0, game_s=100,
+    ) == "Garlic"
+    assert picked(
+        [("Laurel", True), ("Stone Mask", True), ("Pummarola", True)],
+        {"Garlic": 2}, hp=1.0, game_s=103,
+    ) == "Pummarola"
+    assert picked(
+        [("Bracer", True), ("Peachone", True), ("Crown", True)],
+        {"Garlic": 4, "Pummarola": 2}, hp=0.92, game_s=216,
+    ) == "Crown"  # no build card on the screen; the ban does not invent one
+    assert picked(
+        [("Clock Lancet", True), ("King Bible", True), ("Phiera Der Tuphello", True)],
+        {"Garlic": 1}, hp=1.0, game_s=22,
+    ) == "King Bible"
+    assert picked(
+        [("Whip", True), ("Armor", True), ("Clock Lancet", False)],
+        {"Garlic": 1, "Clock Lancet": 1}, hp=1.0, game_s=45,
+    ) == "Clock Lancet"  # no build card offered
+    assert picked(
+        [("Candelabrador", False), ("Duplicator", True), ("King Bible", True), ("Armor", True)],
+        {"Garlic": 3, "Candelabrador": 1}, hp=0.53, game_s=166,
+    ) == "King Bible"
+    assert picked(
+        [("Candelabrador", False), ("Fire Wand", False), ("King Bible", True)],
+        {"Garlic": 3, "Candelabrador": 1, "Fire Wand": 1}, hp=0.36, game_s=209,
+    ) == "King Bible"
+    assert picked(
+        [("Spellbinder", False), ("Candelabrador", True), ("Pummarola", True)],
+        {"Garlic": 2, "Spellbinder": 1}, hp=0.47, game_s=139,
+    ) == "Pummarola"
+    assert picked(
+        [("Garlic", False), ("Armor", False)],
+        {"Garlic": 3, "Armor": 1}, hp=0.25, game_s=200,
+    ) == "Armor"
+    assert picked(
+        [("Garlic", False), ("Armor", True)],
+        {"Garlic": 3}, hp=0.26, game_s=200,
+    ) == "Garlic"
+    assert picked(
+        [("Garlic", False), ("Tirajisú", True)],
+        {"Garlic": 3}, hp=0.2, game_s=200,
+    ) == "Garlic"
+    assert picked(
+        [("Garlic", False), ("Floor Chicken", True)],
+        {"Garlic": 3}, hp=0.2, game_s=200,
+    ) == "Floor Chicken"
+    # The Santa-versus-Garlic rule is not limited to the first 10 minutes.
+    assert picked(
+        [("Garlic", False), ("Cross", True), ("Santa Water", True)],
+        {"Garlic": 1}, hp=1.0, game_s=700,
+    ) == "Santa Water"
+    assert picked(
+        [("Garlic", False), ("Santa Water", False)],
+        {"Garlic": 4, "Santa Water": 2}, hp=1.0, game_s=700,
+    ) == "Garlic"
+
+
 def test_test14_santa_water_is_the_second_weapon_and_garlic_survives_low_hp():
     """test14 run 2 took Ebony Wings over Santa Water at 0:08.
 
@@ -443,7 +524,7 @@ def test_test14_santa_water_is_the_second_weapon_and_garlic_survives_low_hp():
     assert picked(
         [("Santa Water", True), ("Garlic", False), ("Knife", True)],
         {"Garlic": 2}, hp=1.0, game_s=8,
-    ) == "Garlic"
+    ) == "Santa Water"
     assert picked(
         [("Pummarola", False), ("Garlic", False), ("Runetracer", True)],
         {"Garlic": 2, "Pummarola": 1}, hp=0.25, game_s=144,
@@ -524,10 +605,10 @@ def test_survival_passives_after_the_partner_beat_a_new_weapon():
     cards = _offer([("Hollow Heart", True), ("Pummarola", False), ("Armor", True)], levels)
     pick = choose_pick(cards, hp=1.0, owned=set(levels), levels=levels)
     assert cards[pick.index].name == "Pummarola"
-    # Floor Chicken is the low-HP exception. Armor is not.
+    # At or below 25% HP Armor may beat a Garlic level. Floor Chicken does too.
     cards = _offer([("Garlic", False), ("Armor", True)], levels)
     pick = choose_pick(cards, hp=0.2, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
+    assert cards[pick.index].name == "Armor" and pick.reason == "fallback"
     cards = _offer([("Garlic", False), ("Floor Chicken", True)], levels)
     pick = choose_pick(cards, hp=0.2, owned=set(levels), levels=levels)
     assert cards[pick.index].name == "Floor Chicken"
@@ -543,14 +624,15 @@ def test_level_ocr_far_from_the_tracker_falls_back_to_spreading():
     cards = [_card("Garlic", False, level=3), _card("King Bible", True)]
     pick = choose_pick(cards, owned=set(levels), levels=levels)
     assert cards[pick.index].name == "Garlic" and pick.reason == "main"
-    # A wild OCR level is not an inventory. Old rank: new King Bible beats Garlic.
+    # A wild OCR level is not an inventory, but the card is still Garlic. A
+    # Garlic level beats a new King Bible instead of spreading to it.
     cards = [_card("Garlic", False, level=6), _card("King Bible", True)]
     pick = choose_pick(cards, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "King Bible" and pick.reason == "fallback"
+    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
     # A shaky name is the same fallback, and the tracker is not rewritten.
     cards = [_card("Garlic", False, level=2, score=0.7), _card("King Bible", True)]
     pick = choose_pick(cards, owned=set(levels), levels=levels)
-    assert pick.reason == "fallback" and cards[pick.index].name == "King Bible"
+    assert pick.reason == "second" and cards[pick.index].name == "King Bible"
     eff, certain = assess_inventory(cards, levels)
     assert certain is False and eff.get("Garlic") == 2
 
@@ -576,7 +658,7 @@ def test_birds_are_a_second_project_after_the_main_is_maxed():
     levels = {"Garlic": 8, "Pummarola": 1, "Peachone": 1}
     cards = _offer([("Ebony Wings", True), ("Peachone", False), ("King Bible", True)], levels)
     pick = choose_pick(cards, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Ebony Wings" and pick.reason == "partner"
+    assert cards[pick.index].name == "King Bible" and pick.reason == "second"
     levels["Ebony Wings"] = 1
     cards = _offer([("Ebony Wings", False), ("Peachone", False), ("Santa Water", True)], levels)
     pick = choose_pick(cards, owned=set(levels), levels=levels)
@@ -1114,12 +1196,12 @@ def test_test13_garlic_then_pummarola_and_santa_after_thirty_seconds():
     assert picked(
         [("Santa Water", True), ("Garlic", False), ("Knife", True)],
         {"Garlic": 2}, hp=1.0, game_s=19,
-    ) == "Garlic"
-    # Past the gate, Santa Water beats the Garlic level above 25% HP.
+    ) == "Santa Water"
+    # Santa Water is already held, so the Garlic level leads again.
     assert picked(
         [("Garlic", False), ("Santa Water", False), ("Whip", True)],
         {"Garlic": 4, "Santa Water": 1}, hp=0.75, game_s=200,
-    ) == "Santa Water"
+    ) == "Garlic"
     assert picked(
         [("Santa Water", True), ("Armor", True)],
         {"Garlic": 4}, hp=0.25, game_s=200,
