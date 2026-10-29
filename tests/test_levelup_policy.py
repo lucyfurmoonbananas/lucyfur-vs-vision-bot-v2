@@ -107,7 +107,7 @@ def test_scripted_offers_max_garlic_then_one_second_weapon():
     ]
     picks, reasons = _play(garlic_offers, levels)
     assert picks[0] == "Garlic" and reasons[0] == "main"
-    assert picks[1] == "Santa Water" and reasons[1] == "fallback"  # nothing owned or partner
+    assert picks[1] == "Santa Water" and reasons[1] == "second"  # nothing owned or partner
     assert picks[2] == "Pummarola" and reasons[2] == "partner"  # as soon as it is offered
     assert picks[3:] == ["Garlic"] * 6
     assert reasons[3:] == ["main"] * 6
@@ -116,10 +116,11 @@ def test_scripted_offers_max_garlic_then_one_second_weapon():
     assert levels["Pummarola"] == 1
     assert evolution_ready(levels)
 
-    # Main is done: level Santa Water, and take Attractorb (La Borra) early.
+    # Main is done. Santa Water on the card is taken; Attractorb is taken
+    # on the screen that does not also offer Santa Water.
     later = [
         [("Santa Water", False), ("Armor", True), ("King Bible", True)],
-        [("Attractorb", True), ("Santa Water", False), ("Magic Wand", True)],
+        [("Attractorb", True), ("Empty Tome", True), ("Magic Wand", True)],
         [("Magic Wand", True), ("Armor", True), ("Santa Water", False)],
         [("Hollow Heart", True), ("Axe", True), ("Spinach", True)],
     ]
@@ -142,7 +143,7 @@ def test_once_partner_is_owned_main_levels_beat_more_partner_levels():
     levels = {"Garlic": 4, "Pummarola": 1}
     cards = _offer([("Pummarola", False), ("Garlic", False), ("Santa Water", True)], levels)
     pick = choose_pick(cards, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
+    assert cards[pick.index].name == "Santa Water" and pick.reason == "second"
 
 
 def test_magic_wand_is_main_when_garlic_is_not_held():
@@ -203,6 +204,53 @@ def test_santa_water_is_the_first_second_weapon_and_armor_l2_yields():
     assert cards[idx].name == "Attractorb"
 
 
+def test_test9_does_not_spend_early_slots_and_takes_santa_water():
+    """run1.log: Magic Wand at 9s, Runetracer at 20s, Silver Wind at 40s, then
+    Pummarola over Santa Water at 296s with four weapons already owned.
+    """
+    garlic = {"Garlic": 1}
+
+    def picked(spec, levels, hp=1.0, game_s=0.0):
+        cards = _offer(spec, levels)
+        pick = choose_pick(cards, hp=hp, owned=set(levels), game_s=game_s, levels=dict(levels))
+        return cards[pick.index].name
+
+    # Weapon-only screens. Keeper weapons lose to the avoid list so the slot
+    # stays available for Santa Water and King Bible.
+    assert picked([("Axe", True), ("Magic Wand", True), ("Knife", True)], garlic, game_s=9) == "Axe"
+    assert picked(
+        [("Pako Battiliar", True), ("Runetracer", True), ("Axe", True)], garlic, game_s=20,
+    ) == "Axe"
+    # Every card is on the avoid list. The click cannot be a keeper weapon.
+    wind = picked([("Silver Wind", True), ("Whip", True), ("Axe", True)], garlic, game_s=40)
+    assert wind == "Silver Wind"
+    # A passive on that screen is taken instead.
+    assert picked(
+        [("Silver Wind", True), ("Whip", True), ("Candelabrador", True)], garlic, game_s=40,
+    ) == "Candelabrador"
+
+    # 296s, hp=1.0, weapons=4. Santa Water beats a Pummarola level and Lightning Ring.
+    late = {
+        "Garlic": 6, "Attractorb": 2, "Magic Wand": 4, "Pummarola": 1,
+        "Runetracer": 3, "Silver Wind": 1,
+    }
+    assert picked(
+        [("Santa Water", True), ("Pummarola", False), ("Lightning Ring", True)],
+        late, game_s=296,
+    ) == "Santa Water"
+    # At or under 25% HP a heal or Armor still wins.
+    assert picked(
+        [("Santa Water", True), ("Pummarola", False), ("Lightning Ring", True)],
+        late, hp=0.25, game_s=296,
+    ) == "Pummarola"
+    assert picked([("Santa Water", True), ("Armor", True)], {"Garlic": 3}, hp=0.25) == "Armor"
+    assert picked([("Santa Water", True), ("Armor", True)], {"Garlic": 3}, hp=0.26) == "Santa Water"
+    # The early-second rule does not take Magic Wand.
+    assert picked(
+        [("Magic Wand", True), ("King Bible", True), ("Bracer", True)], garlic, game_s=100,
+    ) == "King Bible"
+
+
 def test_owned_level_beats_a_new_unwanted_item_when_the_plan_is_absent():
     levels = {"Garlic": 4, "Pummarola": 1, "Bone": 1}
     cards = _offer([("Whip", True), ("Bone", False), ("Knife", True)], levels)
@@ -214,7 +262,9 @@ def test_survival_passives_after_the_partner_beat_a_new_weapon():
     levels = {"Garlic": 3, "Pummarola": 1}
     cards = _offer([("Santa Water", True), ("Armor", True), ("Hollow Heart", True)], levels)
     pick = choose_pick(cards, hp=1.0, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Armor" and pick.reason == "fallback"
+    assert cards[pick.index].name == "Santa Water" and pick.reason == "second"
+    pick = choose_pick(cards, hp=0.25, owned=set(levels), levels=levels)
+    assert cards[pick.index].name == "Armor"
     # Pummarola still leads the survival trio once it is already the partner.
     cards = _offer([("Hollow Heart", True), ("Pummarola", False), ("Armor", True)], levels)
     pick = choose_pick(cards, hp=1.0, owned=set(levels), levels=levels)
@@ -272,7 +322,7 @@ def test_birds_are_a_second_project_after_the_main_is_maxed():
     levels["Ebony Wings"] = 1
     cards = _offer([("Ebony Wings", False), ("Peachone", False), ("Santa Water", True)], levels)
     pick = choose_pick(cards, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Peachone" and pick.reason == "second"
+    assert cards[pick.index].name == "Santa Water" and pick.reason == "second"
 
 
 def test_evolution_ready_is_main_at_8_plus_its_partner():
@@ -696,7 +746,7 @@ def test_uncertain_screen_levels_an_owned_weapon_before_a_new_crowd_weapon():
         _card("Candelabrador", True, score=0.7),
     ]
     pick = choose_pick(cards, owned=set(levels), levels=levels)
-    assert cards[pick.index].name == "Garlic" and pick.reason == "main"
+    assert cards[pick.index].name == "Santa Water" and pick.reason == "second"
 
 
 def test_owned_weapon_level_beats_extra_armor_and_a_new_passive():
@@ -769,7 +819,7 @@ def test_unfinished_main_takes_a_passive_instead_of_opening_a_weapon():
     assert cards[pick.index].name == "Wings"
     only_weapons = _offer([("Santa Water", True), ("Magic Wand", True), ("Knife", True)], levels)
     pick = choose_pick(only_weapons, hp=1.0, owned=set(levels), levels=levels)
-    assert only_weapons[pick.index].name == "Santa Water" and pick.reason == "fallback"
+    assert only_weapons[pick.index].name == "Santa Water" and pick.reason == "second"
 
 
 def test_done_page_is_marked_as_the_reward_followup(monkeypatch):

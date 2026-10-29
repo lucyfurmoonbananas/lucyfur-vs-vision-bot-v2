@@ -381,6 +381,10 @@ class Tuning:
     # which also pushes backward off the pack.
     # VS_TUNE=engage_standoff=0
     engage_standoff: float = 28.0
+    # Early second weapon: only Santa Water or King Bible, and only while Garlic
+    # is the only damage weapon, before this game time. 0 disables that boost.
+    # VS_TUNE=levelup_second_dmg_until_s=0
+    levelup_second_dmg_until_s: float = 360.0
     # Man-eater flower ring (~4:40–6:00): HP can drop 1.0→0.1 in 2–3 s.
     hp_crash_delta: float = -0.3       # peak-to-now drop that counts as crashing
     hp_crash_window_s: float = 1.5     # look-back for that drop
