@@ -43,7 +43,7 @@ while true; do
   fi
   # Laurel A/B (bd85a14): odd runs VS_LAUREL_DAMAGE=0 (new Laurel out of the damage tier),
   # even runs unset (current behaviour). VS_LAUREL_AB=off disables the alternation.
-  if [ "${VS_LAUREL_AB:-on}" != off ] && [ $((RUN % 2)) -eq 1 ]; then
+  if [ "${VS_LAUREL_AB:-off}" != off ] && [ $((RUN % 2)) -eq 1 ]; then
     export VS_LAUREL_DAMAGE=0; LAUREL_VARIANT="B (VS_LAUREL_DAMAGE=0)"
   else
     unset VS_LAUREL_DAMAGE; LAUREL_VARIANT="A (VS_LAUREL_DAMAGE unset)"
@@ -51,7 +51,7 @@ while true; do
   # Early-gem-target A/B (Bob's Oct 16 plan), crossed with Laurel so both stay balanced:
   # odd runs OFF (VS_TUNE early_gem_target_gain=0), even runs ON (default 1.4). Any VS_TUNE the
   # caller set is kept and merged. VS_GEM_AB=off disables it.
-  if [ "${VS_GEM_AB:-on}" != off ] && [ $((RUN % 2)) -eq 1 ]; then
+  if [ "${VS_GEM_AB:-off}" != off ] && [ $((RUN % 2)) -eq 1 ]; then
     export VS_TUNE="${BASE_TUNE:+$BASE_TUNE,}early_gem_target_gain=0"; GEM_VARIANT="OFF (early_gem_target_gain=0)"
   else
     if [ -n "$BASE_TUNE" ]; then export VS_TUNE="$BASE_TUNE"; else unset VS_TUNE; fi
