@@ -144,7 +144,7 @@ Task clean -desc 'Clean the repository' -DependsOn version {
         '-d' # remove untracked directories in addition to untracked files
         ($Pristine ? '-x' : '-X')
         ($Force ? '--force' : '--interactive')
-        '--exclude=.env' # never delete .env files since they often contain secrets
+        ($Pristine ? '--exclude=.env' : '--exclude=!.env') # never delete .env files since they often contain secrets
     )
     Invoke-Shell -- git clean @cleanArgs
 }
