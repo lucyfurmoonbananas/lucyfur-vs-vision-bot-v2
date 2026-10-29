@@ -18,6 +18,7 @@ any other card or stage.
 
 from __future__ import annotations
 
+import contextvars
 import difflib
 import os
 import re
@@ -1293,6 +1294,23 @@ def _santa_water_now(hp: float | None) -> bool:
     return hp is None or hp > 0.25
 
 
+# test11 Run 2 (Lv99) took Garlic and Attractorb first and Santa Water at 1:49.
+# test12 took it at 0:08 and Garlic was still 2-4 at 3:00.
+SANTA_WATER_MIN_GARLIC = 3
+SANTA_WATER_AFTER_S = 90.0
+_pick_game_s: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "vs_pick_game_s", default=None
+)
+
+
+def _santa_water_ready(levels: dict[str, int] | None) -> bool:
+    """Garlic is L3+, or the run is past ~1:30. Before that, level Garlic."""
+    if (levels or {}).get("Garlic", 0) >= SANTA_WATER_MIN_GARLIC:
+        return True
+    game_s = _pick_game_s.get()
+    return game_s is not None and game_s >= SANTA_WATER_AFTER_S
+
+
 def _armor_upgrade_yields_to_garlic(
     name: str | None, new: bool, hp: float | None, garlic_lv: int,
 ) -> bool:
@@ -1331,10 +1349,17 @@ def _extra_weapon_capped(name: str | None, new: bool, levels: dict[str, int] | N
     """
     if not new or not name or name not in WEAPONS:
         return False
-    # Santa Water is always allowed, including when the six slots are full.
-    # Pentagram keeps its own clock. King Bible is allowed only as the second
-    # damage weapon; once two are held it is a third weapon and the cap applies.
-    if name in ("Santa Water", "Garlic", "Pentagram"):
+    # Santa Water is always allowed once Garlic is L3+ or the clock is past
+    # ~1:30, including when the six slots are full. Before that gate it is an
+    # extra weapon. Pentagram keeps its own clock. King Bible is allowed only
+    # as the second damage weapon; once two are held it is a third weapon.
+    if name == "Santa Water":
+        # No Garlic on the tracker: keep the old crowd rank. A known Garlic
+        # under 3 before 1:30 is an extra weapon, not the early pick.
+        if not levels or levels.get("Garlic", 0) <= 0:
+            return False
+        return not _santa_water_ready(levels)
+    if name in ("Garlic", "Pentagram"):
         return False
     if name in CORE_SECOND_WEAPONS and not _holds_two_damage_weapons(levels):
         return False
@@ -1348,6 +1373,9 @@ def _capped_weapon_key(name: str) -> int:
     add a second damage weapon. A real weapon beats the avoid list. Card order
     breaks whatever is left, which is why test11 opened Axe, then Knife, then Whip.
     """
+    if name == "Santa Water":
+        # Before the gate this is a capped click. It must not beat Magic Wand.
+        return 1000
     if name in NO_DAMAGE_WEAPONS:
         return 0
     if name not in AVOID:
@@ -1409,7 +1437,7 @@ def _card_rank(
         if levels and 0 < levels.get("Garlic", 0) < 8 and _santa_water_now(hp):
             # Behind Santa Water (4) and the survival group (5). Still beats a capped weapon.
             return (6, 0)
-    if name == "Santa Water" and _santa_water_now(hp):
+    if name == "Santa Water" and _santa_water_now(hp) and _santa_water_ready(levels):
         gl = (levels or {}).get("Garlic", 0)
         if levels and 0 < gl < 8:
             # Behind a Garlic level (3). Ahead of Armor / Hollow Heart (5 and 7).
@@ -1576,7 +1604,7 @@ def _focused_rank(
     # already owned (this return is before the slot cap). A Garlic level is
     # (4, 0) and a Pummarola level is (4, 1), so both outrank it. Armor and
     # Hollow Heart are (4, 3)/(4, 4) and do not.
-    if name == "Santa Water" and _santa_water_now(hp):
+    if name == "Santa Water" and _santa_water_now(hp) and _santa_water_ready(levels):
         if main == "Garlic" and 0 < main_lv < WEAPON_MAX_LEVEL:
             return (4, 2, "second")
         return (6, 2, "second")
@@ -1805,6 +1833,26 @@ def choose_pick(
     """
     if not cards:
         return CardPick(0, "fallback")
+    token = _pick_game_s.set(game_s)
+    try:
+        return _choose_pick_timed(
+            cards, hp, owned, game_s, levels, evolved, blind_low, critical, low_held,
+        )
+    finally:
+        _pick_game_s.reset(token)
+
+
+def _choose_pick_timed(
+    cards: list[Card],
+    hp: float | None,
+    owned: set[str] | None,
+    game_s: float | None,
+    levels: dict[str, int] | None,
+    evolved: set[str] | frozenset[str] | None,
+    blind_low: bool,
+    critical: bool,
+    low_held: bool,
+) -> CardPick:
     eff, certain = assess_inventory(cards, levels)
     if not certain:
         if levels is not None:

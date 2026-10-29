@@ -137,14 +137,16 @@ class LoopHeartbeat:
         limit_s: float = LOOP_STALL_LIMIT_S,
         clock: Callable[[], float] = time.monotonic,
         poll_s: float = 1.0,
+        wait: Callable[[float], bool] | None = None,
     ) -> None:
         self.on_stall = on_stall
         self.limit_s = float(limit_s)
         self.clock = clock
         self.poll_s = poll_s
+        self._stop = threading.Event()
+        self._wait = wait or self._stop.wait
         self._last = clock()
         self.fired = False
-        self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def beat(self) -> None:
@@ -174,5 +176,5 @@ class LoopHeartbeat:
         self._stop.set()
 
     def _run(self) -> None:
-        while not self._stop.wait(self.poll_s):
+        while not self._wait(self.poll_s):
             self.check()

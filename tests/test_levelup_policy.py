@@ -98,19 +98,23 @@ def test_scripted_offers_max_garlic_then_one_second_weapon():
     levels = {"Garlic": 1}
     garlic_offers = [
         [("King Bible", True), ("Lightning Ring", True), ("Garlic", False)],
+        # Garlic is still 2 and the clock is early: do not take Santa Water yet.
+        [("Santa Water", True), ("Garlic", False), ("Knife", True)],
+        # Garlic just hit 3. Santa Water is now the pick on a weapon-only screen.
         [("Santa Water", True), ("Magic Wand", True), ("Knife", True)],
         [("Pummarola", True), ("Garlic", False), ("Empty Tome", True)],
     ]
-    # Six more Garlic levels (1 -> 2 on the first offer, then 2 -> 8).
+    # Five more Garlic levels (offer 3 reaches 4, then 4 -> 8).
     garlic_offers += [
-        [("Armor", True), ("Garlic", False), ("King Bible", True)] for _ in range(6)
+        [("Armor", True), ("Garlic", False), ("King Bible", True)] for _ in range(5)
     ]
     picks, reasons = _play(garlic_offers, levels)
     assert picks[0] == "Garlic" and reasons[0] == "main"
-    assert picks[1] == "Santa Water" and reasons[1] == "second"  # nothing owned or partner
-    assert picks[2] == "Pummarola" and reasons[2] == "partner"  # as soon as it is offered
-    assert picks[3:] == ["Garlic"] * 6
-    assert reasons[3:] == ["main"] * 6
+    assert picks[1] == "Garlic" and reasons[1] == "main"
+    assert picks[2] == "Santa Water" and reasons[2] == "second"
+    assert picks[3] == "Pummarola" and reasons[3] == "partner"
+    assert picks[4:] == ["Garlic"] * 5
+    assert reasons[4:] == ["main"] * 5
     assert levels["Garlic"] == 8
     assert levels["Santa Water"] == 1  # the one forced level, not a second project yet
     assert levels["Pummarola"] == 1
@@ -263,7 +267,7 @@ def test_test10_garlic_and_candle_beat_santa_water_and_no_third_weapon():
     # Above 25% HP Santa Water beats Hollow Heart. A Garlic level still beats Santa Water.
     assert picked(
         [("Hollow Heart", True), ("Ebony Wings", True), ("Santa Water", False)],
-        {"Garlic": 2, "Santa Water": 1}, hp=1.0, game_s=37,
+        {"Garlic": 2, "Santa Water": 1}, hp=1.0, game_s=100,
     ) == "Santa Water"
     # Santa Water beats the candle and a new Laurel once it is the offered weapon.
     assert picked(
@@ -297,6 +301,45 @@ def test_test10_garlic_and_candle_beat_santa_water_and_no_third_weapon():
         [("Candelabrador", True), ("Pummarola", True), ("Santa Water", True)],
         {"Garlic": 3}, hp=1.0, game_s=50,
     ) == "Pummarola"
+
+
+def test_test12_santa_water_waits_for_garlic_or_ninety_seconds():
+    """test12 took Santa Water at 0:08 and Garlic was still 2-4 at 3:00.
+
+    test11 Run 2 (30:02, Lv99) took Garlic first and Santa Water at 1:49,
+    while Garlic was still 2. After that gate, Santa Water is not passed up
+    above 25% HP. A Garlic level still wins when both are offered.
+    """
+    def picked(spec, levels, hp=1.0, game_s=0.0):
+        cards = _offer(spec, levels)
+        pick = choose_pick(cards, hp=hp, owned=set(levels), game_s=game_s, levels=dict(levels))
+        return cards[pick.index].name
+
+    early = [("Ebony Wings", True), ("Magic Wand", True), ("Eight The Sparrow", True), ("Santa Water", True)]
+    assert picked(early, {"Garlic": 1}, hp=1.0, game_s=8) == "Magic Wand"
+    assert picked(
+        [("Santa Water", True), ("Garlic", False), ("Knife", True)],
+        {"Garlic": 2}, hp=1.0, game_s=19,
+    ) == "Garlic"
+    # 1:49 on the Lv99 run, Garlic still 2. The clock opens the gate.
+    assert picked(
+        [("Empty Tome", False), ("Axe", True), ("Cross", True), ("Santa Water", True)],
+        {"Garlic": 2, "Magic Wand": 1, "Attractorb": 2, "Empty Tome": 1},
+        hp=1.0, game_s=109,
+    ) == "Santa Water"
+    # Garlic L3 opens the gate even before 1:30, and a Garlic level still leads.
+    assert picked(
+        [("Santa Water", True), ("Garlic", False), ("Whip", True)],
+        {"Garlic": 3}, hp=1.0, game_s=40,
+    ) == "Garlic"
+    assert picked(
+        [("Santa Water", True), ("Armor", True), ("Hollow Heart", True)],
+        {"Garlic": 3}, hp=0.9, game_s=40,
+    ) == "Santa Water"
+    assert picked(
+        [("Santa Water", True), ("Armor", True)],
+        {"Garlic": 3}, hp=0.25, game_s=40,
+    ) == "Armor"
 
 
 def test_test11_cap_and_santa_water_above_quarter_hp():

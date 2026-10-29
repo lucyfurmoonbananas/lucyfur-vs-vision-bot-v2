@@ -201,6 +201,28 @@ def test_session_loop_cutoff_defaults_to_none_for_manual_runs(box):
     assert (session / "cutoff.txt").read_text().strip() == "cutoff=none"
 
 
+def test_session_loop_cleanup_leaves_vampire_survivors_running(box):
+    """Cleanup stops the bot. It must not close the game window or kill the exe."""
+    text = SESSION_LOOP.read_text()
+    assert "VampireSurvivors" not in text
+    assert "wmctrl -i -c" not in text
+    _tmp, session, env = box
+    (session / "play_run.sh").write_text("#!/bin/bash\nexit 2\n")
+    (session / "play_run.sh").chmod(0o755)
+    shutil.copy(SESSION_LOOP, session / "session_loop.sh")
+    child = dict(env)
+    child.pop("VS_TEST_NO_CLEANUP", None)
+    child["PATH"] = f"{child['VS_TEST_BIN']}:{child.get('PATH', '')}"
+    (Path(child["STUB_DIR"]) / "win_up").touch()
+    subprocess.run(
+        ["bash", str(session / "session_loop.sh")],
+        env=child, capture_output=True, text=True, timeout=60,
+    )
+    log = Path(child["STUB_LOG"]).read_text() if Path(child["STUB_LOG"]).exists() else ""
+    assert "wmctrl" not in log
+    assert "VampireSurvivors" not in log
+
+
 def test_session_loop_does_not_count_watchdog_rc3_as_failures(box):
     _tmp, session, env = box
     _session_with_fake_play_run(session, [3] * 10 + [0])

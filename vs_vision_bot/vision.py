@@ -311,7 +311,34 @@ def enemy_mask(frame: np.ndarray) -> np.ndarray:
             ):
                 continue
         keep[i] = True
-    return keep[labels]
+    mask = keep[labels]
+    # 1:00 Glowing Bats are a cyan ring with no dark body, so the mask above
+    # never sees them. test12 run 2 lost HP 1.00 -> 0.64 around 1:09 while
+    # danger stayed ~1.5. Gems are a different cyan (red under 90).
+    glow = glowing_bat_mask(frame).astype(bool)
+    if glow.any():
+        mask = mask | glow
+    return mask
+
+
+def glowing_bat_mask(frame: np.ndarray) -> np.ndarray:
+    """Cyan Glowing Bat pixels. BGR about (254, 202, 110), not a blue gem."""
+    b = frame[:, :, 0].astype(np.int16)
+    g = frame[:, :, 1].astype(np.int16)
+    r = frame[:, :, 2].astype(np.int16)
+    m = (b > 220) & (g > 160) & (g < 235) & (r > 80) & (r < 150) & (b > g) & (g > r + 40)
+    h, w = frame.shape[:2]
+    ignore, side = _masks(w, h)
+    m[ignore | side] = False
+    raw = m.astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(raw, connectivity=8)
+    scale = (w * h) / (REF_W * REF_H)
+    min_area = max(8, int(12 * scale))
+    keep = np.zeros(n, dtype=bool)
+    for i in range(1, n):
+        if int(stats[i, cv2.CC_STAT_AREA]) >= min_area:
+            keep[i] = True
+    return (keep[labels] * 255).astype(np.uint8)
 
 
 def gem_mask(frame: np.ndarray) -> np.ndarray:

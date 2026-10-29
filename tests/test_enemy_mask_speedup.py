@@ -18,6 +18,7 @@ from vs_vision_bot.vision import (
     SIDE_DARK_MAX,
     _masks,
     enemy_mask,
+    glowing_bat_mask,
 )
 
 FIX = Path(__file__).parent / "fixtures"
@@ -93,7 +94,11 @@ def _reference_enemy_mask(frame: np.ndarray) -> np.ndarray:
             ):
                 continue
         keep[i] = True
-    return keep[labels]
+    mask = keep[labels]
+    glow = glowing_bat_mask(frame).astype(bool)
+    if glow.any():
+        mask = mask | glow
+    return mask
 
 
 

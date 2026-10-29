@@ -1277,9 +1277,18 @@ def _pick_best(
 
     ``candidates`` is a DIRS slice. ``max`` on that slice returns the first
     entry, and DIRS starts with north, so a tied east cone used to go north.
+
+    An escape cone can be empty: test12 crashed at ~4:40 when HP read 0 after
+    a pause and no heading was both inside the breakout cone and the origin
+    half-plane. Fall back to every scored direction.
     """
-    best = max(scores[d] for d in candidates)
-    tied = [d for d in candidates if scores[d] >= best - 1e-5]
+    pool = [d for d in candidates if d in scores]
+    if not pool:
+        pool = [d for d in DIRS if d in scores]
+    if not pool:
+        return (0, 0)
+    best = max(scores[d] for d in pool)
+    tied = [d for d in pool if scores[d] >= best - 1e-5]
     if len(tied) == 1 or prefer is None:
         return tied[0]
     px, py = float(prefer[0]), float(prefer[1])

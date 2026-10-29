@@ -95,11 +95,6 @@ echo "[$(date)] cleanup" | tee -a "$SESSION/loop_outer.log"
 # kill bot processes carefully
 ps -eo pid,cmd | awk '/vs_vision_bot|lucyfur-vs-vision-bot/ && !/awk/{print $1}' | while read -r p; do kill "$p" 2>/dev/null || true; done
 timeout 10 xdotool keyup --clearmodifiers a s d w Left Right Up Down Return Shift_L Shift_R Control_L 2>/dev/null || true
-W=$(timeout 10 xdotool search --name "^Vampire Survivors$" 2>/dev/null | head -1 || true)
-[ -n "${W:-}" ] && timeout 10 wmctrl -i -c "$W"
-MV=$(timeout 10 xdotool search --name "^Model Vision$" 2>/dev/null | head -1 || true)
-[ -n "${MV:-}" ] && timeout 10 wmctrl -i -c "$MV"
-sleep 1
-# ensure exe gone
-ps -eo pid,cmd | awk '/VampireSurvivors\.exe/ && !/awk/{print $1}' | while read -r p; do kill "$p" 2>/dev/null || true; done
+# Leave Vampire Survivors running. Closing the window or killing the exe
+# threw away a cleared run's results screen between sessions.
 echo "[$(date)] cleanup done" | tee -a "$SESSION/loop_outer.log"
