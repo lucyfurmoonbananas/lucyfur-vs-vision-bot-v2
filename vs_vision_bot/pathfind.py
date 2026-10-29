@@ -514,6 +514,12 @@ OUTLINE_MASS = 1.25
 # surround: danger jumps and the farm does not walk further in.
 TOUCH_REACH = 42.0
 TOUCH_MASS = 1.25
+# test14 run 3, 16:19: farm mode at hp 0.36-0.50, danger 4-6, cover 0.69-0.94,
+# bodies outside the 42px ring. Then danger hit 17 and HP fell to 0.14 in 2s.
+# After 10:00 a closed ring whose kernel is already this hot breaks out. A
+# 160px ring (danger ~1.5-3.2) and a one-sided pack stay a dive.
+CROWD_BREAK_AFTER_S = 600.0
+CROWD_BREAK_DANGER = 4.0
 # A filled pack at this range already lifts the 42px kernel (the dive crowd
 # reads ~1.7). test10 run2 sat at 1.0-1.4 while HP fell from 1.00 to 0.50.
 OUTLINE_KERNEL = 1.55
@@ -1442,6 +1448,7 @@ class Navigator:
         self._hp_crash_peak = 0.0       # peak HP of the current crash look-back (for the log)
         self._flower_on = False         # edge-trigger the flower-window log line
         self._touch_ring = False        # farm-mode breakout from a ring already on Poe
+        self._crowd_ring = False        # late closing crowd, bodies still outside 42px
         self._escape_remaining = 0.0    # >0: committed post-REVIVE escape running
         self._escape_s = 0.0            # time spent in the current escape
         self._escape_pending = False    # escape requested, heading not picked yet
@@ -1565,6 +1572,7 @@ class Navigator:
     def _end_breakout(self) -> None:
         """Drop the current breakout, remembering its heading for the no-reversal rule."""
         self._touch_ring = False
+        self._crowd_ring = False
         if self.breakout is not None:
             self._last_break_dir = self.breakout
             self._last_break_end = self.game_s
@@ -1852,6 +1860,17 @@ class Navigator:
         self.cover = cover
         touch = _threat_mass(pts, px, py, TOUCH_REACH)
         ringed = cover >= t.cover_trigger and touch >= TOUCH_MASS
+        # The 42px mass missed the 16:19 ring: cover was already closed and the
+        # kernel was 4-6, then 17. A far ring stays under CROWD_BREAK_DANGER.
+        crowd = False
+        if (
+            self.game_s >= CROWD_BREAK_AFTER_S
+            and cover >= t.cover_trigger
+            and pts.shape[0] > 0
+        ):
+            crowd = float(
+                _danger_at(pts, np.array([px]), np.array([py]), t.radius)[0]
+            ) >= CROWD_BREAK_DANGER
         if self._escape_reason == "revive" and cover >= t.cover_trigger:
             self._revive_ring = True
         if not self._near_init:
@@ -1881,7 +1900,14 @@ class Navigator:
             or self._escape_pending
             or (self.escaping and self._escape_reason == "revive")
         )
-        if farming(hp, t) and not keep_flee and not ringed and not self._touch_ring:
+        if (
+            farming(hp, t)
+            and not keep_flee
+            and not ringed
+            and not self._touch_ring
+            and not crowd
+            and not self._crowd_ring
+        ):
             if (
                 self.breakout is not None
                 or self.escaping
@@ -1896,6 +1922,8 @@ class Navigator:
             return
         if ringed:
             self._touch_ring = True
+        if crowd:
+            self._crowd_ring = True
 
         if self.breakout is not None and self._escape_remaining > 0:
             self._update_escape(pts, px, py, dt)
@@ -2750,10 +2778,16 @@ class Navigator:
         escape = self.breakout is not None and self._escape_remaining > 0
         here = float(_danger_at(pts, np.array([px]), np.array([py]), self.tune.radius)[0])
         self._commit = self._chest_commit(hp)
-        if farming(hp, self.tune) and gems_in_range(
-            result.gems, px, py, gem_tune_for(self.tune, self.game_s).gem_radius,
-        ) > 0:
+        if (
+            farming(hp, self.tune)
+            and not self._evolution_ready
+            and gems_in_range(
+                result.gems, px, py, gem_tune_for(self.tune, self.game_s).gem_radius,
+            ) > 0
+        ):
             # Gems outrank the chest, so the tight-orbit lock must not steal the heading.
+            # An evolution that is already ready is the exception: test14 run 3
+            # cleared chest sightings for gems from the moment Soul Eater was ready.
             self._commit = False
         lane = self._chest_lane_open(pts, px, py) if self._commit else False
         self._chase = self._leash_chase(here, hp, lane)

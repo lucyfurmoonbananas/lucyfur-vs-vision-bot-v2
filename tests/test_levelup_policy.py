@@ -458,6 +458,54 @@ def test_test14_santa_water_is_the_second_weapon_and_garlic_survives_low_hp():
     ) == "Floor Chicken"
 
 
+def test_test14_spellbinder_outranks_armor_once_bible_is_maxed():
+    """test14 run 3 left Spellbinder at L1 while King Bible was L8.
+
+    At 882s a new Runetracer beat Spellbinder. At 968s Armor beat it at
+    hp=0.39. The passive of a maxed weapon outranks both. Empty Tome does
+    not, while the wand is L3. At hp=0.25 Armor still wins, and a Garlic
+    level still wins while Garlic is under 8.
+    """
+    def picked(spec, levels, hp=1.0, game_s=0.0):
+        cards = _offer(spec, levels)
+        pick = choose_pick(cards, hp=hp, owned=set(levels), game_s=game_s, levels=dict(levels))
+        return cards[pick.index].name, pick.reason
+
+    held = {
+        "Garlic": 8, "Armor": 4, "Attractorb": 2, "Empty Tome": 1,
+        "King Bible": 8, "Magic Wand": 8, "Pummarola": 5, "Santa Water": 8,
+        "Spellbinder": 1,
+    }
+    name, reason = picked(
+        [("Runetracer", True), ("Axe", True), ("Spellbinder", False), ("Silver Wind", True)],
+        held, hp=0.67, game_s=882,
+    )
+    assert (name, reason) == ("Spellbinder", "partner")
+    name, reason = picked(
+        [("Spellbinder", False), ("Whip", True), ("Armor", False)],
+        held, hp=0.39, game_s=968,
+    )
+    assert (name, reason) == ("Spellbinder", "partner")
+    # Pummarola is already L5. The L1 partner is the one that was left behind.
+    name, _reason = picked(
+        [("Pummarola", False), ("Spellbinder", False), ("Armor", False)],
+        held, hp=0.39, game_s=900,
+    )
+    assert name == "Spellbinder"
+    assert picked(
+        [("Spellbinder", False), ("Armor", False)],
+        held, hp=0.25, game_s=968,
+    )[0] == "Armor"
+    assert picked(
+        [("Armor", True), ("Empty Tome", False)],
+        {"Garlic": 4, "Magic Wand": 3, "Empty Tome": 1}, hp=0.3, game_s=200,
+    )[0] == "Armor"
+    assert picked(
+        [("Garlic", False), ("Spellbinder", False)],
+        {"Garlic": 6, "King Bible": 8, "Spellbinder": 1}, hp=0.8, game_s=400,
+    )[0] == "Garlic"
+
+
 def test_owned_level_beats_a_new_unwanted_item_when_the_plan_is_absent():
     levels = {"Garlic": 4, "Pummarola": 1, "Bone": 1}
     cards = _offer([("Whip", True), ("Bone", False), ("Knife", True)], levels)

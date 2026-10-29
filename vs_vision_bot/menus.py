@@ -1554,6 +1554,23 @@ def _owned_weapon_level_offered(cards: list[Card], levels: dict[str, int]) -> bo
     return False
 
 
+def _maxed_weapon_partner_rank(name: str, levels: dict[str, int]) -> int | None:
+    """Subrank for the passive of a weapon already at 8. A lower level comes first.
+
+    test14 run 3 left Spellbinder at L1 after King Bible hit 8, and spent the
+    picks on Armor and a new Runetracer. Empty Tome does not qualify while
+    Magic Wand is under 8. The birds are weapons, not this passive.
+    """
+    if not name or name in WEAPONS or name in EVOLUTIONS or name in BIRD_WEAPONS:
+        return None
+    if not any(
+        lv >= WEAPON_MAX_LEVEL and partner_of(weapon) == name
+        for weapon, lv in levels.items()
+    ):
+        return None
+    return 40 + int(levels.get(name, 0))
+
+
 def _focused_rank(
     c: Card,
     idx: int,
@@ -1592,6 +1609,15 @@ def _focused_rank(
         if _santa_water_ready(levels):
             return (2, 0, "second")
         return (4, 2, "second")
+    # Above 25% HP, once Garlic is finished: the passive of a maxed weapon
+    # beats Armor (defense tier 1 under half HP) and a new Runetracer. At or
+    # below 25% HP the defense block still wins. While Garlic is under 8 this
+    # stays off so a Garlic level keeps the screen.
+    garlic_open = main == "Garlic" and 0 < main_lv < WEAPON_MAX_LEVEL
+    if _santa_water_now(hp) and not garlic_open:
+        partner_sub = _maxed_weapon_partner_rank(name, levels)
+        if partner_sub is not None:
+            return (0, partner_sub, "partner")
     if (
         c.new
         and not protect_weapons
