@@ -501,6 +501,17 @@ def skeleton_phase(game_s: float) -> bool:
 # large also push backward off a body. The 28px floor only refuses the step
 # onto the sprite.
 GRAZE_STANDOFF = 34.0
+# Outline-only sprites keep their dark pixels at 30–48px, so the 42px danger
+# kernel stays near 1 while the hurtbox already overlaps the player. Enough
+# threat weight inside this reach is contact: block the closing step the way
+# the 28px floor does, and do not add the 34px backward shove.
+OUTLINE_REACH = 48.0
+# More than one full-weight point. Real mask cells top out at 0.25, so this is
+# five or more outline cells, not a single sprite center 40px away.
+OUTLINE_MASS = 1.25
+# A filled pack at this range already lifts the 42px kernel (the dive crowd
+# reads ~1.7). test10 run2 sat at 1.0-1.4 while HP fell from 1.00 to 0.50.
+OUTLINE_KERNEL = 1.55
 
 
 def flower_graze(game_s: float, tune: Tuning) -> bool:
@@ -905,6 +916,39 @@ def _crowd_heading(pts: np.ndarray, px: float, py: float) -> tuple[float, float]
     return (cx / mag, cy / mag)
 
 
+def _threat_mass(pts: np.ndarray, px: float, py: float, reach: float) -> float:
+    """Sum of threat weights within ``reach`` px of the player."""
+    if pts.shape[0] == 0 or reach <= 0:
+        return 0.0
+    dist = np.hypot(pts[:, 0] - px, pts[:, 1] - py)
+    return float(pts[dist <= reach, 2].sum())
+
+
+def _outline_contact(
+    pts: np.ndarray,
+    px: float,
+    py: float,
+    near: tuple[float, float, float] | None,
+    tune: Tuning,
+    farm: bool,
+    here: float,
+) -> bool:
+    """True when an outline sits just outside the 28px floor but the kernel stays flat.
+
+    ``engage_standoff`` <= 0 keeps the old walk onto the center. The 34px graze
+    already holds that ring, and a filled pack whose kernel is above
+    ``OUTLINE_KERNEL`` is still approached. A body already inside the floor is
+    handled there.
+    """
+    if not farm or tune.engage_standoff <= 0 or tune.engage_standoff >= GRAZE_STANDOFF:
+        return False
+    if here >= OUTLINE_KERNEL:
+        return False
+    if near is not None and near[0] <= tune.engage_standoff:
+        return False
+    return _threat_mass(pts, px, py, OUTLINE_REACH) >= OUTLINE_MASS
+
+
 def _nearest_threat(pts: np.ndarray, px: float, py: float) -> tuple[float, float, float] | None:
     """Distance and unit vector toward the nearest threat, or None."""
     if pts.shape[0] == 0:
@@ -1005,6 +1049,11 @@ def score_directions(
     step_radius = radius * radius_scale
 
     here = float(_danger_at(pts, np.array([px]), np.array([py]), radius)[0])
+    near_any = _nearest_threat(pts, px, py) if pts.shape[0] else None
+    outline = _outline_contact(pts, px, py, near_any, tune, farm, here)
+    if outline:
+        # The kernel under-counts pixels that are the edge of an overlapping body.
+        here += _threat_mass(pts, px, py, OUTLINE_REACH)
     if farm:
         scores = np.zeros(len(DIRS), dtype=np.float32)
     else:
@@ -1085,8 +1134,9 @@ def score_directions(
 
     # No gem and no chest: the pack itself is the XP, approached from outside
     # the Garlic ring. A body already inside that ring is backed off, not dived.
-    near = _nearest_threat(pts, px, py) if farm else None
-    inside_ring = near is not None and tune.engage_standoff > 0 and near[0] <= tune.engage_standoff
+    near = near_any if farm else None
+    inside_floor = near is not None and tune.engage_standoff > 0 and near[0] <= tune.engage_standoff
+    inside_ring = inside_floor or outline
     if farm and not inside_ring and not gem_near and (chest is None or tune.chest_gain <= 0):
         aim = _pack_aim(pts, px, py, tune.engage_standoff)
         if aim is not None and tune.farm_gain > 0:
@@ -1122,7 +1172,10 @@ def score_directions(
     # Garlic ring: a step onto a body already inside engage_standoff loses to
     # gems, chests, and the pack pull. Run 11 died by walking into that center.
     if farm and inside_ring:
-        closing = _standoff_closing(pts, px, py, tune.engage_standoff)
+        # Outline mass is outside the 28px floor, so the closing test has to
+        # see those pixels. The backward shove stays on a real floor hit.
+        close_r = OUTLINE_REACH if outline else tune.engage_standoff
+        closing = _standoff_closing(pts, px, py, close_r)
         peak = float(closing.max()) if closing.size else 0.0
         if peak > 1e-6:
             block = (
@@ -1134,8 +1187,9 @@ def score_directions(
             scores = scores - np.float32(block) * (closing / peak)
         # Refuse the step onto the sprite. A backward shove off the whole pack
         # is only the full Garlic graze (34px). At the 28px floor a gem or the
-        # next skeleton just off that body still wins.
-        if tune.engage_standoff >= GRAZE_STANDOFF:
+        # next skeleton just off that body still wins. Outline contact does
+        # not shove: the pixels are outside that ring.
+        if inside_floor and tune.engage_standoff >= GRAZE_STANDOFF:
             away = _pack_aim(pts, px, py, tune.engage_standoff)
             if away is not None and tune.farm_gain > 0:
                 scores = scores + tune.farm_gain * (_UNIT[:, 0] * away[0] + _UNIT[:, 1] * away[1])

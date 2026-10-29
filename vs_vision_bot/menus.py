@@ -1322,6 +1322,20 @@ def _holds_two_damage_weapons(levels: dict[str, int] | None) -> bool:
     return n >= 2
 
 
+def _extra_weapon_capped(name: str | None, new: bool, levels: dict[str, int] | None) -> bool:
+    """No extra weapon while a core slot is open, and no third while Garlic is under 8.
+
+    Applies to the avoid list as well. Laurel and Clock Lancet are weapons, so
+    the third-weapon cap includes them. Santa Water and King Bible stay eligible
+    while one of those two slots is still empty and Garlic is the only damage weapon.
+    """
+    if not new or not name or name not in WEAPONS:
+        return False
+    if name in CORE_SECOND_WEAPONS or name == "Garlic" or name == "Pentagram":
+        return False
+    return _core_slot_open(levels) or _holds_two_damage_weapons(levels)
+
+
 def _card_rank(
     c: Card,
     idx: int,
@@ -1346,16 +1360,28 @@ def _card_rank(
         return (0, EVOLUTIONS.index(name))
     if low and name in DEFENSE:
         garlic_lv = (levels or {}).get("Garlic", 0)
-        if not _armor_upgrade_yields_to_garlic(name, c.new, hp, garlic_lv):
+        # A new Laurel is a third weapon once two damage weapons are held.
+        # The low-HP shield shortcut must not spend that slot.
+        third = c.new and name in WEAPONS and _holds_two_damage_weapons(levels)
+        if not third and not _armor_upgrade_yields_to_garlic(name, c.new, hp, garlic_lv):
             return (1, DEFENSE.index(name))
     if early and c.new and name in EARLY_AVOID_NEW:
         return (EARLY_AVOID_RANK, idx)
+    # Before the avoid list, so Knife / Axe do not beat a demoted keeper.
+    if _extra_weapon_capped(name, c.new, levels):
+        return (41, idx)
     if name in AVOID:
         return (40 if c.new else 30, idx)
     if name == CHICKEN or name in COINS:
         return (50, idx)
+    if name == "Candelabrador" and c.new and (levels or {}).get(name, 0) <= 0:
+        if levels and 0 < levels.get("Garlic", 0) < 8 and _santa_water_now(hp):
+            return (4, 0)
     if name == "Santa Water" and _santa_water_now(hp):
-        return (0, 100)
+        gl = (levels or {}).get("Garlic", 0)
+        if levels and 0 < gl < 8:
+            return (6, 0)
+        return (2, 0)
     if c.new and name in WEAPONS:
         if not slots_free:
             return (35, idx)
@@ -1464,9 +1490,17 @@ def _defer_new_weapons(cards: list[Card], levels: dict[str, int]) -> bool:
 
 
 def _owned_weapon_level_offered(cards: list[Card], levels: dict[str, int]) -> bool:
-    """An owned weapon that is not yet at 8 is on this screen."""
+    """An owned weapon that is not yet at 8 is on this screen.
+
+    A Santa Water level does not count while Garlic is under 8. That level used
+    to mark the screen as "protect the weapon", which sank Hollow Heart under
+    Santa Water (test10 run2 at 37s).
+    """
+    garlic_open = 0 < levels.get("Garlic", 0) < WEAPON_MAX_LEVEL
     for card in cards:
         if card.new or not card.name or card.name not in WEAPONS:
+            continue
+        if garlic_open and card.name == "Santa Water":
             continue
         held = levels.get(card.name, 0)
         if 0 < held < WEAPON_MAX_LEVEL:
@@ -1505,13 +1539,23 @@ def _focused_rank(
     if name in EVOLUTIONS and not c.new:
         evo = EVOLUTION_PAIRS.get(main, (None, ""))[1] if main else ""
         return (0, EVOLUTIONS.index(name), "main" if name == evo else "second")
-    # test9 296s: Santa Water was on the card and lost to a Pummarola level.
-    # It wins whenever it is offered, unless HP is at or under 25% (heal/Armor).
+    # Santa Water is second, behind a Garlic level, its partner, Candelabrador,
+    # and the survival passives while Garlic is under 8. test10 run2 took it
+    # over Hollow Heart and the candle and stalled at Garlic 6.
     if name == "Santa Water" and _santa_water_now(hp):
-        # Above defense (tier 1) and under a real evolution (tier 0, low index).
-        return (0, 100, "second")
+        if main == "Garlic" and 0 < main_lv < WEAPON_MAX_LEVEL:
+            return (8, 0, "second")
+        return (6, 2, "second")
+    if (
+        name == "Candelabrador"
+        and c.new
+        and levels.get(name, 0) <= 0
+        and not (hp is not None and hp <= 0.25)
+    ):
+        return (6, 0, "fallback")
     if low and name in DEFENSE:
-        if not _armor_upgrade_yields_to_garlic(name, c.new, hp, main_lv if main == "Garlic" else 0):
+        third = c.new and name in WEAPONS and _holds_two_damage_weapons(levels)
+        if not third and not _armor_upgrade_yields_to_garlic(name, c.new, hp, main_lv if main == "Garlic" else 0):
             missing = main is not None and name == partner_of(main) and levels.get(name, 0) <= 0
             return (1, DEFENSE.index(name), "partner" if missing else "fallback")
     if early and c.new and name in EARLY_AVOID_NEW:
@@ -1574,17 +1618,16 @@ def _focused_rank(
         and _santa_water_now(hp)
         and not (early and name in EARLY_AVOID_NEW)
     ):
-        return (5, 1, "second")
-    if (
-        c.new
-        and name in WEAPONS
-        and name not in CORE_SECOND_WEAPONS
-        and name != "Garlic"
-        and name not in AVOID
-        and _core_slot_open(levels)
-    ):
-        # Worse than the avoid list, so a keeper like Magic Wand or Runetracer
-        # does not take the slot Santa Water and King Bible still need.
+        # Behind a Garlic level (4), Candelabrador (6, 0) and survival (7).
+        # Ahead of Santa Water only once Garlic is maxed; until then Santa
+        # Water is (8, 0) and this is (8, 1).
+        if main == "Garlic" and 0 < main_lv < WEAPON_MAX_LEVEL:
+            return (8, 1, "second")
+        return (6, 3, "second")
+    if _extra_weapon_capped(name, c.new, levels):
+        # Same tier for keepers and the avoid list, so Knife does not beat
+        # Magic Wand, and either loses to a passive. A weapon-only screen
+        # still clicks the first card. Late Pentagram keeps its own rank.
         return (41, idx, "fallback")
     if (
         c.new
