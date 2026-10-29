@@ -119,7 +119,7 @@ def test_banish_needs_vs_stage_set_explicitly(monkeypatch):
     pilot, clicks, _ = make_pilot(clock, logs, stage="")
     run(pilot, clock, frame, screen, n=4)
     assert not any(in_banish_button(*c) for c in clicks)
-    assert pilot.picks == ["Lightning Ring"]
+    assert pilot.picks == ["Stone Mask"]
 
 
 @needs_tesseract
@@ -190,8 +190,8 @@ def test_new_pentagram_on_mad_forest_is_banished_then_normal_pick(monkeypatch):
     run(pilot, clock, frame, screen, n=8)
     assert pilot.banished == {"Pentagram"}
     assert any(m.startswith("[levelup] BANISH Pentagram verified") and "10 -> 9" in m for m in logs)
-    assert len(clicks) == 3 and clicks[2] == center(screen.cards[2])
-    assert pilot.picks == ["Lightning Ring"]
+    assert len(clicks) == 3 and clicks[2] == center(screen.cards[1])
+    assert pilot.picks == ["Clover"]
     assert taps == []  # no keyboard, so never Reroll / Skip
     assert sum(in_banish_button(*c) for c in clicks) == 1
 
@@ -220,7 +220,7 @@ def test_no_uses_or_no_button_falls_back_to_a_normal_pick(monkeypatch, left, but
     pilot, clicks, taps = make_pilot(clock, logs)
     run(pilot, clock, frame, screen, n=4)
     assert not any(in_banish_button(*c) for c in clicks)
-    assert pilot.picks == ["Lightning Ring"]  # early Pentagram avoid still applies
+    assert pilot.picks == ["Stone Mask"]  # passive, not a non-core weapon slot
     assert any("BANISH Pentagram skipped" in m for m in logs)
     assert taps == []
 
@@ -238,7 +238,7 @@ def test_failed_banish_cancels_then_picks_normally(monkeypatch):
     game.armed = False  # CANCEL worked: back on the normal level-up
     run(pilot, clock, frame, screen, n=12)
     assert pilot._banish_fails == 1 and not pilot.finished
-    assert len(clicks) > 4 and set(clicks[4:]) == {center(screen.cards[2])}
+    assert len(clicks) > 4 and set(clicks[4:]) == {center(screen.cards[3])}
     assert sum(in_banish_button(*c) for c in clicks) == 1
 
 
@@ -256,7 +256,7 @@ def test_armed_without_pentagram_cancels_and_never_picks(monkeypatch):
     assert clicks == [BTN_CENTER, CANCEL_CENTER]
     game.armed = False
     run(pilot, clock, frame, screen, n=12)
-    assert set(clicks[2:]) == {center(screen.cards[2])} and not pilot.finished
+    assert set(clicks[2:]) == {center(screen.cards[3])} and not pilot.finished
 
 
 def test_cancel_not_confirmed_stops_the_run(monkeypatch):
@@ -282,7 +282,7 @@ def test_banish_click_that_did_not_arm_never_clicks_pentagram(monkeypatch):
     run(pilot, clock, frame, screen, n=12)
     assert clicks[0] == BTN_CENTER
     assert center(screen.cards[1]) not in clicks
-    assert set(clicks[1:]) == {center(screen.cards[2])}  # normal avoid-rule pick
+    assert set(clicks[1:]) == {center(screen.cards[3])}  # normal avoid-rule pick
     assert any("banish mode not seen" in m for m in logs)
 
 

@@ -844,6 +844,10 @@ def test_pilot_passes_game_time_to_the_pick(monkeypatch, game_s, expected):
         log=logs.append,
         game_clock=lambda: game_s,
     )
+    # Core weapons already owned, so the pentagram clock is what this measures.
+    pilot.levels["Santa Water"] = 1
+    pilot.levels["King Bible"] = 1
+    pilot.owned |= {"Santa Water", "King Bible"}
     for _ in range(3):
         pilot.step(frame, screen)
     assert pilot._chosen == expected

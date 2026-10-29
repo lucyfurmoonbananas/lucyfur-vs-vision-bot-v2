@@ -1239,6 +1239,60 @@ def _level_targets(levels: dict[str, int], second: str | None) -> list[str]:
     return out
 
 
+# The only new weapons the early fallback may spend a slot on.
+CORE_SECOND_WEAPONS: frozenset[str] = frozenset({"Santa Water", "King Bible"})
+NO_DAMAGE_WEAPONS: frozenset[str] = frozenset({"Laurel", "Clock Lancet"})
+
+
+def second_dmg_until_s() -> float:
+    """``Tuning.levelup_second_dmg_until_s`` with VS_TUNE applied (0 = off)."""
+    raw = os.environ.get("VS_TUNE") or ""
+    cache = getattr(second_dmg_until_s, "_cache", None)
+    if cache is None or cache[0] != raw:
+        from vs_vision_bot.pathfind import tuning_from_env
+
+        tune = tuning_from_env(raw, log=lambda *_a, **_k: None)
+        cache = (raw, float(tune.levelup_second_dmg_until_s))
+        setattr(second_dmg_until_s, "_cache", cache)
+    return float(cache[1])
+
+
+def damage_weapon_count(
+    levels: dict[str, int] | None, evolved: set[str] | frozenset[str] | None = None,
+) -> int:
+    """Held weapons that deal damage (Laurel / Clock Lancet excluded)."""
+    names = {n for n, lv in (levels or {}).items() if lv > 0} | set(evolved or ())
+    return sum(1 for n in names if n in WEAPONS and n not in NO_DAMAGE_WEAPONS)
+
+
+def wants_second_damage_weapon(
+    levels: dict[str, int] | None,
+    game_s: float | None,
+    evolved: set[str] | frozenset[str] | None = None,
+    until_s: float | None = None,
+) -> bool:
+    """Before 6:00 with only Garlic dealing damage. Unknown time leaves the rule off."""
+    limit = second_dmg_until_s() if until_s is None else until_s
+    if limit <= 0 or game_s is None or game_s >= limit:
+        return False
+    return damage_weapon_count(levels, evolved) < 2
+
+
+def _core_slot_open(levels: dict[str, int] | None) -> bool:
+    """Santa Water or King Bible is not owned yet, so other new weapons wait.
+
+    Unknown inventory (no level map) keeps the old static order.
+    """
+    if not levels:
+        return False
+    return levels.get("Santa Water", 0) <= 0 or levels.get("King Bible", 0) <= 0
+
+
+def _santa_water_now(hp: float | None) -> bool:
+    """Take Santa Water unless HP is at or under 25% and a heal can win instead."""
+    return hp is None or hp > 0.25
+
+
 def _armor_upgrade_yields_to_garlic(
     name: str | None, new: bool, hp: float | None, garlic_lv: int,
 ) -> bool:
@@ -1300,16 +1354,18 @@ def _card_rank(
         return (40 if c.new else 30, idx)
     if name == CHICKEN or name in COINS:
         return (50, idx)
+    if name == "Santa Water" and _santa_water_now(hp):
+        return (0, 100)
     if c.new and name in WEAPONS:
         if not slots_free:
             return (35, idx)
         # test7 run 3 opened Fire Wand while Garlic was still 3 and a second
         # weapon was already held. Passives and the two held weapons come first.
         # A card we already hold is a level, even if OCR still says "new".
-        # Blocking it is what made a stuck level-up click Stone Mask after
-        # Lightning Ring had just been taken.
         if _holds_two_damage_weapons(levels) and (levels or {}).get(name, 0) <= 0:
             return (22, SECOND_ORDER.index(name) if name in SECOND_ORDER else 50)
+        if _core_slot_open(levels) and name not in CORE_SECOND_WEAPONS and name != "Garlic":
+            return (41, idx)
         if name in CROWD_WEAPONS:
             return (2, CROWD_WEAPONS.index(name))
         # A/B (VS_LAUREL_DAMAGE=0): a new Laurel is no kill weapon; low HP still takes it via DEFENSE.
@@ -1449,6 +1505,11 @@ def _focused_rank(
     if name in EVOLUTIONS and not c.new:
         evo = EVOLUTION_PAIRS.get(main, (None, ""))[1] if main else ""
         return (0, EVOLUTIONS.index(name), "main" if name == evo else "second")
+    # test9 296s: Santa Water was on the card and lost to a Pummarola level.
+    # It wins whenever it is offered, unless HP is at or under 25% (heal/Armor).
+    if name == "Santa Water" and _santa_water_now(hp):
+        # Above defense (tier 1) and under a real evolution (tier 0, low index).
+        return (0, 100, "second")
     if low and name in DEFENSE:
         if not _armor_upgrade_yields_to_garlic(name, c.new, hp, main_lv if main == "Garlic" else 0):
             missing = main is not None and name == partner_of(main) and levels.get(name, 0) <= 0
@@ -1503,6 +1564,28 @@ def _focused_rank(
         return (10, pri, "fallback")
     if c.new and name in WEAPONS and weapons >= MAX_WEAPONS:
         return (36, idx, "fallback")
+    # King Bible is the third weapon. It waits for a Garlic level and for Santa
+    # Water, and it is the only other weapon the early fallback may open.
+    if (
+        c.new
+        and name == "King Bible"
+        and levels.get(name, 0) <= 0
+        and weapons < MAX_WEAPONS
+        and _santa_water_now(hp)
+        and not (early and name in EARLY_AVOID_NEW)
+    ):
+        return (5, 1, "second")
+    if (
+        c.new
+        and name in WEAPONS
+        and name not in CORE_SECOND_WEAPONS
+        and name != "Garlic"
+        and name not in AVOID
+        and _core_slot_open(levels)
+    ):
+        # Worse than the avoid list, so a keeper like Magic Wand or Runetracer
+        # does not take the slot Santa Water and King Bible still need.
+        return (41, idx, "fallback")
     if (
         c.new
         and name in EVOLUTION_PAIRS
