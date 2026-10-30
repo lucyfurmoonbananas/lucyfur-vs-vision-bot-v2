@@ -1843,8 +1843,9 @@ BUILD_LOW_TAKES: tuple[str, ...] = ("Floor Chicken", "Armor", "Hollow Heart")
 def _missing_held_passive(name: str, levels: dict[str, int]) -> bool:
     """True when the local held-partner ranker would claim ``name``.
 
-    That function is added by the uncommitted level-up patch. Without it,
-    Armor stays off the build list above 25% HP.
+    That function is added by the uncommitted level-up patch. It only labels
+    a card that already won. It does not outrank a build card: test17 took
+    Spinach over a held Santa Water when this used to return tier 4.
     """
     fn = globals().get("_held_partner_name")
     if fn is None or not name:
@@ -1890,10 +1891,10 @@ def _build_screen_pick(
             return (9, i)
         if low and name in BUILD_LOW_TAKES:
             return (0, BUILD_LOW_TAKES.index(name), i)
-        # The local patch ranks a missing passive (Armor for a held Runetracer)
-        # above a new King Bible. It stays under Garlic and Pummarola.
-        if _missing_held_passive(name, held) and name not in ("Garlic", "Pummarola"):
-            return (4, i)
+        # A missing evolution passive (Spinach for a held Fire Wand, Armor for
+        # a held Runetracer) used to sit at tier 4, above Santa Water and King
+        # Bible. test17 took Spinach over a held Santa Water that way. Any
+        # build card beats that passive. Armor at full HP is not a build card.
         if name not in BUILD_ITEMS or name in BANNED_WHILE_BUILD:
             return (9, i)
         if name == "Santa Water" and card.new and santa_new_wins:
@@ -1953,6 +1954,75 @@ def choose_pick(
         _pick_game_s.reset(token)
 
 
+# Not on the seven-card list, but still worth taking over a brand-new weapon
+# when nothing from that list is offered. Order is the preference.
+_USEFUL_OFF_BUILD: tuple[str, ...] = ("Empty Tome", "Clover", "Spinach")
+# test17 took these on screens that had a real weapon and no build card.
+# Armor under half HP stays the defense card.
+_FILLER_PASSIVES: frozenset[str] = frozenset({"Duplicator", "Bracer", "Armor"})
+
+
+def _filler_passive(name: str, hp: float | None) -> bool:
+    """True when ``name`` should lose to a weapon before 10:00."""
+    if name not in _FILLER_PASSIVES:
+        return False
+    if name == "Armor" and hp is not None and hp < DEFENSIVE_HP:
+        return False
+    return True
+
+
+def _pick_past_filler(
+    cards: list[Card],
+    hp: float | None,
+    game_s: float | None,
+) -> tuple[int, str] | None:
+    """Before 10:00, with no build card, do not take Duplicator, Bracer, or Armor.
+
+    Armor at or below half HP is left to the defense rank. A Crown, Stone Mask,
+    Hollow Heart, or Wings on the same screen keeps the old rank too. A useful
+    passive (Empty Tome, Clover, Spinach) beats opening a weapon. Otherwise the
+    best weapon wins: a real one in SECOND_ORDER, then the first avoid-list card.
+    A weapon-only screen is not rewritten.
+    """
+    if not _build_window(game_s):
+        return None
+    if hp is not None and hp <= BUILD_LOW_HP:
+        return None
+    visible = [
+        (i, c)
+        for i, c in enumerate(cards)
+        if c.name and not (c.score and c.score < NAME_RETRY_BELOW)
+    ]
+    if any(c.name in BUILD_ITEMS for _, c in visible):
+        return None
+    if not any(_filler_passive(c.name, hp) for _, c in visible):
+        return None
+    if any(
+        c.name not in WEAPONS
+        and c.name not in _USEFUL_OFF_BUILD
+        and not _filler_passive(c.name, hp)
+        for _, c in visible
+    ):
+        return None
+    useful = [(i, c) for i, c in visible if c.name in _USEFUL_OFF_BUILD]
+    if useful:
+        best = min(useful, key=lambda ic: (_USEFUL_OFF_BUILD.index(ic[1].name), ic[0]))
+        return best[0], "fallback"
+    weapons = [(i, c) for i, c in visible if c.name in WEAPONS]
+
+    def weapon_key(ic: tuple[int, Card]) -> tuple[int, int, int]:
+        i, card = ic
+        name = card.name
+        if name in AVOID:
+            return (2, i, 0)
+        order = SECOND_ORDER.index(name) if name in SECOND_ORDER else 40
+        return (0, order, i)
+
+    if not weapons:
+        return None
+    return min(weapons, key=weapon_key)[0], "fallback"
+
+
 def _choose_pick_timed(
     cards: list[Card],
     hp: float | None,
@@ -1970,6 +2040,9 @@ def _choose_pick_timed(
         build = _build_screen_pick(cards, hp, levels, game_s)
         if build is not None:
             return CardPick(build[0], build[1])
+        plain = _pick_past_filler(cards, hp, game_s)
+        if plain is not None:
+            return CardPick(plain[0], plain[1])
     eff, certain = assess_inventory(cards, levels)
     if not certain:
         if levels is not None:

@@ -13,7 +13,7 @@ import math
 import numpy as np
 
 from vs_vision_bot.config import Config
-from vs_vision_bot.pathfind import Navigator
+from vs_vision_bot.pathfind import Navigator, Tuning
 from vs_vision_bot.vision import Vision, estimate_scroll
 
 from tests.test_movement import Clock, P, blob, result
@@ -43,10 +43,22 @@ def _advance(player: tuple[float, float], vec: tuple[int, int], dt: float, block
     return (x, y), (player[0] - x, player[1] - y)
 
 
-def _drive(blocks: list[Block], pack, frames: int, hp: float = 1.0, game_s: float = 30.0):
+# The live default is off. Geometry tests opt in at the old window.
+_ON = Tuning(obstacle_window_s=0.40)
+
+
+def _drive(
+    blocks: list[Block],
+    pack,
+    frames: int,
+    hp: float = 1.0,
+    game_s: float = 30.0,
+    tune: Tuning | None = None,
+    frozen: bool = False,
+):
     clock = Clock()
     logs: list[str] = []
-    nav = Navigator(clock=clock, log=logs.append)
+    nav = Navigator(tune=tune or _ON, clock=clock, log=logs.append)
     nav.game_s = game_s
     player = (0.0, 0.0)
     vec = (0, 0)
@@ -54,7 +66,10 @@ def _drive(blocks: list[Block], pack, frames: int, hp: float = 1.0, game_s: floa
     for i in range(frames):
         clock.t += 1.0 / 12.0
         scroll = None
-        if i:
+        if frozen:
+            if i:
+                scroll = (0.0, 0.0)
+        elif i:
             player, scroll = _advance(player, vec, 1.0 / 12.0, blocks)
         res = result(pack)
         res.scroll = scroll
@@ -165,3 +180,65 @@ def test_skeleton_window_still_dives_a_pack_and_only_turns_for_a_wall():
     walled, path, _logs = _drive([(48.0, -400.0, 70.0, 400.0)], pack, 30, hp=1.0, game_s=180.0)
     assert max(p[0] for p in path) < 48.0
     assert walled.breakouts == 0
+
+
+def test_open_field_stall_does_not_fire_when_the_detector_is_off():
+    """test17: phase correlation stalled in the open, 270-420 stucks a run.
+
+    The default window is 0. A frozen background with a pack to the east is
+    still a dive, and it does not log a terrain block.
+    """
+    nav, path, logs = _drive([], _east_pack(), 36, hp=1.0, tune=Tuning(), frozen=True)
+    assert not any(line.startswith("[nav] stuck") for line in logs)
+    assert not any(line.startswith("[nav] obstacle") for line in logs)
+    assert all(v[0] > 0 for _, _, v in path)
+    assert nav.breakouts == 0
+
+
+def test_crowd_stall_does_not_reroute_a_dive_above_quarter_hp():
+    """Body-blocked scroll is not a wall. Flag on, skeleton window, hp 1.
+
+    The pack sits just east of Poe. danger_here is hot, so the stall must not
+    ban the dive heading.
+    """
+    pack = blob(P[0] + 70, P[1], n=40, spread=18, seed=3)
+    nav, path, logs = _drive(
+        [], pack, 24, hp=1.0, game_s=180.0, tune=_ON, frozen=True,
+    )
+    assert nav.last is not None and nav.last.danger_here >= 2.0
+    assert not any(line.startswith("[nav] stuck") for line in logs)
+    assert not any(line.startswith("[nav] obstacle") for line in logs)
+    assert all(v[0] > 0 for _, _, v in path)
+    assert nav.breakouts == 0
+
+
+def test_menu_sequence_does_not_carry_a_stuck_timer():
+    """Level-up and chest screens freeze the background. That is not terrain.
+
+    Four stalled steps sit just under the window. A menu clears the timer, so
+    four more stalled steps still do not fire. The same eight steps without
+    the menu would.
+    """
+    clock = Clock()
+    logs: list[str] = []
+    nav = Navigator(tune=_ON, clock=clock, log=logs.append)
+    nav.game_s = 40.0
+    pack = _east_pack()
+
+    def stall(menu: bool) -> None:
+        clock.t += 1.0 / 12.0
+        res = result(pack, menu=menu)
+        res.scroll = (0.0, 0.0)
+        vec = nav.step(res, hp=1.0).vector
+        if menu:
+            assert vec == (0, 0)
+
+    for _ in range(5):
+        stall(False)
+    assert not any(line.startswith("[nav] stuck") for line in logs)
+    for _ in range(4):
+        stall(True)
+    for _ in range(5):
+        stall(False)
+    assert not any(line.startswith("[nav] stuck") for line in logs)
+    assert not any(line.startswith("[nav] obstacle") for line in logs)

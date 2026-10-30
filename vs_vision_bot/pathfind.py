@@ -404,7 +404,11 @@ class Tuning:
     # cell in world space and that heading is refused for obstacle_ban_s.
     # The cell itself fades after obstacle_ttl_s. 0 disables the detector.
     # VS_TUNE=obstacle_window_s=0. Mobs are never written into this grid.
-    obstacle_window_s: float = 0.40
+    # Off by default. test17 fired this 270-420 times a run: phase correlation
+    # reports only a few percent of real walking speed, including in the open
+    # at 1s, so every heading looked blocked. VS_TUNE=obstacle_window_s=0.40
+    # turns the detector on. Even then a crowd (cover or danger) is not terrain.
+    obstacle_window_s: float = 0.0
     obstacle_ratio: float = 0.35
     obstacle_ban_s: float = 2.5
     obstacle_ttl_s: float = 6.0
@@ -1461,6 +1465,7 @@ class Navigator:
         self._hp_hist: list[tuple[float, float]] = []  # (wall_t, hp) for crash detect
         self._hp_crashing = False
         self._hp_crash_latched = False  # edge-trigger flee once per crash bout
+        self._hp_crash_flee = False     # this _flee_remaining came from an HP crash
         self._hp_crash_peak = 0.0       # peak HP of the current crash look-back (for the log)
         self._flower_on = False         # edge-trigger the flower-window log line
         self._touch_ring = False        # farm-mode breakout from a ring already on Poe
@@ -1548,6 +1553,7 @@ class Navigator:
         dur = t.flee_after_revive_s if duration_s is None else float(duration_s)
         cap = t.breakout_max_s if max_s is None else float(max_s)
         clamped = max(t.breakout_min_s, min(dur, cap))
+        self._hp_crash_flee = False
         self._flee_remaining = max(self._flee_remaining, clamped)
         self._end_breakout()  # pre-death / stale corridor; pick fresh on next start
         # A plain flee replaces any committed escape (request_revive_escape and the
@@ -1875,6 +1881,7 @@ class Navigator:
         if crashing and not self._hp_crash_latched and not farming(hp, t):
             dur = self.request_flee(t.flee_on_hp_crash_s, max_s=t.breakout_max_crash_s)
             self._hp_crash_latched = True
+            self._hp_crash_flee = True
             self.log(
                 f"[nav] HP-crash flee: hp {self._hp_crash_peak:.2f}->{hp:.2f} within "
                 f"{t.hp_crash_window_s:.1f}s, flee {dur:.1f}s game~{self.game_s:.0f}s"
@@ -1948,6 +1955,23 @@ class Navigator:
         # breakout. A post-revive flee and a committed revive escape still run:
         # those are request_flee / request_revive_escape, not a pack breakout.
         ring_on = (self.escaping or self._escape_pending) and self._escape_reason == "ring"
+        # An HP-crash timer used to run out even after the bar was back above
+        # 25%. _note_hp_crash clears the latch once the drop leaves the
+        # look-back, while _flee_remaining is still counting, so the crash
+        # flee is its own flag. A plain request_flee, a revive, or a ring
+        # escape is not that timer. A blind bar is passed in as 0.00, so it
+        # stays under the kite line and the flee keeps running.
+        if (
+            farming(hp, t)
+            and self._hp_crash_flee
+            and self._flee_remaining > 0
+            and not ring_on
+            and not (self.escaping and self._escape_reason == "revive")
+        ):
+            self._flee_remaining = 0.0
+            self._hp_crash_flee = False
+            self._hp_crash_latched = False
+            self._hp_crashing = False
         keep_flee = not ring_on and (
             self._flee_remaining > 0
             or self._escape_pending
@@ -2349,6 +2373,10 @@ class Navigator:
         t = self.tune
         if t.obstacle_window_s <= 0 or t.player_speed <= 0:
             return
+        # A mob in the way stalls the background too. That is not a tree.
+        if self._crowd_blocks_obstacle():
+            self._stuck_s = 0.0
+            return
         cmd = self.current
         if cmd != self._stuck_cmd:
             self._stuck_cmd = cmd
@@ -2418,7 +2446,14 @@ class Navigator:
             return _nearest_dir((-float(y), float(x)))
         return _nearest_dir((float(y), -float(x)))
 
-    def _route_around(self, choice: tuple[int, int]) -> tuple[int, int]:
+    def _crowd_blocks_obstacle(self) -> bool:
+        """True when the stall is a body, not the ground. Cover or kernel danger."""
+        if self.cover >= 0.45:
+            return True
+        last = self.last
+        return last is not None and last.danger_here >= 2.0
+
+    def _route_around(self, choice: tuple[int, int], hp: float | None) -> tuple[int, int]:
         """Refuse a heading that just failed to move, and the cell in front of it.
 
         Both perpendiculars are tried, the side alternating each time a heading
@@ -2426,6 +2461,10 @@ class Navigator:
         """
         self._expire_obstacles()
         if self.tune.obstacle_window_s <= 0:
+            return choice
+        # Above 25% HP a dive into a crowd keeps its heading. A terrain cell
+        # remembered in the open may still steer.
+        if farming(hp, self.tune) and self._crowd_blocks_obstacle():
             return choice
         # Nothing has stuck, and standing still is a legal late-game choice.
         if not self._obs and not any(ban > self.game_s for ban in self._dir_ban):
@@ -2935,8 +2974,11 @@ class Navigator:
         if result.timer_s is not None:
             self._sync_timer(float(result.timer_s), now)
         if result.menu:
-            # Level-up / chest screens pause the game clock too.
+            # Level-up / chest screens pause the game clock too. A frozen
+            # screen is not a terrain block, and the stuck timer does not
+            # carry out of the menu.
             self.current = (0, 0)
+            self._stuck_s = 0.0
             self.dive = 0.0
             self.last = Decision((0, 0), {}, 0.0, "menu")
             return self.last
@@ -3218,7 +3260,7 @@ class Navigator:
                         dec.mode = "leash-orbit"
                     elif "escape" in dec.mode or dec.mode == "breakout":
                         dec.mode = "leash-step"
-        choice = self._route_around(choice)
+        choice = self._route_around(choice, hp)
         dec.vector = choice
         if choice != self.current:
             self._since_change = 0.0
@@ -3335,9 +3377,14 @@ class Navigator:
         if self._critical_on:
             self._critical_on = False
             self.log(f"[nav] critical HP cleared (overlay) game~{self.game_s:.0f}s")
-        crash_flee = self._hp_crash_latched and self._flee_remaining > 0 and not self.escaping
+        crash_flee = (
+            (self._hp_crash_latched or self._hp_crash_flee)
+            and self._flee_remaining > 0
+            and not self.escaping
+        )
         self._hp_crashing = False
         self._hp_crash_latched = False
+        self._hp_crash_flee = False
         self._hp_hist.clear()
         if crash_flee:
             self._flee_remaining = 0.0
