@@ -525,11 +525,14 @@ def main(argv: list[str] | None = None) -> int:
                         now_obs, read_hp_fraction(frame), pilot.hp, None, menu_kind or "menu", frame,
                     )
             else:
-                acted_hp = hp_for_nav(
-                    pilot.hp,
-                    getattr(pilot, "hp_blind", False),
-                    getattr(pilot, "hp_low_held", False),
-                )
+                if hasattr(pilot, "hp_acted"):
+                    acted_hp = pilot.hp_acted()
+                else:
+                    acted_hp = hp_for_nav(
+                        pilot.hp,
+                        getattr(pilot, "hp_blind", False),
+                        getattr(pilot, "hp_low_held", False),
+                    )
                 decision = nav.step(result, hp=acted_hp)
                 vector, keys = decision.vector, cfg.keys_for_vector(decision.vector)
                 hp_txt = format_logged_hp(pilot.hp, acted_hp)

@@ -543,6 +543,10 @@ CROWD_BREAK_DANGER = 4.0
 # A filled pack at this range already lifts the 42px kernel (the dive crowd
 # reads ~1.7). test10 run2 sat at 1.0-1.4 while HP fell from 1.00 to 0.50.
 OUTLINE_KERNEL = 1.55
+# Multi-hit bodies (ghouls, werewolves, mantises, big dark-blue) and bosses.
+# Kind column on a threat row: 0 weak, 1 tanky, 2 boss. Untagged rows are weak.
+TANKY_STANDOFF = 84.0
+BOSS_STANDOFF = 128.0
 
 
 def flower_graze(game_s: float, tune: Tuning) -> bool:
@@ -932,6 +936,49 @@ def engage_pull(
     return (tune.engage_gain * fade * (_UNIT[:, 0] * vx / n + _UNIT[:, 1] * vy / n)).astype(np.float32)
 
 
+def _as_points(threats) -> np.ndarray:
+    """Threat rows (x, y, weight[, kind]). A flat list is still triples."""
+    arr = np.asarray(threats, dtype=np.float32)
+    if arr.size == 0:
+        return np.zeros((0, 3), np.float32)
+    if arr.ndim == 1:
+        return arr.reshape(-1, 3)
+    return arr
+
+
+def _kinds_of(pts: np.ndarray) -> np.ndarray | None:
+    if pts.shape[0] == 0 or pts.shape[1] < 4:
+        return None
+    return pts[:, 3]
+
+
+def _hold_hard(pts: np.ndarray, px: float, py: float) -> tuple[float, float] | None:
+    """Away from the nearest tanky or boss body inside its standoff.
+
+    A body just outside that ring is kited along the tangent so the step does
+    not close. Far bodies are left to a weak-pack dive.
+    """
+    kinds = _kinds_of(pts)
+    if kinds is None:
+        return None
+    hard = np.flatnonzero(kinds >= 1.0)
+    if hard.size == 0:
+        return None
+    rel = pts[hard, :2] - np.array([px, py], dtype=np.float32)
+    dist = np.hypot(rel[:, 0], rel[:, 1])
+    radii = np.where(kinds[hard] >= 2.0, BOSS_STANDOFF, TANKY_STANDOFF).astype(np.float32)
+    i = int(np.argmin(dist))
+    d = float(dist[i])
+    if d < 1e-3:
+        return (-1.0, 0.0)
+    ux, uy = float(rel[i, 0]) / d, float(rel[i, 1]) / d
+    if d <= float(radii[i]):
+        return (-ux, -uy)
+    if d <= float(radii[i]) * 1.2:
+        return (-uy, ux)
+    return None
+
+
 def _crowd_heading(pts: np.ndarray, px: float, py: float) -> tuple[float, float] | None:
     """Unit vector toward the weighted crowd centroid, or None when it cancels."""
     if pts.shape[0] == 0:
@@ -1043,7 +1090,7 @@ def score_directions(
 ) -> Decision:
     """Pure scoring: returns the best 8-way (or idle) vector plus diagnostics."""
     tune = tune or Tuning()
-    pts = np.asarray(threats, dtype=np.float32).reshape(-1, 3) if threats is not None else np.zeros((0, 3), np.float32)
+    pts = _as_points(threats) if threats is not None else np.zeros((0, 3), np.float32)
     px, py = float(player[0]), float(player[1])
     critical = hp is not None and tune.critical_hp > 0 and hp < tune.critical_hp
     defensive = critical or (hp is not None and hp < tune.low_hp)
@@ -1172,11 +1219,20 @@ def score_directions(
 
     # No gem and no chest: the pack itself is the XP, approached from outside
     # the Garlic ring. A body already inside that ring is backed off, not dived.
+    # Tanky and boss rows are not a dive: hold their standoff, and only aim at
+    # the weak bodies that sit off that side.
     near = near_any if farm else None
     inside_floor = near is not None and tune.engage_standoff > 0 and near[0] <= tune.engage_standoff
     inside_ring = inside_floor or outline
+    hold = _hold_hard(pts, px, py) if farm else None
     if farm and not inside_ring and not gem_near and (chest is None or tune.chest_gain <= 0):
-        aim = _pack_aim(pts, px, py, tune.engage_standoff)
+        aim_pts = pts
+        kinds = _kinds_of(pts)
+        if kinds is not None and np.any(kinds >= 1.0):
+            aim_pts = pts[kinds < 1.0]
+        aim = _pack_aim(aim_pts, px, py, tune.engage_standoff) if aim_pts.shape[0] else None
+        if hold is not None:
+            aim = hold
         if aim is not None and tune.farm_gain > 0:
             scores = scores + tune.farm_gain * (_UNIT[:, 0] * aim[0] + _UNIT[:, 1] * aim[1])
         elif kite_dir is not None and kite_weight > 0:
@@ -1228,9 +1284,18 @@ def score_directions(
         # next skeleton just off that body still wins. Outline contact does
         # not shove: the pixels are outside that ring.
         if inside_floor and tune.engage_standoff >= GRAZE_STANDOFF:
-            away = _pack_aim(pts, px, py, tune.engage_standoff)
+            away = hold or _pack_aim(pts, px, py, tune.engage_standoff)
             if away is not None and tune.farm_gain > 0:
                 scores = scores + tune.farm_gain * (_UNIT[:, 0] * away[0] + _UNIT[:, 1] * away[1])
+    if farm and hold is not None and tune.farm_gain > 0:
+        # Gems and a weak pack must not pull the step back onto the tanky body.
+        toward = np.clip(-(_UNIT[:, 0] * hold[0] + _UNIT[:, 1] * hold[1]), 0.0, None)
+        block = (
+            tune.farm_gain
+            + max(tune.gem_seek_gain, tune.early_gem_gain, tune.gem_gain, tune.gem_target_gain, 0.0)
+            + 2.0
+        )
+        scores = scores - np.float32(block) * toward
 
     if current in DIRS:
         scores[DIRS.index(current)] += tune.hysteresis * (1.0 - 0.6 * panic)
@@ -1470,6 +1535,8 @@ class Navigator:
         self._flower_on = False         # edge-trigger the flower-window log line
         self._touch_ring = False        # farm-mode breakout from a ring already on Poe
         self._crowd_ring = False        # late closing crowd, bodies still outside 42px
+        self._into_crowd: tuple[float, float] | None = None  # last closed-ring side
+        self._revive_block: tuple[float, float] | None = None  # frozen at revive request
         self._gems_hold_chest = False   # gems cancelled the chest commit; do not orbit-flee
         self._dir_ban = [0.0] * len(DIRS)  # game_s until which that heading is refused
         self._obs: dict[tuple[int, int], float] = {}  # world cell -> expiry game_s
@@ -1581,6 +1648,7 @@ class Navigator:
         """
         t = self.tune
         dur = t.revive_escape_s if duration_s is None else float(duration_s)
+        self._revive_block = self._into_crowd
         return self._request_escape(dur, "revive")
 
     def _request_escape(self, dur: float, reason: str) -> float:
@@ -1645,7 +1713,8 @@ class Navigator:
                 ecost = self._no_reverse(ecost, self._recent_break_dir())
                 pick = _pick_min(ecost, self._roam_vec())
             else:
-                pick = self._revive_pick(ecost, px, py)
+                ecost = self._penalize_death_ring(ecost)
+            pick = self._revive_pick(ecost, px, py)
             self.breakout = tuple(float(v) for v in _UNIT[pick])
             self._escape_origin = self.breakout
             self._breakout_origin = self.breakout
@@ -1692,6 +1761,38 @@ class Navigator:
 
     def _roam_vec(self) -> tuple[float, float]:
         return (math.cos(self.heading), math.sin(self.heading))
+
+    def _note_into_crowd(self, pts: np.ndarray, px: float, py: float) -> None:
+        """Remember which way a closing ring sits, so a revive does not re-enter it.
+
+        Frozen once the escape is requested. A revive test that arms the escape
+        before any crowd is on screen keeps the old heading pick.
+        """
+        if self.escaping or self._escape_pending or self.cover < 0.55 or pts.shape[0] == 0:
+            return
+        aim = _crowd_heading(pts, px, py)
+        if aim is not None:
+            self._into_crowd = aim
+
+    def _penalize_death_ring(self, costs: np.ndarray) -> np.ndarray:
+        """Headings straight back into the pre-death crowd lose to the open side."""
+        block = self._revive_block if self._escape_reason == "revive" else None
+        if block is None:
+            return costs
+        ux, uy = block
+        dots = _UNIT[:, 0] * ux + _UNIT[:, 1] * uy
+        return costs + np.clip(dots, 0.0, None).astype(np.float32) * 80.0
+
+    def _thickening_ring(self) -> bool:
+        """A hot closed ring. test18 farmed these until the bar crashed.
+
+        A far ring (danger under 4, the 160px case) and a one-sided pack stay
+        a dive. The check is the kernel and the cover together, so a skeleton
+        wave that is only a pack on one side is unchanged.
+        """
+        if self.cover < 0.70:
+            return False
+        return self.last is not None and self.last.danger_here >= 4.0
 
     def _revive_pick(self, costs: np.ndarray, px: float, py: float) -> int:
         """Revive heading. Near-equal costs are not broken by DIRS order.
@@ -2213,6 +2314,7 @@ class Navigator:
                 self._flee_remaining = 0.0
                 return
         costs = escape_costs(pts, px, py, t)
+        costs = self._penalize_death_ring(costs)
         # Revive may lean toward a pending chest on a re-aim. A wall commit does not.
         if self._escape_reason != "ring":
             costs = self._nudge_leash(costs)
@@ -2990,7 +3092,7 @@ class Navigator:
         pts = result.threats
         if pts is None:
             pts = _points_from_detections(result)
-        pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
+        pts = _as_points(pts)
         px, py = _ref_player(result)
         self._sight_leash(result, px, py)
         self._expire_leash()
@@ -3000,6 +3102,7 @@ class Navigator:
         spot = result.chest or result.chest_arrow
         self._aim_hint = (float(spot[0]), float(spot[1])) if spot is not None else None
         self._update_breakout(pts, px, py, dt, hp)
+        self._note_into_crowd(pts, px, py)
         escape = self.breakout is not None and self._escape_remaining > 0
         here = float(_danger_at(pts, np.array([px]), np.array([py]), self.tune.radius)[0])
         self._commit = self._chest_commit(hp)
@@ -3226,6 +3329,26 @@ class Navigator:
                 self._blocked_s = 0.0
 
         choice = dec.vector
+        # A hot closed ring is left through the opening. The mode stays farm so
+        # a skeleton wave is not counted as a breakout. One inward step is what
+        # test18 kept taking until the bar crashed.
+        if (
+            self.breakout is None
+            and farming(hp, self.tune)
+            and hp is not None
+            and hp > 0.5
+            and self._thickening_ring()
+            and choice != (0, 0)
+        ):
+            crowd = _crowd_heading(pts, px, py)
+            if crowd is not None:
+                cn = math.hypot(choice[0], choice[1]) or 1.0
+                inward = (choice[0] * crowd[0] + choice[1] * crowd[1]) / cn
+                if inward > 0.35:
+                    costs = corridor_costs(
+                        pts, px, py, self.tune.corridor_len, self.tune.corridor_width,
+                    )
+                    choice = DIRS[_pick_min(costs, choice)]
         # During the escape the dwell may only keep a chord that is inside the cone.
         keep_ok = cone is None or self.current in cone
         if keep_ok and choice != self.current and self.current != (0, 0) and self._since_change < self.tune.min_dwell_s:
@@ -3423,7 +3546,7 @@ def choose_vector(
     if result.menu:
         return (0, 0)
     pts = result.threats if result.threats is not None else _points_from_detections(result)
-    pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
+    pts = _as_points(pts)
     if pts.shape[0] == 0:
         return (0, 0)
     dec = score_directions(

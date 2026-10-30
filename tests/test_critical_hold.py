@@ -46,7 +46,10 @@ def test_quarter_hp_and_a_full_bar_flash_stay_critical():
     # The same three-frame flash, then the bar disappears. Still critical.
     for _ in range(4):
         flash.add(None)
-    assert menus.hp_for_nav(flash.value, flash.blind, flash.low_held) == 0.0
+    acted = menus.hp_for_nav(
+        flash.value, flash.blind, flash.low_held, trusted=flash._trusted, blind_s=0.0,
+    )
+    assert acted is not None and acted < menus.HP_CRITICAL
 
 
 def _green_over_bar() -> np.ndarray:

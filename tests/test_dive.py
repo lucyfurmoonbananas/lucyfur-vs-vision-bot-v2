@@ -131,22 +131,28 @@ def test_mid_low_and_critical_hp_are_unchanged():
 
 
 def test_blind_and_unknown_hp_do_not_dive():
+    """A lost bar keeps the last read, then decays to the kite line. It is not 0.00.
+
+    Unknown HP (never read) still farms. A fully decayed blind bar is at 0.25,
+    so it does not dive and it does not take the critical-HP flee.
+    """
     pts = _pack_east()
-    blind_hp = hp_for_nav(0.95, blind=True, low_held=False)
-    assert blind_hp == 0.0
-    blind = score_directions(pts, P, _KITE_N, 1.0, hp=blind_hp)
+    fresh = hp_for_nav(0.95, blind=True, low_held=False, blind_s=0.0)
+    faded = hp_for_nav(0.95, blind=True, low_held=False, blind_s=6.0)
+    assert abs(fresh - 0.95) < 1e-6
+    assert abs(faded - 0.25) < 1e-6
+    blind = score_directions(pts, P, _KITE_N, 1.0, hp=faded)
     critical = score_directions(pts, P, _KITE_N, 1.0, hp=0.0)
     unknown = score_directions(pts, P, _KITE_N, 1.0, hp=None)
     healthy = score_directions(pts, P, _KITE_N, 1.0, hp=0.95)
-    assert blind.scores == critical.scores
+    assert blind.scores != critical.scores
     assert blind.dive == 0.0
     assert unknown.dive == 0.0
     assert unknown.scores == score_directions(pts, P, _KITE_N, 1.0, hp=None, tune=_off()).scores
-    # Unknown and a full bar farm into the pack. A blind 0 read is critical and leaves.
     assert healthy.vector[0] > 0
     assert unknown.vector[0] > 0
     assert blind.vector[0] <= 0
-    assert blind.vector != healthy.vector
+    assert score_directions(pts, P, _KITE_N, 1.0, hp=fresh).vector[0] > 0
 
 
 def test_high_hp_seeks_a_gem_that_moderate_danger_used_to_refuse():
@@ -184,11 +190,11 @@ def test_high_hp_seeks_a_gem_that_moderate_danger_used_to_refuse():
     assert nav.dive == 0.0
     assert vecs[-1][0] <= 0
 
-    blind_hp = hp_for_nav(0.95, blind=True)
+    blind_hp = hp_for_nav(0.95, blind=True, blind_s=6.0)
+    assert abs(blind_hp - 0.25) < 1e-6
     blind, blind_vecs = frames(blind_hp)
-    critical, crit_vecs = frames(0.0)
-    assert blind_vecs == crit_vecs
     assert blind.dive == 0.0
+    assert blind_vecs[-1][0] <= 0
 
 
 def test_kite_floor_emergencies_ignore_the_dive():
