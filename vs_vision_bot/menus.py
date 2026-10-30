@@ -2144,6 +2144,13 @@ HP_FULL_FLASH_N = 6
 # A second 0.00, or any read that is merely low (0.06), is real.
 HP_OVERLAY_ZERO = 0.02
 HP_OVERLAY_HEALTHY = 0.35
+# A blind bar used to be passed to nav as 0.00, so a lost read kept a critical
+# ring-escape running for minutes (test18 run 3, from 3:21 to 5:07). Keep the
+# last trusted sample and slide it down to the kite line. Do not slide a
+# reading that is already under that line back up.
+HP_BLIND_DECAY_S = 6.0
+HP_BLIND_FLOOR = 0.25
+HP_BLIND_FPS = 12.0
 
 
 class HpTracker:
@@ -2164,6 +2171,8 @@ class HpTracker:
         self._overlay = False
         self._overlay_base: float | None = None
         self._healthy: float | None = None
+        self._trusted: float | None = None
+        self._blind_reads = 0
 
     def add(self, v: float | None) -> None:
         if v is None:
@@ -2173,8 +2182,12 @@ class HpTracker:
             self.misses += 1
             if self.values and self.misses >= self.miss_limit:
                 self._anchor = self.value
+                self._remember_trusted()
+                self._blind_reads = 0
                 self.values.clear()
                 self.blind = True
+            elif self.blind:
+                self._blind_reads += 1
             return
         v = float(v)
         base = self.value if self.values else self._anchor
@@ -2212,6 +2225,8 @@ class HpTracker:
         self.values.append(float(v))
         del self.values[: -self.window]
         self._anchor = self.value
+        self._remember_trusted()
+        self._blind_reads = 0
         self._sync_low([float(v)])
         if not self.low_held and self.value is not None and self.value >= HP_OVERLAY_HEALTHY:
             self._healthy = float(self.value)
@@ -2222,6 +2237,8 @@ class HpTracker:
         self._pending.clear()
         self.values = [float(s) for s in samples[-self.window :]]
         self._anchor = self.value
+        self._remember_trusted()
+        self._blind_reads = 0
         self._sync_low([float(s) for s in self.values])
 
     def _sync_low(self, samples: list[float]) -> None:
@@ -2276,6 +2293,8 @@ class HpTracker:
         self._overlay = False
         self._overlay_base = None
         self._healthy = None
+        self._trusted = None
+        self._blind_reads = 0
 
     def suspend_for_overlay(self) -> None:
         """Chest or level-up is up. Remember the last healthy bar and ignore 0.00."""
@@ -2338,15 +2357,49 @@ class HpTracker:
             return None
         return float(np.median(self.values))
 
+    def _remember_trusted(self) -> None:
+        """Last bar nav may decay from. A critical latch ignores an unconfirmed high."""
+        if self.value is None:
+            return
+        if self.low_held and self.value >= HP_CRITICAL:
+            return
+        self._trusted = float(self.value)
 
-def hp_for_nav(hp: float | None, blind: bool, low_held: bool = False) -> float | None:
-    """HP nav should act on. A bar lost under a swarm counts as empty.
 
-    ``low_held`` keeps that empty reading when the last accepted sample was
-    critical and the median has not recovered yet (the window can still be the
-    pre-crash high while the bar is already unreadable).
+def decay_blind_hp(trusted: float | None, blind_s: float) -> float | None:
+    """Last trusted HP, slid toward the kite line over ``HP_BLIND_DECAY_S``.
+
+    A bar that was never read stays unknown. A reading already at or under the
+    floor is left there, so a real critical sample is not healed by the decay.
     """
-    if blind or (low_held and (hp is None or hp >= HP_CRITICAL)):
+    if trusted is None:
+        return None
+    trusted = float(trusted)
+    if trusted <= HP_BLIND_FLOOR:
+        return trusted
+    span = max(HP_BLIND_DECAY_S, 1e-6)
+    t = min(1.0, max(0.0, float(blind_s)) / span)
+    return trusted + (HP_BLIND_FLOOR - trusted) * t
+
+
+def hp_for_nav(
+    hp: float | None,
+    blind: bool,
+    low_held: bool = False,
+    trusted: float | None = None,
+    blind_s: float = 0.0,
+) -> float | None:
+    """HP nav should act on.
+
+    A lost bar keeps the last trusted sample and decays it toward the kite
+    line. It is not passed in as 0.00. ``low_held`` still forces an empty
+    reading when the bar is visible but the critical latch has not released
+    (the median can still be the pre-crash high).
+    """
+    if blind:
+        base = trusted if trusted is not None else hp
+        return decay_blind_hp(base, blind_s)
+    if low_held and (hp is None or hp >= HP_CRITICAL):
         return 0.0
     return hp
 
@@ -2654,6 +2707,14 @@ class MenuPilot:
     def hp_low_held(self) -> bool:
         """True after a critical read until a trusted recovery, including missed frames."""
         return self._hp.low_held
+
+    def hp_acted(self) -> float | None:
+        """HP the navigator should use, including a decaying blind bar."""
+        blind_s = self._hp._blind_reads / HP_BLIND_FPS if self._hp.blind else 0.0
+        return hp_for_nav(
+            self.hp, self.hp_blind, self.hp_low_held,
+            trusted=self._hp._trusted, blind_s=blind_s,
+        )
 
     def new_run(self) -> None:
         """A fresh run: forget owned items and HP history."""

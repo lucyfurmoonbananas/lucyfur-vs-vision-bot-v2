@@ -24,7 +24,14 @@ def test_sustained_bar_loss_drops_stale_hp_and_nav_treats_it_as_empty():
     t.add(None)
     t.add(None)
     assert t.value is None and t.blind is True
-    assert menus.hp_for_nav(t.value, t.blind) == 0.0
+    # Just went blind: nav keeps the last trusted 0.89, it does not snap to 0.00.
+    assert menus.hp_for_nav(t.value, t.blind, trusted=t._trusted, blind_s=0.0) == pytest.approx(0.89)
+    for _ in range(12 * 6):
+        t.add(None)
+    faded = menus.hp_for_nav(
+        t.value, t.blind, trusted=t._trusted, blind_s=t._blind_reads / 12.0,
+    )
+    assert faded == pytest.approx(0.25)
 
     t.add(0.4)
     assert t.blind is False
@@ -40,10 +47,8 @@ def test_sustained_bar_loss_drops_stale_hp_and_nav_treats_it_as_empty():
 
     threat = np.array([[520.0, 270.0, 1.0]], np.float32)
     healthy = score_directions(threat, (480.0, 270.0), None, 0.0, hp=0.92)
-    blind = score_directions(
-        threat, (480.0, 270.0), None, 0.0, hp=menus.hp_for_nav(None, True),
-    )
-    assert blind.danger_here > healthy.danger_here
+    faded_step = score_directions(threat, (480.0, 270.0), None, 0.0, hp=0.25)
+    assert faded_step.vector != healthy.vector or faded_step.dive == 0.0
 
 
 def _solid(value: int) -> np.ndarray:
@@ -106,7 +111,8 @@ def test_upward_hp_spike_cannot_cancel_low_or_blind():
     assert t.blind is True
     t.add(spike)
     assert t.blind is True
-    assert menus.hp_for_nav(t.value, t.blind) == 0.0
+    held = menus.hp_for_nav(t.value, t.blind, trusted=t._trusted, blind_s=0.0)
+    assert held is None or held < menus.HP_CRITICAL
 
 
 def test_snaps_older_than_the_keep_window_are_dropped(tmp_path):

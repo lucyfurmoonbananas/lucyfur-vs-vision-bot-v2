@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import shutil
 import subprocess
@@ -105,6 +106,8 @@ class Vision:
         self._model = None
         self._timer_at = 0.0
         self._scroll_prev: np.ndarray | None = None
+        self._garlic = GarlicTicks()
+        self._garlic_at = 0.0
         if cfg.model_path:
             self._model = self._load_torch_model(cfg.model_path)
 
@@ -138,7 +141,12 @@ class Vision:
         gems = [(gx * sx, gy * sy) for gx, gy, _color in colored]
         gem_colors = [color for _gx, _gy, color in colored]
         monsters = detect_threat_blobs(frame, player, self.cfg, mask=mask)
-        threats = threat_points(mask)
+        now = time.monotonic()
+        dt = 0.0 if self._garlic_at <= 0.0 else min(0.5, now - self._garlic_at)
+        self._garlic_at = now
+        threats = tag_threat_points(
+            threat_points(mask), frame, mask, player=player, tracker=self._garlic, dt=dt,
+        )
         menu = detect_level_up_menu(frame)
         chest_xy = detect_chest(frame)
         arrow_xy = detect_chest_arrow(frame)
@@ -427,6 +435,124 @@ def threat_points(mask: np.ndarray, cell: int = CELL) -> np.ndarray:
     pts[:, 0] *= REF_W / w
     pts[:, 1] *= REF_H / h
     return pts
+
+
+# Kind column written by tag_threat_points: 0 weak, 1 tanky, 2 boss.
+# Green ghouls / mantises and the big dark-blue bodies are tanky. A solid
+# body much thicker than a bat or a skeleton outline is a boss. A merged
+# skeleton swarm stays thin (distance transform ~2) and stays weak.
+TANKY_GREEN = 80
+TANKY_BLUE = 80
+BOSS_SIDE = 72
+BOSS_MIN_SIDE = 40
+BOSS_AREA = 700
+BOSS_THICK = 5.5
+
+
+class GarlicTicks:
+    """A body that sits in the Garlic aura for two ticks was not one-shot.
+
+    Screen-space match. A weak sprite that survives is upgraded to tanky.
+    """
+
+    REACH = 46.0
+    TICK_S = 0.55
+    MATCH = 28.0
+
+    def __init__(self) -> None:
+        self._tracks: list[list[float]] = []
+
+    def update(
+        self, centers: list[tuple[float, float]], player: tuple[float, float], dt: float
+    ) -> list[bool]:
+        px, py = float(player[0]), float(player[1])
+        dt = max(0.0, float(dt))
+        used = [False] * len(self._tracks)
+        survived: list[bool] = []
+        fresh: list[list[float]] = []
+        for cx, cy in centers:
+            best_i = None
+            best_d = self.MATCH
+            for i, (tx, ty, _inside) in enumerate(self._tracks):
+                if used[i]:
+                    continue
+                d = math.hypot(cx - tx, cy - ty)
+                if d < best_d:
+                    best_d = d
+                    best_i = i
+            inside = math.hypot(cx - px, cy - py) <= self.REACH
+            prev = self._tracks[best_i][2] if best_i is not None else 0.0
+            if best_i is not None:
+                used[best_i] = True
+            held = (prev + dt) if inside else 0.0
+            fresh.append([cx, cy, held])
+            survived.append(held >= 2.0 * self.TICK_S)
+        self._tracks = fresh
+        return survived
+
+
+def _component_kind(frame: np.ndarray, labels: np.ndarray, index: int, stats: np.ndarray) -> float:
+    """0 weak, 1 tanky, 2 boss for one enemy-mask component."""
+    x = int(stats[cv2.CC_STAT_LEFT])
+    y = int(stats[cv2.CC_STAT_TOP])
+    bw = int(stats[cv2.CC_STAT_WIDTH])
+    bh = int(stats[cv2.CC_STAT_HEIGHT])
+    area = int(stats[cv2.CC_STAT_AREA])
+    h, w = frame.shape[:2]
+    y0, y1 = max(0, y - 6), min(h, y + bh + 6)
+    x0, x1 = max(0, x - 6), min(w, x + bw + 6)
+    b = frame[y0:y1, x0:x1, 0].astype(np.int16)
+    g = frame[y0:y1, x0:x1, 1].astype(np.int16)
+    r = frame[y0:y1, x0:x1, 2].astype(np.int16)
+    green = int(((g > 110) & (g > r + 15) & (g > b + 15) & ((r - b) >= 0) & ((r - b) <= 18)).sum())
+    blue = int(((b > 45) & (b > r + 18) & (b >= g) & (b < 190) & (r < 130) & (g < 160)).sum())
+    comp = (labels[y : y + bh, x : x + bw] == index).astype(np.uint8)
+    thick = float(cv2.distanceTransform(comp, cv2.DIST_L2, 3).max()) if comp.size else 0.0
+    if max(bw, bh) >= BOSS_SIDE and min(bw, bh) >= BOSS_MIN_SIDE and area >= BOSS_AREA and thick >= BOSS_THICK:
+        return 2.0
+    if green >= TANKY_GREEN or blue >= TANKY_BLUE:
+        return 1.0
+    return 0.0
+
+
+def tag_threat_points(
+    points: np.ndarray,
+    frame: np.ndarray,
+    mask: np.ndarray,
+    *,
+    player: tuple[float, float] | None = None,
+    tracker: GarlicTicks | None = None,
+    dt: float = 0.0,
+) -> np.ndarray:
+    """Append a kind column. ``points`` are reference pixels; ``mask`` is the frame."""
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    if pts.shape[0] == 0:
+        return np.zeros((0, 4), np.float32)
+    h, w = mask.shape[:2]
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    kind_of = np.zeros(n, dtype=np.float32)
+    centers: list[tuple[float, float]] = []
+    weak_ids: list[int] = []
+    sx, sy = w / REF_W, h / REF_H
+    for i in range(1, n):
+        if int(stats[i, cv2.CC_STAT_AREA]) < 30:
+            continue
+        kind_of[i] = _component_kind(frame, labels, i, stats[i])
+        if kind_of[i] < 1.0:
+            cx = (int(stats[i, cv2.CC_STAT_LEFT]) + int(stats[i, cv2.CC_STAT_WIDTH]) / 2.0) / sx
+            cy = (int(stats[i, cv2.CC_STAT_TOP]) + int(stats[i, cv2.CC_STAT_HEIGHT]) / 2.0) / sy
+            centers.append((cx, cy))
+            weak_ids.append(i)
+    if tracker is not None and player is not None and weak_ids:
+        pref = (float(player[0]) / sx, float(player[1]) / sy)
+        flags = tracker.update(centers, pref, dt)
+        for survived, comp_i in zip(flags, weak_ids):
+            if survived:
+                kind_of[comp_i] = 1.0
+    ix = np.clip((pts[:, 0] * sx).astype(np.int32), 0, w - 1)
+    iy = np.clip((pts[:, 1] * sy).astype(np.int32), 0, h - 1)
+    kinds = kind_of[labels[iy, ix]]
+    return np.column_stack((pts, kinds)).astype(np.float32)
 
 
 def _boxes(mask: np.ndarray, min_area: int, limit: int = 64) -> list[Detection]:
