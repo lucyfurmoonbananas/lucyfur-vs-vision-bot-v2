@@ -57,6 +57,46 @@ class VisionResult:
     xp: float | None = None
     # Frame size the detections were measured in.
     size: tuple[int, int] = (REF_W_DEFAULT, REF_H_DEFAULT)
+    # Background shift since the previous frame, in reference pixels.
+    # Content moving left means the camera followed a step to the right.
+    # None: no measurement this frame (the navigator dead-reckons).
+    scroll: tuple[float, float] | None = None
+
+
+_SCROLL_W, _SCROLL_H = 160, 90
+# A clean background correlates near 1. A frame that is mostly a moving body
+# does not, and that estimate is dropped instead of treated as a step.
+_SCROLL_MIN_RESPONSE = 0.25
+
+
+def estimate_scroll(prev: np.ndarray, frame: np.ndarray) -> tuple[float, float] | None:
+    """Background shift of ``frame`` relative to ``prev``, in reference pixels.
+
+    Phase correlation on a downscaled gray frame. The shift is how the content
+    moved: a step to the right scrolls the background left. A weak correlation
+    (a menu flash, or a frame that is mostly one moving body) returns None
+    instead of a false step.
+    """
+    if prev is None or frame is None or prev.shape != frame.shape or frame.size == 0:
+        return None
+    return _scroll_shift(_scroll_gray(prev), _scroll_gray(frame))
+
+
+def _scroll_shift(prev_gray: np.ndarray, gray: np.ndarray) -> tuple[float, float] | None:
+    shift, response = cv2.phaseCorrelate(prev_gray, gray)
+    if response < _SCROLL_MIN_RESPONSE:
+        return None
+    sx = float(shift[0]) * (REF_W_DEFAULT / _SCROLL_W)
+    sy = float(shift[1]) * (REF_H_DEFAULT / _SCROLL_H)
+    return (sx, sy)
+
+
+def _scroll_gray(frame: np.ndarray) -> np.ndarray:
+    gray = frame
+    if frame.ndim == 3:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    small = cv2.resize(gray, (_SCROLL_W, _SCROLL_H), interpolation=cv2.INTER_AREA)
+    return small.astype(np.float32)
 
 
 class Vision:
@@ -64,8 +104,18 @@ class Vision:
         self.cfg = cfg
         self._model = None
         self._timer_at = 0.0
+        self._scroll_prev: np.ndarray | None = None
         if cfg.model_path:
             self._model = self._load_torch_model(cfg.model_path)
+
+    def background_scroll(self, frame: np.ndarray) -> tuple[float, float] | None:
+        """Shift since the previous call. The first frame has nothing to compare."""
+        gray = None if frame is None else _scroll_gray(frame)
+        shift = None
+        if gray is not None and self._scroll_prev is not None and self._scroll_prev.shape == gray.shape:
+            shift = _scroll_shift(self._scroll_prev, gray)
+        self._scroll_prev = gray
+        return shift
 
     def analyze(self, frame: np.ndarray) -> VisionResult:
         h, w = frame.shape[:2]
