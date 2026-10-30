@@ -399,6 +399,16 @@ class Tuning:
     # Short look-ahead rollout: enemies chase while we walk each direction.
     rollout_gain: float = 0.6
     player_speed: float = 100.0    # reference px / s
+    # Solid obstacles, from motion only. A commanded step whose background
+    # scroll falls short of this fraction, for obstacle_window_s, paints a
+    # cell in world space and that heading is refused for obstacle_ban_s.
+    # The cell itself fades after obstacle_ttl_s. 0 disables the detector.
+    # VS_TUNE=obstacle_window_s=0. Mobs are never written into this grid.
+    obstacle_window_s: float = 0.40
+    obstacle_ratio: float = 0.35
+    obstacle_ban_s: float = 2.5
+    obstacle_ttl_s: float = 6.0
+    obstacle_cell: float = 36.0
     enemy_speed: float = 70.0
     rollout_s: float = 1.2         # per leg; two legs (turn allowed after the first)
     rollout_steps: int = 4
@@ -1450,6 +1460,12 @@ class Navigator:
         self._touch_ring = False        # farm-mode breakout from a ring already on Poe
         self._crowd_ring = False        # late closing crowd, bodies still outside 42px
         self._gems_hold_chest = False   # gems cancelled the chest commit; do not orbit-flee
+        self._dir_ban = [0.0] * len(DIRS)  # game_s until which that heading is refused
+        self._obs: dict[tuple[int, int], float] = {}  # world cell -> expiry game_s
+        self._stuck_s = 0.0
+        self._stuck_cmd: tuple[int, int] = (0, 0)
+        self._unstick_side = 1
+        self._obs_route: tuple[int, int] | None = None
         self._escape_remaining = 0.0    # >0: committed post-REVIVE escape running
         self._escape_s = 0.0            # time spent in the current escape
         self._escape_pending = False    # escape requested, heading not picked yet
@@ -2286,6 +2302,131 @@ class Navigator:
             self.game_s = max(expected, reading)
             self._timer_cands.clear()
 
+    def _apply_motion(self, scroll: tuple[float, float] | None, dt: float) -> None:
+        """Update the world from the background shift, or dead-reckon when it is missing.
+
+        ``scroll`` is the content shift in reference pixels. The camera follows
+        the character, so the player moved the other way. A shift that falls
+        far short of the commanded step is a solid obstacle, not a mob.
+        """
+        if dt <= 0.0 or self.current == (0, 0):
+            return
+        if scroll is None:
+            self._advance_world(dt)
+            return
+        dx, dy = -float(scroll[0]), -float(scroll[1])
+        self._world = (self._world[0] + dx, self._world[1] + dy)
+        if self._leash is not None:
+            self._leash_travel += math.hypot(dx, dy)
+        self._watch_stuck(dx, dy, dt)
+
+    def _watch_stuck(self, dx: float, dy: float, dt: float) -> None:
+        """A heading that does not move the background is blocked. Remember it."""
+        t = self.tune
+        if t.obstacle_window_s <= 0 or t.player_speed <= 0:
+            return
+        cmd = self.current
+        if cmd != self._stuck_cmd:
+            self._stuck_cmd = cmd
+            self._stuck_s = 0.0
+        n = math.hypot(cmd[0], cmd[1])
+        if n < 1e-6:
+            return
+        expect = t.player_speed * dt
+        along = (dx * cmd[0] + dy * cmd[1]) / n
+        if along < t.obstacle_ratio * expect:
+            self._stuck_s += dt
+        else:
+            self._stuck_s = 0.0
+            return
+        if self._stuck_s < t.obstacle_window_s:
+            return
+        self._stuck_s = 0.0
+        i = DIRS.index(_nearest_dir(cmd))
+        self._dir_ban[i] = self.game_s + t.obstacle_ban_s
+        self._paint_obstacle(cmd)
+        self._unstick_side = -self._unstick_side
+        self.log(
+            f"[nav] stuck {cmd} at ({self._world[0]:.0f},{self._world[1]:.0f}) "
+            f"game~{self.game_s:.0f}s"
+        )
+
+    def _paint_obstacle(self, cmd: tuple[int, int]) -> None:
+        """One world cell, one step along ``cmd``. Short-lived."""
+        cell = self.tune.obstacle_cell
+        if cell <= 0:
+            return
+        n = math.hypot(cmd[0], cmd[1]) or 1.0
+        x = self._world[0] + cmd[0] / n * cell
+        y = self._world[1] + cmd[1] / n * cell
+        key = (math.floor(x / cell), math.floor(y / cell))
+        self._obs[key] = self.game_s + self.tune.obstacle_ttl_s
+
+    def _expire_obstacles(self) -> None:
+        if not self._obs:
+            return
+        now = self.game_s
+        dead = [k for k, exp in self._obs.items() if exp <= now]
+        for k in dead:
+            del self._obs[k]
+
+    def _dir_blocked(self, d: tuple[int, int]) -> bool:
+        if d not in DIRS:
+            return False
+        if self._dir_ban[DIRS.index(d)] > self.game_s:
+            return True
+        cell = self.tune.obstacle_cell
+        if cell <= 0 or not self._obs:
+            return False
+        n = math.hypot(d[0], d[1]) or 1.0
+        x = self._world[0] + d[0] / n * cell
+        y = self._world[1] + d[1] / n * cell
+        key = (math.floor(x / cell), math.floor(y / cell))
+        here = (math.floor(self._world[0] / cell), math.floor(self._world[1] / cell))
+        if key == here:
+            return False
+        return self._obs.get(key, 0.0) > self.game_s
+
+    def _rotate_dir(self, d: tuple[int, int], side: int) -> tuple[int, int]:
+        """One 90-degree turn. ``side`` picks which way."""
+        x, y = d
+        if side >= 0:
+            return _nearest_dir((-float(y), float(x)))
+        return _nearest_dir((float(y), -float(x)))
+
+    def _route_around(self, choice: tuple[int, int]) -> tuple[int, int]:
+        """Refuse a heading that just failed to move, and the cell in front of it.
+
+        Both perpendiculars are tried, the side alternating each time a heading
+        sticks. A free pack is not an obstacle: only the motion memory is.
+        """
+        self._expire_obstacles()
+        if self.tune.obstacle_window_s <= 0:
+            return choice
+        # Nothing has stuck, and standing still is a legal late-game choice.
+        if not self._obs and not any(ban > self.game_s for ban in self._dir_ban):
+            return choice
+        if choice != (0, 0) and not self._dir_blocked(choice):
+            return choice
+        # Perpendiculars of the heading we are refusing, not of the sidestep
+        # already in progress. Otherwise each free step is treated as the wall
+        # and the body walks back and forth.
+        base = choice if choice in DIRS else self._stuck_cmd
+        order: list[tuple[int, int]] = []
+        if base in DIRS:
+            order.append(self._rotate_dir(base, self._unstick_side))
+            order.append(self._rotate_dir(base, -self._unstick_side))
+        for d in DIRS:
+            if d not in order:
+                order.append(d)
+        for d in order:
+            if not self._dir_blocked(d):
+                if d != choice and d != self._obs_route:
+                    self._obs_route = d
+                    self.log(f"[nav] obstacle {choice} -> {d} game~{self.game_s:.0f}s")
+                return d
+        return choice
+
     def _advance_world(self, dt: float) -> None:
         """Dead-reckon the player from the chord just walked. The camera follows."""
         if dt <= 0.0 or self.current == (0, 0):
@@ -2775,7 +2916,7 @@ class Navigator:
             self.dive = 0.0
             self.last = Decision((0, 0), {}, 0.0, "menu")
             return self.last
-        self._advance_world(dt)
+        self._apply_motion(getattr(result, "scroll", None), dt)
         self._note_critical(hp)
         self._note_xp(result.xp)
         self._since_change += dt
@@ -3053,6 +3194,8 @@ class Navigator:
                         dec.mode = "leash-orbit"
                     elif "escape" in dec.mode or dec.mode == "breakout":
                         dec.mode = "leash-step"
+        choice = self._route_around(choice)
+        dec.vector = choice
         if choice != self.current:
             self._since_change = 0.0
         self.current = choice

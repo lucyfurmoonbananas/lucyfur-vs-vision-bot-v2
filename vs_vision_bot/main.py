@@ -461,6 +461,8 @@ def main(argv: list[str] | None = None) -> int:
                 parked = True
 
             result = vision.analyze(frame)
+            scroller = getattr(vision, "background_scroll", None)
+            result.scroll = scroller(frame) if scroller is not None else None
 
             menu_kind = None
             if auto_menus and not bus.paused:
