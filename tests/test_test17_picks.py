@@ -115,3 +115,72 @@ def test_test17_build_card_beats_a_partner_passive_and_full_hp_armor():
         [("Duplicator", True), ("Candelabrador", True)],
         {"Garlic": 2}, hp=1.0,
     )[0] == "Candelabrador"
+
+
+def test_test18_filler_screens():
+    """test18 on #51 plus the local patch. Same rule as test17.
+
+    A build card beats Clover. Armor at half HP loses to a real weapon when
+    no build card is up. A useful passive beats Duplicator. Weapon-only
+    screens with no build card stay a forced click. Armor at 25% HP may
+    still beat a Garlic level.
+    """
+    def picked(spec, levels, hp=1.0, game_s=100.0):
+        cards = _offer(spec, levels)
+        pick = choose_pick(cards, hp=hp, owned=set(levels), game_s=game_s, levels=dict(levels))
+        return cards[pick.index].name
+
+    # Run 1 at 212s. Spellbinder and Candelabrador were on the screen.
+    # The local partner hook took Clover (Cross was held).
+    assert picked(
+        [("Spellbinder", False), ("Candelabrador", True), ("Clover", True)],
+        {
+            "Garlic": 4, "Cross": 1, "Empty Tome": 1, "King Bible": 1,
+            "Magic Wand": 1, "Pummarola": 1, "Santa Water": 1, "Spellbinder": 2,
+        },
+        hp=1.0, game_s=212,
+    ) == "Spellbinder"
+    # Run 1 at 398s, hp=0.50. Magic Wand level, Clover level, new Duplicator.
+    assert picked(
+        [("Magic Wand", False), ("Clover", False), ("Duplicator", True)],
+        {
+            "Garlic": 7, "Clover": 1, "Cross": 1, "Empty Tome": 1,
+            "King Bible": 1, "Magic Wand": 2, "Pummarola": 1,
+            "Santa Water": 1, "Spellbinder": 3,
+        },
+        hp=0.5, game_s=398,
+    ) == "Clover"
+    # Run 3 at 102s, hp=0.53. No build card. Armor must not beat Fire Wand.
+    assert picked(
+        [("Knife", True), ("Armor", True), ("Fire Wand", True)],
+        {"Garlic": 2, "King Bible": 2, "Clover": 2},
+        hp=0.53, game_s=102,
+    ) == "Fire Wand"
+    # Run 3 at 236s, hp=0.25. Armor may beat the Garlic level.
+    assert picked(
+        [("Garlic", False), ("Armor", False), ("Duplicator", True), ("Knife", True)],
+        {"Garlic": 4, "King Bible": 4, "Armor": 1, "Attractorb": 1},
+        hp=0.25, game_s=236,
+    ) == "Armor"
+    # No build card and no useful passive: the click stays the best weapon.
+    assert picked(
+        [("Knife", True), ("Cross", True), ("Glass Fandango", True), ("Magic Wand", True)],
+        {"Garlic": 1}, hp=1.0, game_s=9,
+    ) == "Magic Wand"
+    assert picked(
+        [("Cross", True), ("Silver Wind", True), ("Whip", True)],
+        {"Garlic": 1, "Magic Wand": 1}, hp=1.0, game_s=24,
+    ) == "Cross"
+    assert picked(
+        [("Phiera Der Tuphello", True), ("Runetracer", True), ("Whip", True)],
+        {"Garlic": 1}, hp=1.0, game_s=7,
+    ) == "Runetracer"
+    assert picked(
+        [("Whip", True), ("Clock Lancet", True), ("Eight The Sparrow", True)],
+        {"Garlic": 1, "Runetracer": 1}, hp=1.0, game_s=19,
+    ) == "Clock Lancet"
+    assert picked(
+        [("Runetracer", False), ("Clock Lancet", False), ("Fire Wand", True)],
+        {"Garlic": 7, "Clock Lancet": 1, "King Bible": 3, "Runetracer": 1, "Santa Water": 3},
+        hp=1.0, game_s=269,
+    ) == "Runetracer"
