@@ -395,6 +395,31 @@ def test_hp_crash_uses_request_flee_duration():
     assert nav._flee_remaining <= expected
 
 
+def test_hp_crash_flee_ends_once_hp_is_back_above_quarter():
+    """test17 critical escapes kept running after the bar had recovered.
+
+    A blind read is handed to the navigator as 0.00, so that stretch still
+    holds the flee. The first frame above 25% drops it and returns to farm.
+    """
+    clock = Clock()
+    nav = Navigator(clock=clock)
+    sparse = result(blob(700, 256, n=6, spread=16))
+    run(nav, clock, sparse, 4, hp=1.0)
+    run(nav, clock, sparse, 2, hp=0.0)
+    assert nav._flee_remaining > 1.0
+    assert nav.breakout is not None
+    # Still acting on a blind 0.00. The timer must not expire just because
+    # a couple of frames passed.
+    run(nav, clock, sparse, 4, hp=0.0)
+    assert nav._flee_remaining > 0.5
+    assert nav.breakout is not None
+    run(nav, clock, sparse, 4, hp=0.40)
+    assert nav._flee_remaining == 0.0
+    assert nav.breakout is None
+    assert nav.last is not None and nav.last.mode.startswith("farm")
+    assert nav._critical_on is False
+
+
 def test_flower_phase_lowers_cover_trigger():
     """Around game_s 280–360 a partial ring should break out sooner than early-game."""
     clock = Clock()
