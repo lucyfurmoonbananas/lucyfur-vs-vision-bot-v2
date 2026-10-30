@@ -77,6 +77,46 @@ def test_touching_ring_breaks_out_above_quarter_hp():
     assert held.breakouts == 0 and not held.escaping
 
 
+def test_test16_closed_ring_before_two_minutes_breaks_out():
+    """test16, ~1:12: cover 0.75 and danger ~2, still farming, then HP crashed.
+
+    Bodies outside 42px never armed the touch ring. Before 2:00 that closed
+    ring leaves. The same ring during the skeleton window is still farmed, and
+    a 160px ring before 2:00 is still dived.
+    """
+    from vs_vision_bot.pathfind import TOUCH_MASS, _danger_at, _threat_mass
+
+    close = np.array(ring(P[0], P[1], 70, 20), np.float32)
+    assert _threat_mass(close, P[0], P[1], 42.0) < TOUCH_MASS
+    danger = float(_danger_at(close, np.array([P[0]]), np.array([P[1]]), Tuning().radius)[0])
+    assert danger >= 4.0
+
+    nav = Navigator(clock=Clock(), log=lambda *_: None)
+    nav.game_s = 80.0
+    run(nav, nav.clock, result(close), 6, hp=1.0)
+    assert nav.breakouts > 0 or nav.escaping
+    assert "farm" not in nav.last.mode
+
+    # Already near the kite line: the same ring is still farmed. The 16:19
+    # test locks that for hp 0.45 before 10:00.
+    low = Navigator(clock=Clock(), log=lambda *_: None)
+    low.game_s = 80.0
+    run(low, low.clock, result(close), 6, hp=0.45)
+    assert low.breakouts == 0 and not low.escaping
+
+    skel = Navigator(clock=Clock(), log=lambda *_: None)
+    skel.game_s = 180.0
+    run(skel, skel.clock, result(close), 6, hp=1.0)
+    assert skel.breakouts == 0 and not skel.escaping
+    assert "farm" in skel.last.mode
+
+    far = np.array(ring(P[0], P[1], 160, 24), np.float32)
+    held = Navigator(clock=Clock(), log=lambda *_: None)
+    held.game_s = 80.0
+    run(held, held.clock, result(far), 4, hp=1.0)
+    assert held.breakouts == 0 and not held.escaping
+
+
 def test_nav_above_quarter_dives_the_pack_and_skips_the_ring():
     """A closed ring with an east gap is a breakout today. Above 25% it is a farm."""
     clock = Clock()

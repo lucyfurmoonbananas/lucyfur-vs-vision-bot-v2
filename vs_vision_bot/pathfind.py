@@ -524,6 +524,12 @@ OUTLINE_MASS = 1.25
 # surround: danger jumps and the farm does not walk further in.
 TOUCH_REACH = 42.0
 TOUCH_MASS = 1.25
+# test16, about 1:12: farm mode, cover 0.75, danger ~2, bodies outside 42px,
+# then HP fell through 0.25. Before the 2:00 skeleton window that closed ring
+# breaks out. A 160px ring stays under this danger and is still dived.
+EARLY_RING_BEFORE_S = 120.0
+EARLY_RING_COVER = 0.70
+EARLY_RING_DANGER = 4.0
 # test14 run 3, 16:19: farm mode at hp 0.36-0.50, danger 4-6, cover 0.69-0.94,
 # bodies outside the 42px ring. Then danger hit 17 and HP fell to 0.14 in 2s.
 # After 10:00 a closed ring whose kernel is already this hot breaks out. A
@@ -1877,6 +1883,24 @@ class Navigator:
         self.cover = cover
         touch = _threat_mass(pts, px, py, TOUCH_REACH)
         ringed = cover >= t.cover_trigger and touch >= TOUCH_MASS
+        # Before 2:00 the touch ring misses a closed crowd whose bodies sit
+        # just outside 42px. test16 Run 2 at 72s was still farming at cover
+        # 0.75, then HP fell through 0.25. The kernel has to already be hot
+        # (the same 4.0 bar as the late crowd rule) so a mild pack is dived.
+        # The skeleton window is unchanged.
+        if (
+            not ringed
+            and self.game_s < EARLY_RING_BEFORE_S
+            and hp is not None
+            and hp > 0.5
+            and cover >= EARLY_RING_COVER
+            and pts.shape[0] > 0
+        ):
+            early_danger = float(
+                _danger_at(pts, np.array([px]), np.array([py]), t.radius)[0]
+            )
+            if early_danger >= EARLY_RING_DANGER:
+                ringed = True
         # The 42px mass missed the 16:19 ring: cover was already closed and the
         # kernel was 4-6, then 17. A far ring stays under CROWD_BREAK_DANGER.
         crowd = False
