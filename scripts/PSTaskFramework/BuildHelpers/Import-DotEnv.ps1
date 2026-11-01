@@ -340,12 +340,12 @@ function Import-DotEnv {
 
             # Load as environment variables...
             $fqName = "env:$name"
-            if ($NoClobber -and ($var = Get-Item -LiteralPath $fqName -ErrorAction Ignore)) {
-                Write-Verbose "Environment variable '$name' already exists ($($var.Value)). Skipping it."
+            if ($NoClobber -and (Test-Path -LiteralPath $fqName)) {
+                Write-Verbose "Environment variable '$name' already exists. Skipping it."
                 return
             }
             if (Set-Item -LiteralPath $fqName -Value $value -Force:(!$NoClobber) -PassThru) {
-                Write-Verbose "Loaded Environment Variable: `$$fqName = '$value'"
+                Write-Verbose "Loaded Environment Variable: `$$fqName"
             }
         }
     }
