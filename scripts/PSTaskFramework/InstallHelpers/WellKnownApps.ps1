@@ -128,5 +128,5 @@ function installNvsLinuxAndMacos {
     $env:NVS_HOME = $appInfo.data.NvsHome ?? $env:NVS_HOME ?? "$env:HOME/.nvs"
     Invoke-Shell -- git clone https://github.com/jasongin/nvs $env:NVS_HOME
     Invoke-Shell -- "$env:NVS_HOME/nvs.sh" install
-    $env:PATH = "$env:NVS_HOME:$env:PATH"
+    $env:PATH = "${env:NVS_HOME}:$env:PATH"
 }
