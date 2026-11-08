@@ -52,7 +52,7 @@ function installWithPackageManager {
         if ($method -is [string] -and $method) {
             $packageIds += $method
         }
-        elseif ($method -is [string[]]) {
+        elseif ($method -is [array]) {
             Write-Verbose "Using $PackageManagerName with custom args to install '$appName'."
             & $Execute -- @method
         }
