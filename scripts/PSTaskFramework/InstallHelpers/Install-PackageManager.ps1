@@ -233,7 +233,7 @@ function Install-PackageManager {
 
     if (!$installed.Count -and $PackageManager -contains 'any') {
         # just the ones not already tried...
-        $otherSupportedPMs = Get-PackageManager -AllSupported | Where-Object { $_ -notin $PackageManager }
+        $otherSupportedPMs = Get-PackageManager -AllSupported | Where-Object { $_ -notlike 'brew:*' -and $_ -notin $PackageManager }
         foreach ($pm in $otherSupportedPMs) {
             try {
                 install $pm
