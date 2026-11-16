@@ -134,7 +134,7 @@ function Invoke-Task {
     }
 
     $taskCommandArgs = @()
-    if ($TaskArgs) {
+    if ($TaskArgs.Count) {
         Import-Module PSArgs -Verbose:$false
         $taskCommandArgs = ConvertTo-CommandArg $TaskArgs
         Write-Verbose "Invoking task '$TaskName' with arguments: $taskCommandArgs"
