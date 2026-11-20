@@ -46,7 +46,7 @@ function ConvertTo-PSString {
             if ($UseQuotes -OR $InputObject.IndexOfAny('''"` $(){},;&|') -ge 0) {
                 return "'" + $InputObject.Replace("'", "''") + "'"
             }
-            return $InputObject
+            return $InputObject ? $InputObject : "''"
         }
 
         if ($InputObject -is [bool] -OR $InputObject -is [switch]) { return '$' + $InputObject.ToString() }
