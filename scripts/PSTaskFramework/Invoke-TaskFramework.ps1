@@ -101,7 +101,7 @@ function Invoke-TaskFramework {
 
     $isInvokeTaskError = $false
     trap {
-        if ($global:LASTEXITCODE -eq 0) { $global:LASTEXITCODE = -1 }
+        if (!$global:LASTEXITCODE) { $global:LASTEXITCODE = -1 }
         $TaskContext.ExitCode = $global:LASTEXITCODE
         $TaskContext.Error = $_
         Write-Verbose "Error executing task(s):`n$(($_ | Format-List -Force | Out-String).Trim())"
