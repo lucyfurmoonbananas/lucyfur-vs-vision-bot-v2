@@ -141,7 +141,7 @@ function parseDotEnvLine {
             $value = $value -replace '\$\$|\${(?<var>[^:}\n]+)(:-(?<default>[^}\n]*))?}|\$(?<var>\w+)', {
                 if ($_.Groups['var'].Success) {
                     $var = $_.Groups['var'].Value
-                    if ($InterpolationVariables -and $InterpolationVariables.ContainsKey($var)) {
+                    if ($InterpolationVariables -and $InterpolationVariables.ContainsKey($var) -and ("$($InterpolationVariables[$var])" -or !$_.Groups['default'].Success)) {
                         return $InterpolationVariables[$var]
                     }
                     if ($_.Groups['default'].Success) {
