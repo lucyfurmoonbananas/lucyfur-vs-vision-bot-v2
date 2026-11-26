@@ -102,6 +102,10 @@ function Get-TaskFrameworkHelp {
             No additional help is available for this task.
         #>
         param()"))
+    if (!$taskAction.Ast.GetHelpContent()) {
+        # Without comment-based help, Get-Help returns syntax-only help that drops the task description.
+        $taskAction = [scriptblock]::Create("<#`n.SYNOPSIS`n#>`n$taskAction")
+    }
 
     # Use the taskAction to generate a temporary function that we can call Get-Help on to generate the
     # help info. We use a unique name to aid in regex replacements later.
